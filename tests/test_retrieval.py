@@ -2,7 +2,7 @@
 import json
 import math
 
-from app.retrieval import citation, document, hybrid_search, index_jobs, tokens
+from app.retrieval import citation, document, hybrid_search, index_jobs, tokens, normalize_query
 from app.store import Store
 
 
@@ -49,7 +49,8 @@ def test_semantic_top_three_are_selected_before_keyword_reranking(tmp_path):
 
     # Fourth item would outrank some results after keyword weighting, but must
     # remain excluded because semantic candidate generation happens first.
-    assert [job['id'] for job, _ in found] == [jobs[1]['id'], jobs[0]['id'], jobs[2]['id']]
+    # The third candidate is pruned as substantially weaker after reranking.
+    assert [job['id'] for job, _ in found] == [jobs[1]['id'], jobs[0]['id']]
     assert found[0][1]['semantic_score'] == .85
     assert found[0][1]['keyword_score'] == 1.0
     assert found[0][1]['score'] == .8875
@@ -163,3 +164,32 @@ def test_explicit_grill_evidence_survives_semantic_cutoff(tmp_path):
     # Whole-token match does not turn into substring or partial-query matching.
     assert hybrid_search(store,embedder,'grilled')==[]
     assert hybrid_search(store,embedder,'dog grill')==[]
+
+
+def test_conversational_wrapper_and_plural_tokens():
+    assert normalize_query('I want to see a construction worker in action') == 'a construction worker'
+    assert normalize_query('Can you show me workers sorting cocoons?') == 'workers sorting cocoons?'
+    assert tokens('pillows') == tokens('pillow')
+    assert tokens('grilled') != tokens('grill')
+
+
+def test_joint_evidence_accepts_strong_frame_with_borderline_video(tmp_path):
+    store = Store(str(tmp_path / 'joint.db'))
+    job = completed_job(store, 'A worker mixes building material', 'mixing')
+    vector = lambda score: [score, math.sqrt(1-score**2)]
+    embedder = FakeEmbedder({document(job): vector(.59),
+                            'A worker mixes building material': vector(.68),
+                            'An empty room': vector(.2)})
+    found = hybrid_search(store, embedder, 'construction worker')
+    assert [item[0]['id'] for item in found] == [job['id']]
+    assert found[0][1]['citation']['frame_index'] == 1
+
+
+def test_high_video_score_cannot_rescue_unsupported_frame(tmp_path):
+    store = Store(str(tmp_path / 'unsupported.db'))
+    job = completed_job(store, 'A worker mixes material', 'mixing')
+    vector = lambda score: [score, math.sqrt(1-score**2)]
+    embedder = FakeEmbedder({document(job): vector(.9),
+                            'A worker mixes material': vector(.4),
+                            'An empty room': vector(.2)})
+    assert hybrid_search(store, embedder, 'construction') == []

@@ -9,6 +9,7 @@ from botocore.exceptions import ClientError
 from app.cloud import CLOUD_ERRORS, Cloud
 from app.config import Settings
 from app.store import Store
+from app.storage import get_store
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -19,7 +20,7 @@ def settings_dependency():
 
 
 def store_dependency(settings: Settings = Depends(settings_dependency)):
-    return Store(settings.database_path)
+    return get_store(settings)
 
 
 def cloud_dependency(settings: Settings = Depends(settings_dependency)):
@@ -32,7 +33,7 @@ def cloud_dependency(settings: Settings = Depends(settings_dependency)):
 
 
 def read_cloud_dependency(settings: Settings = Depends(settings_dependency)):
-    if not settings.aws_usage_enabled or not settings.s3_bucket or not settings.sqs_queue_url:
+    if not settings.aws_usage_enabled or not settings.s3_bucket:
         return None
     try:
         return Cloud(settings)

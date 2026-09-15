@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/config-schema.json",
+  "name": "irl-assessment",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-15",
+  "account_id": "0187f7c38bf35a8abcc4e9f9abfa213e",
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "irl.haciensus.com",
+      "custom_domain": true
+    }
+  ],
+  "observability": {
+    "enabled": false
+  },
+  "vars": {
+    "API_ORIGIN": "http://ec2-65-2-131-106.ap-south-1.compute.amazonaws.com:8000"
+  }
+}

@@ -33,6 +33,8 @@ packaging==26.3
 pillow==12.3.0
 pluggy==1.6.0
 protobuf==7.36.1
+psycopg==3.3.5
+psycopg-binary==3.3.5
 py_rust_stemmers==0.1.8
 pyasn1==0.6.4
 pyasn1_modules==0.4.2

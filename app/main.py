@@ -11,6 +11,7 @@ from app.providers import create_tagger
 from app.tagger import GeminiTagger, PROMPT_VERSION, Tagger, TaggerError
 from app.jobs_api import router
 from app.search_api import router as search_router
+from app.query_api import router as query_router
 
 app = FastAPI(title='IRL — Instawork Robotics Lab', version='0.2.0')
 
@@ -78,3 +79,4 @@ def tag_video(
 
 app.include_router(router)
 app.include_router(search_router)
+app.include_router(query_router)

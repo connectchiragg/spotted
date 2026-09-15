@@ -6,11 +6,18 @@ from functools import lru_cache
 
 from app.config import Settings
 
-STOPWORDS = set('a an the and or of in on at to for is are was were with me show find video videos someone person people doing'.split())
+STOPWORDS = set('a an the and or of in on at to for is are was were with me show find video videos someone person people doing up'.split())
+
+
+def normalize_query(text):
+    # Remove conversational wrappers, retaining the requested activity/entities.
+    text = re.sub(r'^\s*(?:please\s+)?(?:i (?:want|would like) to (?:see|find)|(?:can|could) you (?:show|find)(?: me)?|show me|find me)\s+', '', text, flags=re.I)
+    return re.sub(r'\s+in action[.!?]*\s*$', '', text, flags=re.I).strip()
 
 
 def tokens(text):
-    return set(re.findall(r'\w+', text.lower())) - STOPWORDS
+    words = set(re.findall(r'\w+', text.lower())) - STOPWORDS
+    return {word[:-1] if len(word) > 3 and word.endswith('s') and not word.endswith(('ss', 'us', 'is')) else word for word in words}
 
 
 def full_keyword_match(query_tokens, text):
@@ -93,14 +100,14 @@ def index_frames(store, embedder, jobs):
     return existing
 
 
-def frame_citation(job, query_vector, query_tokens, vectors):
+def frame_citation(job, query_vector, query_tokens, vectors, scores=None):
     timestamps = job['result'].get('sampled_timestamps', [])
     candidates = []
     for frame in job['result'].get('frame_descriptions', []):
         index = frame['frame_index']
         if not 0 <= index < len(timestamps):
             continue
-        semantic = cosine(query_vector, vectors[(job['id'],index)]['vector'])
+        semantic = scores[(job['id'],index)] if scores is not None else cosine(query_vector, vectors[(job['id'],index)]['vector'])
         lexical = len(tokens(frame['description']) & query_tokens) / max(1,len(query_tokens))
         candidates.append((.85*semantic+.15*lexical,semantic,index,frame['description']))
     if not candidates:
@@ -132,24 +139,36 @@ def hybrid_search(store, embedder, query, min_similarity=0.60):
         return []
     vectors = index_jobs(store, embedder, jobs)
     frame_vectors = index_frames(store, embedder, jobs)
+    query = normalize_query(query)
     query_vector = embedder.query(query)
+    video_scores = store.cosine_scores(embedder.model,query_vector) if hasattr(store,'cosine_scores') else None
+    frame_scores = store.frame_cosine_scores(embedder.model,query_vector) if hasattr(store,'frame_cosine_scores') else None
     query_tokens = tokens(query)
     candidates = []
     for job in jobs:
-        semantic = max(0.0, min(1.0, cosine(query_vector, vectors[job['id']]['vector'])))
+        semantic = max(0.0, min(1.0, video_scores[job['id']] if video_scores is not None else cosine(query_vector, vectors[job['id']]['vector'])))
         tag_text = ' '.join(tag['label'] for tag in job['result']['tags'])
-        if semantic < min_similarity and not full_keyword_match(query_tokens,tag_text):
-            continue
         lexical = len(query_tokens & tokens(document(job))) / max(1, len(query_tokens))
-        evidence, frame_score = frame_citation(job,query_vector,query_tokens,frame_vectors)
-        # Results without a relevant sampled moment cannot support click-to-play.
-        if evidence is None or (frame_score < min_similarity and
-                               not full_keyword_match(query_tokens,evidence['description'])):
+        evidence, frame_score = frame_citation(job,query_vector,query_tokens,frame_vectors,frame_scores)
+        if evidence is None:
+            continue
+        # A strong sampled moment can support a broad video description and
+        # vice versa; neither weak signal may be rescued by the other alone.
+        joint = (semantic + frame_score) / 2
+        supported = (joint >= min_similarity and
+                     min(semantic, frame_score) >= max(0.0, min_similarity - .10))
+        explicit = (full_keyword_match(query_tokens, tag_text) and
+                    full_keyword_match(query_tokens, evidence['description']))
+        if not (supported or explicit):
             continue
         candidates.append((job, semantic, lexical, evidence, frame_score))
     # Start with the three nearest embeddings, then rerank with lexical coverage.
     nearest = sorted(candidates, key=lambda item:(item[1],item[0]['id']), reverse=True)[:3]
     ranked = sorted(nearest, key=lambda item:(0.75*item[1]+0.25*item[2],item[0]['id']), reverse=True)
+    # Do not pad top-three results with substantially weaker candidates.
+    if ranked:
+        best = .75*ranked[0][1] + .25*ranked[0][2]
+        ranked = [item for item in ranked if .75*item[1]+.25*item[2] >= .8*best]
     return [(job, {'score':round(.75*semantic+.25*lexical,4),
                    'semantic_score':round(semantic,4),'keyword_score':round(lexical,4),
                    'frame_score':round(frame_score,4),'citation':evidence})

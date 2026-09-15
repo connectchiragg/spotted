@@ -1,322 +1,172 @@
 # IRL — Instawork Robotics Lab
 
-Local API and worker services with private AWS S3 storage, an SQS queue, SQLite
-request history, and Gemini image tagging. The browser UI shows upload progress,
-processing state, video previews, summaries and tags. Exact OR tag search is
-available through the API; the UI supports natural-language retrieval.
+A local-first video discovery prototype: upload originals directly to private S3,
+track processing, ask natural-language questions and play supporting moments.
+Python/FastAPI + Uvicorn serve the API, a separate Python worker processes videos,
+and PostgreSQL stores requests, the durable work queue and pgvector embeddings.
+The UI is plain HTML/CSS/JavaScript with a main query conversation and request sidebar.
 
 ## Run locally
 
-Requires Python 3.11+ and FFmpeg/ffprobe on PATH (on macOS: `brew install ffmpeg`).
+Requires Python 3.11+, FFmpeg/ffprobe, PostgreSQL 17 and pgvector.
+The assessment was tested on Python 3.14.3, PostgreSQL 17.11 and pgvector 0.8.6.
 
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 cp .env.example .env
-# Set GEMINI_API_KEY and an available GEMINI_MODEL in .env.
-# Configure a valid default AWS profile and verify free-plan eligibility/allowance.
-# Only then set AWS_USAGE_ENABLED=true in .env and provision:
-.venv/bin/python scripts/provision_aws.py
-# Download the local embedding model once and index completed videos:
+# Set GEMINI_API_KEY, S3_BUCKET and a valid AWS profile.
+# Verify the AWS free plan before setting AWS_USAGE_ENABLED=true.
+./scripts/start_postgres.sh
+# DATABASE_URL=postgresql://YOUR_LOCAL_USER@127.0.0.1:54329/irl
 .venv/bin/python scripts/prepare_embeddings.py
-.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
-In a second terminal, run the worker from the same project directory:
+In another terminal:
 
 ```sh
 .venv/bin/python -m app.worker
 ```
 
-Open http://127.0.0.1:8000/ for the UI or http://127.0.0.1:8000/docs for API docs.
+Open http://127.0.0.1:8000/ or API docs at http://127.0.0.1:8000/docs.
+The start script keeps an isolated database cluster in ignored data/postgres;
+`./scripts/start_postgres.sh stop` stops it. It does not modify other databases.
+The PostgreSQL runtime must be installed separately; see the script's PG_BIN setting.
+
+Existing SQLite assessment records can be migrated once, preserving IDs, results,
+vectors and frame descriptions. Stop API/worker writes first:
 
 ```sh
-curl --fail-with-body -X POST http://127.0.0.1:8000/videos \
-  -F 'file=@/Users/omen/Downloads/assignment_videos/1.mp4'
-curl http://127.0.0.1:8000/videos
-curl http://127.0.0.1:8000/videos/REQUEST_ID
+.venv/bin/python scripts/migrate_postgres.py --source data/instawork.db \
+  --dsn postgresql://YOUR_LOCAL_USER@127.0.0.1:54329/irl
 ```
 
-`POST /videos` waits for S3 storage, then returns HTTP 202 with the request ID,
-status and private presigned preview/download URL. Analysis runs in the worker.
-`GET /videos` supports bounded `limit`/`offset` pagination and returns all states.
-`GET /videos/{id}` returns current state and the result when complete.
-For exact OR tag search, repeat the `tags` query parameter:
+The source database is retained. Without DATABASE_URL the legacy SQLite/SQS
+backend remains available for compatibility; the running assessment uses PostgreSQL.
 
-```sh
-curl 'http://127.0.0.1:8000/videos?tags=kitchen&tags=bedroom&limit=20&offset=0'
-```
+## Upload and processing
 
-Only completed requests matching **any** requested tag are returned, once each.
-Search ignores case, trims/collapses whitespace, and does not match substrings,
-synonyms or summary text. Empty labels, labels longer than 80 characters, and
-more than 20 query tags return 422. No tags means unfiltered request history.
-Filtering is parameterized SQL and happens before pagination. This first draft
-uses SQLite JSON tag arrays; a dedicated indexed tag table is the next scaling
-step. Search does not call AWS or Gemini; presigned URLs are computed locally.
-The UI polls every three seconds and shows the latest 50 requests.
+1. UI sends filename/type/byte size to `POST /videos/uploads`.
+2. API creates an uploading record and returns a ten-minute signed S3 PUT.
+3. Browser sends its File directly to S3 with progress reporting.
+4. UI calls `POST /videos/{id}/complete`; API verifies actual size/type.
+5. PostgreSQL atomically marks pending and enqueues the request ID.
+6. Worker leases a queue row using `FOR UPDATE SKIP LOCKED`, then atomically
+   claims the request. It downloads the original to temporary disk.
+7. FFmpeg extracts up to eight JPEGs at evenly spaced timestamps, fit within 768px.
+8. Gemini returns tags, summary and a factual description for each sampled frame.
+9. Worker saves completed results before acknowledging the leased queue message;
+   local BGE embeddings are persisted in pgvector columns.
 
-Each read generates a URL requesting 86,400-second validity. A URL signed with
-shorter-lived temporary AWS credentials expires when those credentials expire;
-reopening status/history gets a fresh link. Failed decoding requests retain their
-S3 object and preview link. An S3 upload failure has no video link.
+The signed PUT binds size, content type, AES256 encryption and `If-None-Match: *`
+to prevent overwrites. AWS credentials are never sent to the browser. S3 CORS
+permits localhost:8000 and the approved `https://irl.haciensus.com` origin.
+Repeated completion is idempotent. Failed confirmation can be retried in the UI
+without reupload. Media decoding checks actual content rather than filename.
 
-### Data flow and recovery
+Requests expose uploading, pending, processing, completed or failed state.
+Transient provider 500/502/503/504 failures use a maximum-three-attempt policy.
+Claim tokens prevent stale workers overwriting a newer result. Retry queue
+rescheduling invalidates the old receipt, so an old acknowledgement cannot remove
+new work. A crash after inference before commit can still repeat an inference call.
 
-1. UI sends filename, content type and byte size to `POST /videos/uploads`. The
-   API creates an `uploading` record and returns a short-lived signed PUT URL.
-2. Browser streams the File directly to S3, then calls `POST /videos/{id}/complete`.
-   The API verifies S3 size/type, atomically marks it `pending` and queues its ID.
-3. Unpublished pending rows act as a durable outbox. The worker republishes them
-   if the API crashes or SQS send fails. Duplicate sends are safe.
-4. Worker atomically claims the request as `processing`, with a lease/token.
-5. Worker downloads the video, extracts up to eight JPEGs, calls Gemini and
-   commits `completed` with tags, timestamps and model information.
-6. Worker acknowledges SQS only after persisting the outcome. Completed/failed
-   redeliveries are acknowledged without calling Gemini again.
-7. Transient AWS/Gemini quota/timeouts retry up to three claims. Invalid videos
-   and nontransient errors become `failed`. Expired claims can be reclaimed;
-   stale workers cannot overwrite a newer claim's result. Interrupted uploads
-   become failed after 15 minutes while the worker is running.
+Original videos remain in S3. No whole-video transcoding is performed. Temporary
+worker files are removed. An abandoned upload can leave an orphaned S3 object;
+lifecycle cleanup remains production work. SQS is no longer polled when DATABASE_URL
+is configured; existing legacy AWS resources are not automatically deleted.
 
-SQLite uses WAL and short transactions; API and worker must use the same local
-`DATABASE_PATH`. SQS visibility and the DB lease default to ten minutes and grow
-with configured processing bounds. A crashed worker can therefore delay retry
-until visibility expires. This is at-least-once processing, not exactly-once
-inference: a crash after inference but before commit can repeat the API call.
+## Query, evidence and history
 
-Only extracted images are sent to Gemini. No audio is analyzed. Worker temporary
-files are removed; originals persist in S3 and metadata/results persist in SQLite.
-`frame_indices` are zero-based references to the result's `sampled_timestamps`.
+- `GET /videos?limit=50&offset=0`: request history; `GET /videos/{id}`: saved details.
+- `GET /search?q=...`: local natural-language retrieval, without a generation call.
+- `POST /query` with `{ "q": "show me someone cleaning a grill" }`: retrieval
+  followed by a grounded Gemini answer citing numbered result cards.
+- Queries are independent: each submission replaces the previous answer/results.
+  Conversation context and CI/CD were explicitly deferred.
+- `GET /videos/{id}/frames/{index}`: cached JPEG citation extracted from the original.
+- Legacy exact OR API: `GET /videos?tags=kitchen&tags=bedroom`.
+- Legacy server-mediated `POST /videos` and diagnostic `POST /videos/tag` remain.
 
-The original synchronous `POST /videos/tag` remains available for diagnosis. It
-returns tags immediately and does not add to history or retain uploaded media.
+Video tags/summary and each sampled-frame description are embedded locally using
+BAAI/bge-small-en-v1.5 via FastEmbed (384 dimensions). Model assets download once;
+embedding inference is offline. Model identifiers and content hashes control
+reindexing. PostgreSQL stores vectors and computes cosine similarity; current
+retrieval still scans candidates rather than using an approximate nearest-neighbour
+index. It is not yet a production-scale vector query.
 
-## Model switching
+Search combines semantic relevance with keyword evidence and returns up to three
+qualifying videos. No relevant matches returns an empty list. Thresholds/weights
+are heuristics, not calibrated confidence. Gemini answers use only retrieved
+metadata; invalid citations or provider failure preserve matches with a clear
+fallback message. No context-resolution calls are made. Summaries
+and captions can still be wrong; valid JSON does not establish visual truth.
 
-Change `GEMINI_MODEL` in `.env` and restart. A different provider implements
-`Tagger.tag_frames` and is wired through `get_tagger`; the upload, media extraction
-and response contracts do not depend on Google's SDK. Prompt version is recorded
-in each response. No automatic provider/model fallback hides a failed request.
+Play buttons render video inside the result card at the supporting timestamp.
+Request details and polling remain independent. A manual Refresh button updates
+history without clearing the conversation. Saved request details contain the
+summary, tags and original-video preview.
 
-## Sampling and limits
+## Limits and compatibility
 
-- Default: up to 8 frames, distributed over the full video using bin centers.
-- Short videos target approximately one frame per five seconds.
-- Images fit within 768 by 768 pixels, preserving aspect ratio.
-- Default upload limit: 100 MB; duration limit: 10 minutes.
-- ffprobe timeout: 15 seconds; each extracted frame: 10 seconds.
-- Gemini timeout: 90 seconds; one attempt, with useful quota/timeout errors.
-- Tags are normalized and deduplicated; evidence indices are validated.
+- Upload: 100 MB; duration: 10 minutes; up to 8 sampled frames by default.
+- ffprobe: 15 seconds; each extracted frame: 10 seconds; Gemini tagging: 90 seconds.
+- Query answer generation: 20 seconds.
+- Browser upload: 120 seconds; uncompleted request expires after 15 minutes.
+- Presigned preview URLs request one-day validity; temporary AWS credentials can
+  expire sooner. Refreshing a request obtains a new link.
+- Tested containers/codecs: MP4/H264, MOV/H264, MKV/MPEG4, AVI/MPEG4 and WebM/VP8.
+  Browser playback support is separate from ingestion; unsupported previews offer
+  the original file. Browser MIME values outside video/* use application/octet-stream.
+- Sparse sampling can miss brief actions. Eight frames are not full video coverage.
+- Source-resolution and hard worker memory limits are not implemented. Original
+  bytes stay on disk, but FFmpeg decoding, frames, SDK buffers and embedding models
+  still consume RAM. Extra worker processes generally duplicate model memory.
 
-These are sparse samples, so brief events can be missed. Evidence indices and
-well-formed JSON do not establish semantic correctness. Review against the
-sample-video reference tags before claiming accuracy.
+## Model choice
 
-## Tests
+Gemini remains the selected default. `TAGGING_PROVIDER=local_clip` enables the
+experimental offline CLIP adapter after `scripts/prepare_image_model.py` downloads
+its matching vision/text encoders. There is no silent fallback. Both adapters
+implement the same Tagger contract and record model/prompt version.
+
+CLIP sampled-image inference on four videos took 1.24/.71/.71/.70 seconds, excluding
+FFmpeg, with 1.93s initialization. It produced false cooking/brush tags and missed
+workshop labels. These observed errors make it unsuitable as the current default.
+A larger local VLM was not verified within the requested evaluation window.
+
+## Verification
 
 ```sh
 .venv/bin/python -m pytest -q
+TEST_POSTGRES_DSN=postgresql://YOUR_LOCAL_USER@127.0.0.1:54329/irl \
+  .venv/bin/python -m pytest -q
 ```
 
-Tests execute real FFmpeg extraction on a generated clip and replace Gemini with
-a test adapter. They cover upload validation, missing credentials, size limits,
-provider failure, evidence validation, normalization, cleanup and API docs.
-Queued-flow tests use test substitutes for S3, SQS and Gemini, but execute real
-FFmpeg. They verify persisted results, status/history, duplicate delivery,
-concurrent/stale claims, retry exhaustion, failed S3 upload, and outbox recovery.
-They do not establish real AWS access or Gemini accuracy.
+89 tests passed including four isolated-schema PostgreSQL integration tests. Tests cover real FFmpeg formats, validation, signed
+upload constraints, queue races, retries, stale claims, migration, pgvector scores,
+retrieval and grounded-answer validation. Model/AWS unit tests use substitutes.
 
-### Executed verification (September 15, 2026)
+Separately observed live: all four original videos tagged; direct browser S3 upload
+with local CORS; no-overwrite rejection; preview/range loading; inline timestamp
+playback; PostgreSQL migration; grounded Gemini answer with a grill citation.
+A transient provider failure and several retrieval quality errors were found and
+recorded rather than reported as perfect accuracy. See docs/defence.md.
 
-- 72 automated tests passed on Python 3.14.3, including local retrieval, frame descriptions, relevance rejection and regional URL signing.
-- Live query `tidy up pillow` returned only video 1 at 9.298s. The extracted frame was visually inspected and shows pillow handling; dog, cooking and cement queries returned no results across the two indexed videos.
-- Live natural search returned HTTP 200; bedding ranked video 1 first and cocoons ranked video 2 first. Both frame citations returned JPEGs (200), both video previews returned ranged MP4 responses (206), and blank natural queries returned 422.
-- All four supplied MP4s passed through the original synchronous upload endpoint with actual FFmpeg
-  and Gemini 3.6 Flash inference at eight sampled frames each:
-  1.mp4: 16.44s; 2.mp4: 19.71s; 3.mp4: 12.65s; 4.mp4: 14.87s.
-- These were in-process HTTP endpoint tests using FastAPI TestClient with real
-  inference. The running localhost server also passed health and invalid-upload
-  HTTP checks. Saved responses are local under ignored `artifacts/`.
-- Earlier provider requests timed out, including a 16-frame request. These
-  successful measurements are observations, not a latency or availability SLA.
-- Main scene/activity tags match the independent candidate reference. Specialist
-  material labels and precise evidence indices require further human review.
-- Concrete review finding: video 3's `washing hands` tag cites frame 0 (16.715s),
-  which shows sponge handling. Handwashing occurs later in the video, but the
-  cited evidence is wrong. Index bounds validation cannot establish visual truth.
+## Demo hosting and cleanup
 
-## Current scope and limits
+Deployment scripts under deploy/ and scripts/deploy_demo.sh prepare separate
+systemd API/worker services on a temporary Ubuntu EC2 host, with PostgreSQL private
+to that host. Cloudflare Worker/static configuration is under deploy/cloudflare.
+No Docker is required. The public demo intentionally has no user login, as requested;
+production requires authentication, quotas, rate limits and ownership checks.
 
-No authentication or cloud deployment is included yet. Bind the API to
-localhost. Multipart parsing spools uploads before the endpoint's size check;
-public hosting needs request-body and concurrency limits at the server boundary.
-SQLite and local polling suit one machine, not separately deployed replicas.
-For production: a shared database, transactional outbox publisher, worker
-heartbeats, queue dead-letter policy, authenticated access, lifecycle retention,
-metrics/cost controls and model-quality evaluation. S3 and SQLite changes are
-not atomic; interrupted uploads can leave an object requiring reconciliation.
-AWS resources persist until explicitly removed; the provisioning script creates
-only assessment-named resources in ap-south-1 with encryption and public access
-blocked. It writes resource names into the ignored .env, never credentials.
+scripts/provision_demo.py defaults to a dry run and refuses provisioning unless
+AWS reports an active FREE plan with remaining credits. Explicitly approved demo
+resources are recorded in ignored data/deploy/manifest.json. No paid-plan upgrade
+is performed. Instance shutdown is configured to terminate it automatically.
 
-## Decisions
-
-- User first selected synchronous ingestion, then requested S3/SQS with a separate
-  worker, persistent status/history and previews. Exact OR search was added next at the user's request.
-- User selected Gemini and image sampling, rather than uploading complete videos.
-- Reference tags are reviewed independently of model predictions.
-- Live provider testing rejected the supplied JSON Schema, while JSON mode
-  succeeded. The adapter uses JSON mode plus strict application validation.
-- A model-list response did not guarantee inference access: the provider rejected
-  Gemini 2.5 Flash for new users and recommended Gemini 3.6 Flash.
-- Reduced the default sample count after a 16-frame request hit the inference
-  timeout. This trades temporal coverage for synchronous demo latency.
-- Independent reference review initially mislabeled a hoe as a shovel; closer
-  inspection corrected the reference. Reference annotations also need validation.
-
-## AWS cost boundary
-
-AWS usage is disabled by default (`AWS_USAGE_ENABLED=false`). Provisioning,
-uploads and worker polling remain disabled until free-plan eligibility and
-remaining allowances have been verified. Read-only local history/search works
-while AWS is disabled. Do not enable this flag merely because the workload is
-small: budget alerts are not hard spending caps, and free-tier eligibility is
-account-specific. No paid-plan upgrade is authorized.
-
-## Natural-language retrieval
-
-`GET /search?q=someone%20tidying%20bedding` embeds the query locally using
-FastEmbed / BAAI/bge-small-en-v1.5 (384 dimensions). The one-time model download
-requires internet; embedding inference runs locally without a paid API.
-Each completed video's tags and summary form one document. SQLite stores the
-vector, model identifier and document hash. The worker indexes completed jobs;
-search also backfills missing or changed documents. Changing EMBEDDING_MODEL
-requires running the preparation script and restarting services.
-
-Videos and their best supporting frame must qualify through semantic similarity
-(SEARCH_MIN_SIMILARITY, default cosine 0.60) or full query-token coverage in
-the video tags and frame description respectively. Up to three qualifying videos are reranked using 75%
-video similarity and 25% query keyword coverage. No matches returns an empty
-list. These thresholds and weights are prototype heuristics, not calibrated
-relevance probabilities; false positives and missed matches remain possible.
-This is a linear scan, not a million-hour production index.
-
-Prompt v2 adds a factual description for each sampled frame. These descriptions
-are embedded locally and cached separately by video, frame, model and text hash.
-The best frame uses 85% semantic similarity plus 15% keyword coverage. This
-distinguishes visible objects from descriptions of people interacting with them.
-Videos without frame descriptions are excluded from natural search; run
-`scripts/backfill_frame_descriptions.py` once for old records (Gemini calls).
-Original tags and summaries are preserved, with separate caption provenance.
-
-`/videos/{id}/frames/{index}` downloads the original on a cache miss, extracts
-the timestamped JPEG and caches it locally. A model-described frame is still
-not guaranteed visual proof: sparse samples and caption errors remain possible.
-Natural search has its own results component, runs only on explicit submit,
-and never filters request history. The Play button opens an inline player in that result card at its supporting
-timestamp. Request details stay unchanged; searching does not autoplay.
-
-Original videos remain unchanged in S3. The ingestion pipeline resizes extracted
-frames to at most 768 pixels per edge; it does not transcode the complete video.
-A proposed pre-upload compression step was rejected to preserve originals and
-avoid redundant CPU work. No audio is sent to the image model.
-
-Preview URLs are signed against the regional S3 endpoint to prevent redirects
-from invalidating the signature. Temporary credentials can shorten their lifetime.
-
-## Scaling discussion
-
-Current runtime is one Uvicorn API process plus one separate Python SQS worker.
-FastAPI runs synchronous endpoints in a thread pool: one API process can serve
-multiple overlapping requests. There is no explicit API concurrency cap yet.
-Uploaded video bytes are copied in chunks to temporary files, but multipart
-spooling and concurrent requests still require memory and disk budgets.
-
-Each worker currently processes one queued video at a time. Its memory budget
-includes model weights, sampled frames, inference workspace and FFmpeg decoding;
-the complete compressed original is kept on temporary disk rather than loaded
-as one Python byte string. Separate worker processes normally duplicate model
-memory. Measure peak memory and throughput before choosing worker count.
-
-Production scaling would separate API and ingestion replicas, replace local
-SQLite with shared PostgreSQL, use a vector index instead of a linear scan,
-and autoscale ingestion from queue age/depth subject to a compute budget.
-The UI uses direct presigned S3 uploads with metadata verification, keeping
-video transfer outside the API. The legacy multipart API remains available.
-Concurrency limits, per-job
-temporary disk quotas, lease heartbeats and shared citation storage remain
-production work, not features already shipped in this prototype.
-
-## Experimental local image tagging
-
-A local CLIP adapter is available with `TAGGING_PROVIDER=local_clip`. Prepare
-weights using `.venv/bin/python scripts/prepare_image_model.py`, then restart
-API and worker. `TAGGING_PROVIDER=gemini` selects the existing provider. There is
-no automatic fallback and existing completed results are not overwritten.
-Both providers use the same `Tagger` contract and record model/prompt version.
-
-Local CLIP uses matched FastEmbed ONNX vision/text encoders and a reviewed finite
-candidate vocabulary. It emits thresholded candidate labels and evidence indices;
-its frame descriptions are templates from candidates, not generated captions.
-The adapter serializes inference within each process, batches up to eight frames,
-and caches one provider instance per settings configuration. Additional processes
-normally load additional model instances. Model assets stay in ignored data/models.
-
-All four provided videos ran locally: sampled-image inference took 1.24, 0.71,
-0.71 and 0.70 seconds respectively, excluding FFmpeg; initialization was 1.93s.
-These are single-run observations, not throughput guarantees. The trial produced
-incorrect cooking tags on workshop/construction footage, a brush on bedding, and
-missed workshop labels. The uncalibrated thresholds and limited vocabulary are
-not reliable enough to claim parity with Gemini. Gemini remains the recommended
-default; local CLIP is an explicit experimental choice without per-call API fees.
-
-## Browser-to-S3 uploads
-
-The UI now uses direct S3 PUTs. `POST /videos/uploads` accepts JSON with
-`filename`, `content_type`, and `size_bytes` and returns `{request,upload}`.
-The signed request expires in ten minutes, binds content length/type and AES256
-encryption, and includes `If-None-Match: *` to prevent overwriting the object.
-The browser sends the File directly to S3; it supplies Content-Length itself.
-No AWS account credentials are sent to the browser.
-
-S3 CORS allows exactly `http://127.0.0.1:8000` and `http://localhost:8000` for
-PUT/GET/HEAD. A different UI origin must be explicitly added. CORS permits the
-browser request; it does not make the bucket public or authorize unsigned access.
-The provisioning script merges this CORS rule without removing existing rules.
-
-After a successful upload, `POST /videos/{id}/complete` checks object size and
-content type against the stored request before queueing. Repeated completion
-calls are idempotent; queue failures remain recoverable through the outbox.
-Media decoding is still validated by the worker. Confirmation failures can be
-retried in the UI without uploading again. Browser upload timeout is 120 seconds.
-Interrupted uploads expire from the uploading state after 15 minutes while the
-worker runs. A completed S3 upload with no confirmation may leave an orphaned
-object; lifecycle cleanup remains future work.
-
-This first version is a single direct PUT, not resumable multipart upload.
-The configured 100 MB limit remains. Direct uploads avoid server video buffers and
-temporary files; they do not eliminate S3 storage/request or client network cost.
-The legacy `POST /videos` and synchronous diagnostic endpoint retain their
-server-mediated upload behavior.
-
-Live browser direct-upload verification passed for 3.mp4: S3 PUT and completion
-worked with local CORS, then preview decoded successfully. The first inference
-received a provider 503; a subsequent user upload completed. Live search now
-returns only 3.mp4 for `grill`, only 1.mp4 for `pillow`, and no results for
-`dog grill`. A regression test covers exact evidence below the cosine cutoff.
-
-## Container format verification
-
-Automated tests generate and decode MP4/H.264, MOV/H.264, MKV/MPEG-4,
-AVI/MPEG-4 and WebM/VP8. All five pass frame extraction, the synchronous API
-and direct-upload intent validation. Decoding checks actual media, not filename
-extensions; invalid and audio-only uploads are rejected by media validation.
-Browsers may not preview every container/codec combination even when ingestion
-works. The UI provides an original-file link if native playback fails. Originals
-are never transcoded or overwritten. Browser MIME values outside video/* are
-sent as application/octet-stream so uncommon containers can reach the decoder.
-
-Provider HTTP500/502/503 now activate the worker's existing maximum-three-attempt
-retry policy; HTTP504 remains a retryable timeout. Tests mock each error mapping
-without provider calls. Already failed jobs are not silently retried.
+`scripts/cleanup_demo.py` cleans only manifest-recorded temporary compute/identity
+resources; it never deletes the existing video bucket. Stop local services separately.
+Credit-backed compute is time-limited, not permanently free hosting. The user controls
+final shutdown; confirm the actual instance termination schedule and cleanup results.

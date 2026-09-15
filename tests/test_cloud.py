@@ -10,7 +10,7 @@ def test_video_url_signs_regional_host_without_redirect(monkeypatch):
     session = boto3.Session(aws_access_key_id='testing', aws_secret_access_key='testing',
                             region_name='ap-south-1')
     monkeypatch.setattr('app.cloud.boto3.Session', lambda **kwargs: session)
-    cloud = Cloud(Settings(aws_usage_enabled=True, s3_bucket='example-video-bucket',
+    cloud = Cloud(Settings(database_url="",aws_usage_enabled=True, s3_bucket='example-video-bucket',
                            sqs_queue_url='https://sqs.ap-south-1.amazonaws.com/123/test'))
     url, _ = cloud.url({'object_key': 'videos/example.mp4'})
     parsed = urlsplit(url)
@@ -24,7 +24,7 @@ def test_direct_upload_binds_size_type_and_prevents_overwrite(monkeypatch):
     session = boto3.Session(aws_access_key_id='testing', aws_secret_access_key='testing',
                             region_name='ap-south-1')
     monkeypatch.setattr('app.cloud.boto3.Session', lambda **kwargs: session)
-    cloud = Cloud(Settings(aws_usage_enabled=True, s3_bucket='example-video-bucket',
+    cloud = Cloud(Settings(database_url="",aws_usage_enabled=True, s3_bucket='example-video-bucket',
                            sqs_queue_url='https://sqs.ap-south-1.amazonaws.com/123/test'))
     upload = cloud.direct_upload({'object_key':'videos/example.mp4','content_type':'video/mp4'}, 123)
     query = parse_qs(urlsplit(upload['url']).query)

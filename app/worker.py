@@ -11,6 +11,7 @@ from app.store import Store
 from app.tagger import GeminiTagger, PROMPT_VERSION, TaggerError
 from app.retrieval import index_jobs, index_frames, load_embedder
 from app.providers import create_tagger
+from app.storage import get_store
 
 log = logging.getLogger(__name__)
 
@@ -69,13 +70,16 @@ def process_message(message, store, cloud, tagger, settings):
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     settings = Settings()
-    store, cloud, tagger = Store(settings.database_path), Cloud(settings), create_tagger(settings)
-    log.info('Worker polling SQS in %s', settings.aws_region)
+    store, cloud, tagger = get_store(settings), Cloud(settings), create_tagger(settings)
+    log.info('Worker polling %s', 'PostgreSQL' if settings.database_url else 'SQS')
     while True:
         try:
             store.expire_uploads()
             publish_pending(store, cloud)
-            for message in cloud.receive():
+            messages = cloud.receive()
+            if not messages and settings.database_url:
+                time.sleep(1)
+            for message in messages:
                 process_message(message, store, cloud, tagger, settings)
                 # Indexing can be recovered on search; never undo successful tagging.
                 try:

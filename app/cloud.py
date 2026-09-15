@@ -15,18 +15,23 @@ class Cloud:
     def __init__(self, settings: Settings):
         if not settings.aws_usage_enabled:
             raise RuntimeError('AWS usage is disabled until free-tier eligibility is verified')
-        if not settings.s3_bucket or not settings.sqs_queue_url:
+        if not settings.s3_bucket or (not settings.database_url and not settings.sqs_queue_url):
             raise RuntimeError('Configure S3_BUCKET and SQS_QUEUE_URL before using queued ingestion')
         self.settings = settings
-        session = boto3.Session(profile_name=settings.aws_profile, region_name=settings.aws_region)
+        session = boto3.Session(profile_name=settings.aws_profile or None, region_name=settings.aws_region)
         config = Config(signature_version='s3v4', s3={'addressing_style': 'virtual'},
                         connect_timeout=5, read_timeout=30,
                         retries={'max_attempts': 1})
         # Sign the regional hostname directly: S3 redirects invalidate a signed Host.
         self.s3 = session.client('s3', config=config,
                                  endpoint_url=f'https://s3.{settings.aws_region}.amazonaws.com')
-        self.sqs = session.client('sqs', config=Config(connect_timeout=5, read_timeout=30,
-                                                    retries={'max_attempts': 1}))
+        self.queue = None
+        if settings.database_url:
+            from app.storage import get_store
+            self.queue = get_store(settings)
+        else:
+            self.sqs = session.client('sqs', config=Config(connect_timeout=5, read_timeout=30,
+                                                        retries={'max_attempts': 1}))
 
     def upload(self, path: Path, job: dict):
         with path.open('rb') as source:
@@ -55,14 +60,20 @@ class Cloud:
         return {'ContentLength': metadata['ContentLength'], 'ContentType': metadata['ContentType']}
 
     def publish(self, request_id: str):
+        if self.queue is not None:
+            return self.queue.publish(request_id)
         self.sqs.send_message(QueueUrl=self.settings.sqs_queue_url,
                               MessageBody=json.dumps({'request_id': request_id}))
 
     def receive(self):
+        if self.queue is not None:
+            return self.queue.receive(self.settings.lease_seconds)
         return self.sqs.receive_message(QueueUrl=self.settings.sqs_queue_url, MaxNumberOfMessages=1,
             WaitTimeSeconds=10, VisibilityTimeout=self.settings.lease_seconds).get('Messages', [])
 
     def acknowledge(self, receipt: str):
+        if self.queue is not None:
+            return self.queue.acknowledge(receipt)
         self.sqs.delete_message(QueueUrl=self.settings.sqs_queue_url, ReceiptHandle=receipt)
 
     def url(self, job: dict):

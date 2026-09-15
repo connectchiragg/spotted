@@ -17,7 +17,7 @@ def configure_cors(s3, bucket):
         rules = []
     rule = {
         'ID': 'instawork-local-ui',
-        'AllowedOrigins': ['http://127.0.0.1:8000', 'http://localhost:8000'],
+        'AllowedOrigins': ['http://127.0.0.1:8000', 'http://localhost:8000', 'https://irl.haciensus.com'],
         'AllowedMethods': ['PUT', 'GET', 'HEAD'],
         'AllowedHeaders': ['content-type', 'content-length', 'if-none-match',
                            'x-amz-server-side-encryption', 'range'],

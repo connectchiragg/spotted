@@ -1,0 +1,19 @@
+[Unit]
+Description=IRL video API
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/instawork
+EnvironmentFile=/home/ubuntu/instawork/.env
+ExecStart=/home/ubuntu/instawork/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
+Restart=always
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
