@@ -2,13 +2,20 @@ import tempfile
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
 from app.config import Settings
 from app.media import MediaError, extract_frames
 from app.models import VideoResponse
 from app.tagger import GeminiTagger, PROMPT_VERSION, Tagger, TaggerError
+from app.jobs_api import router
 
 app = FastAPI(title='Instawork Video Tagger', version='0.1.0')
+
+
+@app.get('/', include_in_schema=False)
+def ui():
+    return FileResponse(Path(__file__).parent / 'static' / 'index.html')
 
 
 def get_settings() -> Settings:
@@ -64,3 +71,6 @@ def tag_video(
         raise HTTPException(503, str(exc)) from exc
     finally:
         file.file.close()
+
+
+app.include_router(router)
