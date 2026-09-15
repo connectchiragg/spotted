@@ -1,0 +1,7 @@
+[Unit]
+Description=AWS Free Plan expiration stop
+[Timer]
+OnCalendar=2027-03-15 07:08:29 UTC
+Persistent=true
+[Install]
+WantedBy=timers.target

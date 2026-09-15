@@ -1,0 +1,19 @@
+[Unit]
+Description=Framer video ingestion worker
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/framer
+EnvironmentFile=/home/ubuntu/framer/.env
+ExecStart=/home/ubuntu/framer/.venv/bin/python -m app.worker
+Restart=always
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -5,6 +5,7 @@ from fastapi import Depends, FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.config import Settings
+from app.limits import public_budget
 from app.media import MediaError, extract_frames
 from app.models import VideoResponse
 from app.providers import create_tagger
@@ -13,7 +14,8 @@ from app.jobs_api import router
 from app.search_api import router as search_router
 from app.query_api import router as query_router
 
-app = FastAPI(title='IRL — Instawork Robotics Lab', version='0.2.0')
+app = FastAPI(title='Framer — Find the moment', version='0.3.0')
+app.middleware('http')(public_budget)
 
 
 @app.get('/', include_in_schema=False)
