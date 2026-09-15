@@ -13,3 +13,11 @@ Thumbs.db
 *.tmp
 *.swp
 *~
+
+# Python and local media
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.mp4
+artifacts/

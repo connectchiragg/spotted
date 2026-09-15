@@ -1,0 +1,22 @@
+import os
+from dataclasses import dataclass, field
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+@dataclass(frozen=True)
+class Settings:
+    api_key: str = field(default_factory=lambda: os.getenv('GEMINI_API_KEY', ''), repr=False)
+    model: str = field(default_factory=lambda: os.getenv('GEMINI_MODEL', 'gemini-3.6-flash'))
+    max_upload_mb: int = field(default_factory=lambda: int(os.getenv('MAX_UPLOAD_MB', '100')))
+    max_video_seconds: int = field(default_factory=lambda: int(os.getenv('MAX_VIDEO_SECONDS', '600')))
+    max_frames: int = field(default_factory=lambda: int(os.getenv('MAX_FRAMES', '16')))
+    gemini_timeout_seconds: int = field(default_factory=lambda: int(os.getenv('GEMINI_TIMEOUT_SECONDS', '90')))
+
+    def __post_init__(self):
+        if not 1 <= self.max_frames <= 32:
+            raise ValueError('MAX_FRAMES must be between 1 and 32')
+        if min(self.max_upload_mb, self.max_video_seconds, self.gemini_timeout_seconds) <= 0:
+            raise ValueError('Size and timeout limits must be positive')
