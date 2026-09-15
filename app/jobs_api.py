@@ -1,5 +1,6 @@
 import logging
 import tempfile
+import unicodedata
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
@@ -43,6 +44,8 @@ def read_cloud_dependency(settings: Settings = Depends(settings_dependency)):
 
 def present(job, cloud):
     result = {key: job[key] for key in ('id','filename','status','created_at','updated_at','error','attempts','result')}
+    result.update(display_name=job.get('display_name'), archived_at=job.get('archived_at'))
+    result['possible_duplicate'] = (job.get('result') or {}).get('possible_duplicate')
     result.update(download_url=None, download_url_expires_at=None)
     if job['uploaded']:
         if cloud is None:
@@ -56,9 +59,19 @@ def present(job, cloud):
 
 
 class UploadIntent(BaseModel):
+    display_name: str | None = Field(default=None,max_length=255)
     filename: str = Field(min_length=1,max_length=255)
     content_type: str = Field(default='application/octet-stream',max_length=100)
     size_bytes: int = Field(gt=0,strict=True)
+
+    @field_validator('display_name')
+    @classmethod
+    def valid_display_name(cls,value):
+        if value is None:
+            return value
+        if not value.strip() or any(unicodedata.category(c)=='Cc' for c in value):
+            raise ValueError('Name must not be blank or contain control characters')
+        return value.strip()
 
     @field_validator('filename')
     @classmethod
@@ -81,7 +94,7 @@ def create_upload(body: UploadIntent, settings: Settings = Depends(settings_depe
                   store: Store = Depends(store_dependency), cloud: Cloud = Depends(cloud_dependency)):
     if body.size_bytes > settings.max_upload_mb*1024*1024:
         raise HTTPException(413,'Video exceeds upload size limit')
-    job=store.create(body.filename,body.content_type,body.size_bytes)
+    job=store.create(body.filename,body.content_type,body.size_bytes,display_name=body.display_name)
     try:
         upload=cloud.direct_upload(job,body.size_bytes)
     except CLOUD_ERRORS as exc:
@@ -164,6 +177,7 @@ def upload_video(file: UploadFile, settings: Settings = Depends(settings_depende
 
 @router.get('/videos')
 def history(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0),
+            include_archived: bool = False,
             tags: list[str] | None = Query(None, max_length=20, description='Exact tag labels, OR matched. Repeat this parameter for multiple tags.'),
             store: Store = Depends(store_dependency), cloud: Cloud = Depends(read_cloud_dependency)):
     """Request history, or completed videos matching ANY supplied tag.
@@ -176,8 +190,22 @@ def history(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0),
         normalized = list(dict.fromkeys(' '.join(tag.lower().split()) for tag in tags))
         if any(not tag or len(tag) > 80 for tag in normalized):
             raise HTTPException(422, 'Each tag must contain between 1 and 80 characters')
-    return {'items': [present(job, cloud) for job in store.list(limit, offset, normalized)],
+    return {'items': [present(job, cloud) for job in store.list(limit, offset, normalized, include_archived=include_archived)],
             'limit': limit, 'offset': offset}
+
+
+@router.post('/videos/{request_id}/archive')
+def archive_video(request_id: str, store: Store = Depends(store_dependency), cloud: Cloud = Depends(read_cloud_dependency)):
+    if not store.archive(request_id):
+        raise HTTPException(404,'Request not found')
+    return present(store.get(request_id),cloud)
+
+
+@router.post('/videos/{request_id}/restore')
+def restore_video(request_id: str, store: Store = Depends(store_dependency), cloud: Cloud = Depends(read_cloud_dependency)):
+    if not store.restore(request_id):
+        raise HTTPException(404,'Request not found')
+    return present(store.get(request_id),cloud)
 
 
 @router.get('/videos/{request_id}')

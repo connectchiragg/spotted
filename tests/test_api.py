@@ -127,7 +127,7 @@ def test_frame_descriptions_reject_incomplete_duplicate_or_out_of_bounds(indices
 
 
 @pytest.mark.parametrize('index,description', [(-1, 'scene'), (True, 'scene'),
-                                             ('0', 'scene'), (0, ' '), (0, 'x' * 501)])
+                                             ('0', 'scene'), (0, ' '), (0, 'x' * 801)])
 def test_frame_description_rejects_invalid_fields(index, description):
     from app.models import FrameDescription
     from pydantic import ValidationError

@@ -12,11 +12,12 @@ from app.tagger import GeminiTagger, PROMPT_VERSION, TaggerError
 from app.retrieval import index_jobs, index_frames, load_embedder
 from app.providers import create_tagger
 from app.storage import get_store
+from app.duplicates import possible_duplicate
 
 log = logging.getLogger(__name__)
 
 
-def process_message(message, store, cloud, tagger, settings):
+def process_message(message, store, cloud, tagger, settings, duplicate_detector=None):
     receipt = message['ReceiptHandle']
     try:
         request_id = json.loads(message['Body'])['request_id']
@@ -50,6 +51,12 @@ def process_message(message, store, cloud, tagger, settings):
                 'duration_seconds': duration, 'sampled_timestamps': [f.timestamp for f in frames],
                 'model': tagger.model, 'prompt_version': getattr(tagger,'prompt_version',PROMPT_VERSION),
             }
+            if duplicate_detector is not None:
+                try:
+                    output['possible_duplicate'] = duplicate_detector(job | {'result': output})
+                except Exception:
+                    # Advisory metadata must not fail an otherwise tagged video.
+                    log.exception('Description duplicate check deferred for %s', request_id)
             committed = store.finish(request_id, token, output)
             log.info('Request %s completed=%s', request_id, committed)
     except (MediaError, TaggerError, *CLOUD_ERRORS) as exc:
@@ -80,7 +87,10 @@ def main():
             if not messages and settings.database_url:
                 time.sleep(1)
             for message in messages:
-                process_message(message, store, cloud, tagger, settings)
+                process_message(message, store, cloud, tagger, settings,
+                    duplicate_detector=lambda job: possible_duplicate(store,
+                        load_embedder(settings.embedding_model, settings.embedding_cache),
+                        job, settings.duplicate_similarity_threshold))
                 # Indexing can be recovered on search; never undo successful tagging.
                 try:
                     index_jobs(store, load_embedder(settings.embedding_model, settings.embedding_cache), store.completed())

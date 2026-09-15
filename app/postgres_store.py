@@ -25,6 +25,8 @@ class PostgresStore:
                 updated_at TEXT NOT NULL, error TEXT, result JSONB, uploaded INTEGER NOT NULL DEFAULT 0,
                 queued INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
                 lease_until DOUBLE PRECISION, claim_token TEXT, expected_size BIGINT)''')
+            db.execute('ALTER TABLE jobs ADD COLUMN IF NOT EXISTS display_name TEXT')
+            db.execute('ALTER TABLE jobs ADD COLUMN IF NOT EXISTS archived_at TEXT')
             db.execute('CREATE INDEX IF NOT EXISTS jobs_created ON jobs(created_at DESC)')
             db.execute('''CREATE TABLE IF NOT EXISTS embeddings (
                 job_id TEXT REFERENCES jobs(id), model TEXT, text_hash TEXT NOT NULL,
@@ -46,27 +48,35 @@ class PostgresStore:
     def decode(row):
         return dict(row) if row is not None else None
 
-    def create(self, filename, content_type, expected_size=None):
+    def create(self, filename, content_type, expected_size=None, display_name=None):
         request_id, timestamp = str(uuid.uuid4()), now()
         with self.connect() as db:
             db.execute('''INSERT INTO jobs
-                (id,filename,object_key,content_type,status,created_at,updated_at,expected_size)
-                VALUES(%s,%s,%s,%s,'uploading',%s,%s,%s)''',
-                (request_id,filename,f'videos/{request_id}/source',content_type,timestamp,timestamp,expected_size))
+                (id,filename,object_key,content_type,status,created_at,updated_at,expected_size,display_name)
+                VALUES(%s,%s,%s,%s,'uploading',%s,%s,%s,%s)''',
+                (request_id,filename,f'videos/{request_id}/source',content_type,timestamp,timestamp,expected_size,display_name))
         return self.get(request_id)
 
     def get(self, request_id):
         with self.connect() as db:
             return db.execute('SELECT * FROM jobs WHERE id=%s',(request_id,)).fetchone()
 
-    def list(self, limit=50, offset=0, tags=None):
-        where, params = '', []
+    def list(self, limit=50, offset=0, tags=None, include_archived=False):
+        where, params = ('' if include_archived else 'WHERE archived_at IS NULL'), []
         if tags:
-            where = "WHERE status='completed' AND EXISTS (SELECT 1 FROM jsonb_array_elements(result->'tags') t WHERE t->>'label'=ANY(%s))"
+            where += (" AND " if where else "WHERE ") + "status='completed' AND EXISTS (SELECT 1 FROM jsonb_array_elements(result->'tags') t WHERE t->>'label'=ANY(%s))"
             params.append(tags)
         with self.connect() as db:
             return db.execute(f'SELECT * FROM jobs {where} ORDER BY created_at DESC,id DESC LIMIT %s OFFSET %s',
                               (*params,limit,offset)).fetchall()
+
+    def archive(self, request_id):
+        with self.connect() as db:
+            return db.execute('UPDATE jobs SET archived_at=COALESCE(archived_at,%s) WHERE id=%s',(now(),request_id)).rowcount == 1
+
+    def restore(self, request_id):
+        with self.connect() as db:
+            return db.execute('UPDATE jobs SET archived_at=NULL WHERE id=%s',(request_id,)).rowcount == 1
 
     def uploaded(self, request_id):
         with self.connect() as db:
@@ -146,7 +156,7 @@ class PostgresStore:
 
     def completed(self):
         with self.connect() as db:
-            return db.execute("SELECT * FROM jobs WHERE status='completed' ORDER BY created_at DESC,id DESC").fetchall()
+            return db.execute("SELECT * FROM jobs WHERE status='completed' AND archived_at IS NULL ORDER BY created_at DESC,id DESC").fetchall()
 
     def embeddings(self, model):
         with self.connect() as db:

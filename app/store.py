@@ -28,6 +28,10 @@ class Store:
             db.execute('CREATE INDEX IF NOT EXISTS jobs_created ON jobs(created_at DESC)')
             if 'expected_size' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
                 db.execute('ALTER TABLE jobs ADD COLUMN expected_size INTEGER')
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}
+            for column in ('display_name','archived_at'):
+                if column not in columns:
+                    db.execute(f'ALTER TABLE jobs ADD COLUMN {column} TEXT')
             db.execute('''CREATE TABLE IF NOT EXISTS embeddings (
                 job_id TEXT NOT NULL, model TEXT NOT NULL, text_hash TEXT NOT NULL,
                 vector TEXT NOT NULL, PRIMARY KEY(job_id,model)
@@ -48,14 +52,14 @@ class Store:
         finally:
             db.close()
 
-    def create(self, filename: str, content_type: str, expected_size: int | None = None) -> dict:
+    def create(self, filename: str, content_type: str, expected_size: int | None = None, display_name: str | None = None) -> dict:
         request_id = str(uuid.uuid4())
         timestamp = now()
         with self.connect() as db:
             db.execute('''INSERT INTO jobs
-                (id,filename,object_key,content_type,status,created_at,updated_at,expected_size)
-                VALUES (?,?,?,?,'uploading',?,?,?)''',
-                (request_id, filename, f'videos/{request_id}/source', content_type, timestamp, timestamp,expected_size))
+                (id,filename,object_key,content_type,status,created_at,updated_at,expected_size,display_name)
+                VALUES (?,?,?,?,'uploading',?,?,?,?)''',
+                (request_id, filename, f'videos/{request_id}/source', content_type, timestamp, timestamp,expected_size,display_name))
         return self.get(request_id)
 
     @staticmethod
@@ -70,14 +74,14 @@ class Store:
         with self.connect() as db:
             return self.decode(db.execute('SELECT * FROM jobs WHERE id=?', (request_id,)).fetchone())
 
-    def list(self, limit=50, offset=0, tags: list[str] | None = None):
-        conditions = ''
+    def list(self, limit=50, offset=0, tags: list[str] | None = None, include_archived=False):
+        conditions = '' if include_archived else 'WHERE archived_at IS NULL'
         parameters = []
         if tags:
             placeholders = ','.join('?' for _ in tags)
             # EXISTS prevents duplicate videos when multiple requested tags match.
             # Filtering happens before pagination; values are always parameters.
-            conditions = f"""WHERE status='completed' AND EXISTS (
+            conditions += (" AND " if conditions else "WHERE ") + f"""status='completed' AND EXISTS (
                 SELECT 1 FROM json_each(jobs.result, '$.tags') AS tag
                 WHERE json_extract(tag.value, '$.label') IN ({placeholders})
             )"""
@@ -86,6 +90,14 @@ class Store:
             return [self.decode(r) for r in db.execute(
                 f'SELECT * FROM jobs {conditions} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?',
                 (*parameters, limit, offset))]
+
+    def archive(self, request_id):
+        with self.connect() as db:
+            return db.execute('UPDATE jobs SET archived_at=COALESCE(archived_at,?) WHERE id=?',(now(),request_id)).rowcount == 1
+
+    def restore(self, request_id):
+        with self.connect() as db:
+            return db.execute('UPDATE jobs SET archived_at=NULL WHERE id=?',(request_id,)).rowcount == 1
 
     def uploaded(self, request_id: str):
         with self.connect() as db:
@@ -139,7 +151,7 @@ class Store:
     def completed(self):
         with self.connect() as db:
             return [self.decode(row) for row in db.execute(
-                "SELECT * FROM jobs WHERE status='completed' ORDER BY created_at DESC,id DESC")]
+                "SELECT * FROM jobs WHERE status='completed' AND archived_at IS NULL ORDER BY created_at DESC,id DESC")]
 
     def embeddings(self, model):
         with self.connect() as db:

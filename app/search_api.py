@@ -73,3 +73,23 @@ def frame_citation(request_id: str, frame_index: int,
         except (MediaError,*CLOUD_ERRORS) as exc:
             raise HTTPException(502,'Citation frame could not be loaded') from exc
     return FileResponse(output,media_type='image/jpeg',headers={'Cache-Control':'private, max-age=86400'})
+
+
+@router.get('/videos/{request_id}/previews/{frame_index}.gif')
+def animated_citation(request_id: str, frame_index: int,
+                      store: Store = Depends(store_dependency),
+                      settings: Settings = Depends(settings_dependency),
+                      cloud=Depends(cloud_dependency)):
+    from app.previews import evidence_gif
+    job = store.get(request_id)
+    if not job or job['status'] != 'completed' or job.get('archived_at'):
+        raise HTTPException(404, 'Completed video not found')
+    timestamps = job['result'].get('sampled_timestamps', [])
+    if not 0 <= frame_index < len(timestamps):
+        raise HTTPException(404, 'Sampled frame not found')
+    try:
+        output = evidence_gif(job, frame_index, cloud, Path(settings.database_path).parent)
+    except (MediaError, OSError, *CLOUD_ERRORS) as exc:
+        raise HTTPException(502, 'Evidence animation could not be loaded') from exc
+    return FileResponse(output, media_type='image/gif',
+                        headers={'Cache-Control': 'private, max-age=86400'})

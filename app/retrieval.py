@@ -133,6 +133,29 @@ def citation(job, query_tokens):
     return None
 
 
+def tagged_frame_citation(job, query_tokens):
+    """Require all query terms to be attributed to the same valid frame."""
+    if not query_tokens:
+        return None
+    result = job['result']
+    timestamps = result.get('sampled_timestamps', [])
+    by_frame = {}
+    for tag in result['tags']:
+        if not (tokens(tag['label']) & query_tokens):
+            continue
+        for index in tag.get('frame_indices', []):
+            if type(index) is int and 0 <= index < len(timestamps):
+                by_frame.setdefault(index, []).append(tag['label'])
+    for index, labels in sorted(by_frame.items()):
+        label = ', '.join(labels)
+        if full_keyword_match(query_tokens, label):
+            return {'frame_index': index, 'timestamp_seconds': timestamps[index],
+                    'label': label, 'description': 'Tags attributed to this frame: ' + label,
+                    'source': 'model-attributed sampled frame',
+                    'image_url': f"/videos/{job['id']}/frames/{index}"}
+    return None
+
+
 def hybrid_search(store, embedder, query, min_similarity=0.60):
     jobs = store.completed()
     if not jobs:
@@ -150,6 +173,14 @@ def hybrid_search(store, embedder, query, min_similarity=0.60):
         tag_text = ' '.join(tag['label'] for tag in job['result']['tags'])
         lexical = len(query_tokens & tokens(document(job))) / max(1, len(query_tokens))
         evidence, frame_score = frame_citation(job,query_vector,query_tokens,frame_vectors,frame_scores)
+        tagged = tagged_frame_citation(job, query_tokens)
+        # Captions summarize salient action and may omit a correctly tagged
+        # background object. Its frame attribution is independent evidence.
+        if tagged and (evidence is None or not full_keyword_match(query_tokens, evidence['description'])):
+            evidence = tagged
+            key = (job['id'], tagged['frame_index'])
+            frame_score = (frame_scores.get(key, 0.0) if frame_scores is not None else
+                           cosine(query_vector, frame_vectors[key]['vector']) if key in frame_vectors else 0.0)
         if evidence is None:
             continue
         # A strong sampled moment can support a broad video description and
@@ -157,7 +188,7 @@ def hybrid_search(store, embedder, query, min_similarity=0.60):
         joint = (semantic + frame_score) / 2
         supported = (joint >= min_similarity and
                      min(semantic, frame_score) >= max(0.0, min_similarity - .10))
-        explicit = (full_keyword_match(query_tokens, tag_text) and
+        explicit = tagged is not None or (full_keyword_match(query_tokens, tag_text) and
                     full_keyword_match(query_tokens, evidence['description']))
         if not (supported or explicit):
             continue
@@ -171,5 +202,5 @@ def hybrid_search(store, embedder, query, min_similarity=0.60):
         ranked = [item for item in ranked if .75*item[1]+.25*item[2] >= .8*best]
     return [(job, {'score':round(.75*semantic+.25*lexical,4),
                    'semantic_score':round(semantic,4),'keyword_score':round(lexical,4),
-                   'frame_score':round(frame_score,4),'citation':evidence})
+                   'frame_score':round(frame_score,4),'citation':evidence | {'preview_url':f"/videos/{job['id']}/previews/{evidence['frame_index']}.gif"}})
             for job,semantic,lexical,evidence,frame_score in ranked]

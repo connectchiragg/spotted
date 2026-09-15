@@ -85,3 +85,15 @@ def test_sqlite_migration_preserves_records_and_is_idempotent(pg,tmp_path):
     assert pg.get(job['id'])['expected_size']==456
     assert pg.embeddings('model')[job['id']]['vector']==[1.,0.,0.]
     assert source.get(job['id'])['result']==result
+
+
+def test_postgres_archive_preserves_processing_and_name(pg):
+    job=pg.create('original.mp4','video/mp4',10,display_name='Named clip')
+    pg.uploaded(job['id']); token=pg.claim(job['id'],600)
+    assert pg.archive(job['id']); timestamp=pg.get(job['id'])['archived_at']
+    assert pg.archive(job['id']) and pg.get(job['id'])['archived_at']==timestamp
+    pg.finish(job['id'],token,{'summary':'demo','tags':[{'label':'kitchen'}]})
+    assert pg.completed()==[] and pg.list(tags=['kitchen'])==[]
+    assert pg.list(tags=['kitchen'],include_archived=True)[0]['display_name']=='Named clip'
+    assert pg.restore(job['id']) and pg.restore(job['id'])
+    assert pg.completed()[0]['filename']=='original.mp4'

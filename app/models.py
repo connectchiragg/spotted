@@ -19,7 +19,7 @@ class Tag(BaseModel):
 
 class FrameDescription(BaseModel):
     frame_index: int = Field(ge=0, strict=True)
-    description: str = Field(min_length=1, max_length=500)
+    description: str = Field(min_length=1, max_length=800)
 
     @field_validator('description')
     @classmethod

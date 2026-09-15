@@ -125,6 +125,7 @@ def test_unrelated_results_and_missing_evidence_are_excluded(tmp_path):
     embedder = FakeEmbedder(model='no-evidence')
     with store.connect() as db:
         body = job['result']; body['frame_descriptions'] = []
+        body['tags'][0]['frame_indices'] = []
         db.execute('UPDATE jobs SET result=? WHERE id=?',(json.dumps(body),job['id']))
     assert hybrid_search(store,embedder,'pillow') == []
 
@@ -193,3 +194,30 @@ def test_high_video_score_cannot_rescue_unsupported_frame(tmp_path):
                             'A worker mixes material': vector(.4),
                             'An empty room': vector(.2)})
     assert hybrid_search(store, embedder, 'construction') == []
+
+
+def test_tagged_object_is_found_when_caption_omits_it(tmp_path):
+    store = Store(str(tmp_path / 'objects.db'))
+    job = completed_job(store, 'A cat looks out of a window', 'pillow')
+    unrelated = completed_job(store, 'Workers sort cocoons', 'cocoon')
+    weak = [.2, math.sqrt(1-.2**2)]
+    embedder = FakeEmbedder({document(job): weak, document(unrelated): weak,
+                            'A cat looks out of a window': weak,
+                            'Workers sort cocoons': weak, 'An empty room': weak})
+    found = hybrid_search(store, embedder, 'I want to see pillow')
+    assert [item[0]['id'] for item in found] == [job['id']]
+    assert found[0][1]['citation']['frame_index'] == 1
+    assert found[0][1]['citation']['label'] == 'pillow'
+    assert hybrid_search(store, embedder, 'washing pillow') == []
+
+
+def test_tag_evidence_does_not_combine_different_frames():
+    from app.retrieval import tagged_frame_citation
+    job = {'id': 'example', 'result': result('Room')}
+    job['result']['tags'] = [
+        {'label': 'pillow', 'frame_indices': [0]},
+        {'label': 'washing', 'frame_indices': [1]},
+        {'label': 'dog', 'frame_indices': [-1, 99, '0', True]},
+    ]
+    assert tagged_frame_citation(job, tokens('washing pillow')) is None
+    assert tagged_frame_citation(job, tokens('dog')) is None

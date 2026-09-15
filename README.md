@@ -8,14 +8,16 @@ Framer is an independent project. The original assessment videos and records hav
 
 ## What it does
 
-- Upload a video directly from your browser to private S3, with progress reporting.
+- Choose an optional display name, then upload directly from your browser to private S3 with progress reporting. The original filename is preserved.
 - Follow its status through queued, processing, completed, or failed.
+- Archive requests to hide them from active history and search; restore them from the Archived filter. Archiving does not erase their data or stop a running job.
+- After tagging, description embeddings flag possible duplicates at cosine similarity >= 0.95. This is advisory: it never merges or deletes either video.
 - Read the saved summary and tags in the library sidebar.
 - Describe an object, scene, or action in ordinary language.
 - Get up to three relevant videos with a grounded answer and supporting frame citations.
 - Play a result inline from the cited timestamp. Each query is independent.
 
-The public demo is a **shared library**: uploaded videos and their analysis are visible to other visitors. Upload only videos you have permission to share. It has no user accounts or conversation memory.
+The public demo is a **shared library**: uploaded videos and their analysis are visible to other visitors. Upload only videos you have permission to share. It has no user accounts or conversation memory; visitors share the library and its archive/restore controls.
 
 ## Architecture
 
@@ -36,17 +38,21 @@ The API and worker are separate systemd services on one AWS EC2 host. PostgreSQL
 1. `POST /videos/uploads` validates filename, type and size and returns a ten-minute signed PUT URL.
 2. The browser uploads directly to S3. Video bytes do not pass through the API process.
 3. `POST /videos/{id}/complete` verifies the object size/type, then atomically records a pending job and queues it in PostgreSQL.
-4. The worker leases a job using `FOR UPDATE SKIP LOCKED`, downloads the original to temporary disk, and extracts up to eight evenly spaced JPEGs at a maximum dimension of 768 pixels.
-5. Gemini 3.5 Flash returns a summary, tags and descriptions linked to sampled frames. The worker saves these before acknowledging the queue message.
+4. The worker leases a job using `FOR UPDATE SKIP LOCKED`, downloads the original to temporary disk, and scans reduced images at two frames per second for pixel changes. It selects strong changes plus one to three coverage frames, keeps at least one second between selected moments, and extracts up to 16 JPEGs at a maximum dimension of 768 pixels. A scan exceeding 90 seconds falls back to evenly spaced samples.
+5. Gemini 3.5 Flash returns a summary, tags and detailed descriptions linked to sampled frames, covering visible colors, materials, textures, positions, and foreground/background objects without guessing hidden attributes. The worker saves these before acknowledging the queue message.
 6. FastEmbed runs `BAAI/bge-small-en-v1.5` locally and stores 384-dimensional embeddings in pgvector columns.
 
 Lease tokens reject stale updates. Transient provider failures retry up to three attempts. Completion is idempotent. A crash between inference and commit can still repeat an inference call. Systemd restarts failed services.
 
 ### Retrieval
 
-Hybrid retrieval combines semantic similarity with keyword evidence and selects a supporting sampled frame. Results are capped at three and filtered for relevance; no matches is a valid answer. Gemini generates a concise response from retrieved metadata, with validated numbered citations. If answer generation fails, retrieved matches remain available.
+Hybrid retrieval combines semantic similarity with keyword evidence and selects a supporting sampled frame. Exact query terms attributed by tags to the same valid frame also qualify, even when the frame caption omits a background object. Results are capped at three and filtered for relevance; no matches is a valid answer. Gemini generates a concise response from retrieved metadata, with validated numbered citations. If answer generation fails, retrieved matches remain available.
 
-Vectors are stored in PostgreSQL, but retrieval currently scans candidates rather than using an approximate-nearest-neighbour index. Relevance thresholds are heuristics, not calibrated confidence scores. Sparse frame sampling can miss short actions, and generated tags can be incorrect.
+Vectors are stored in PostgreSQL, but retrieval currently scans candidates rather than using an approximate-nearest-neighbour index. Relevance thresholds are heuristics, not calibrated confidence scores. Pixel changes are not semantic events: camera movement and lighting can trigger capture, while subtle or brief actions may be missed. The frame budget is bounded, and generated tags can be incorrect.
+
+### Possible duplicates
+
+The worker embeds the summary and each frame description separately, averages and normalizes their vectors, then compares with active completed videos. Caching uses content hashes and a separate embedding namespace. Similarity 0.95 is a heuristic, not 95% confidence or proof of identical footage. Two distinct clips with similar descriptions can match, and identical footage can receive different descriptions. The check runs after tagging, so it does not avoid the initial Gemini call. Filename and display name are excluded.
 
 ## Public demo limits and costs
 
@@ -90,7 +96,9 @@ The supplied PostgreSQL startup helper uses an isolated cluster under ignored `d
 | POST | `/videos/uploads` | Start a direct upload |
 | POST | `/videos/{id}/complete` | Confirm and enqueue |
 | GET | `/videos` | Paginated history |
-| GET | `/videos/{id}` | Status, tags, summary, signed preview |
+| GET | `/videos/{id}` | Status, name, tags, summary, signed preview |
+| POST | `/videos/{id}/archive` | Soft-delete from active history and search |
+| POST | `/videos/{id}/restore` | Restore an archived request |
 | GET | `/videos/{id}/frames/{index}` | Supporting JPEG |
 | POST | `/query` | Natural-language query `{ "q": "someone cleaning a grill" }` |
 | GET | `/search?q=...` | Retrieval without generated answer |
@@ -106,7 +114,7 @@ TEST_POSTGRES_DSN=postgresql://YOUR_USER@127.0.0.1:54329/irl \
   .venv/bin/python -m pytest -q tests/test_postgres.py
 ```
 
-Latest verification: **92 tests passed**, including the PostgreSQL integration suite. A synthetic public upload completed tagging and was retrieved with a frame citation; a real browser played it inline. Generated query answers used the documented retrieval fallback during this check. The synthetic uploads were removed afterward.
+Latest verification includes PostgreSQL integration, pixel-change sampling and frame-linked tag retrieval tests. A synthetic public upload completed tagging and was retrieved with a frame citation; a real browser played it inline. Generated query answers used the documented retrieval fallback during this check. The synthetic uploads were removed afterward.
 
 Tests cover real FFmpeg media decoding, upload validation, signed-upload constraints, durable queue races, retries, stale claims, PostgreSQL vectors, retrieval, answer citations and concurrent daily-budget enforcement. Provider unit tests use substitutes; they do not establish tagging accuracy.
 
@@ -121,3 +129,12 @@ Deployment uses a fresh database, not an assessment snapshot. Keep the API and w
 ## Next improvements
 
 Authentication and per-user libraries, calibrated retrieval evaluation, adaptive scene sampling, an ANN index, database backups, per-job resource limits, and observability beyond process health. The tagging-provider interface allows model replacement; the experimental local CLIP adapter is available but is not the default because its evaluated labels were less reliable.
+
+### Evidence animations
+Search results show compact, looping GIF previews (320-pixel bounding box, 6 fps),
+starting at the cited timestamp for up to five seconds. Near the end of a video,
+the preview contains only the remaining footage. The original video is linked separately.
+GET `/videos/{request_id}/previews/{frame_index}.gif` generates previews on demand,
+with one decoder at a time per API process and a 128-preview disk cache. The first
+view downloads the source to temporary disk and may take longer; subsequent views
+reuse the GIF. Failed animations fall back to the evidence still image.
