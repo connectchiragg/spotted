@@ -30,7 +30,7 @@ class Settings:
 
     @property
     def lease_seconds(self) -> int:
-        return max(600, self.max_video_seconds * 6 + self.max_frames * 40 + self.gemini_timeout_seconds + 180)
+        return max(600, self.max_frames * 10 + self.gemini_timeout_seconds + 180)
 
     def __post_init__(self):
         if self.tagging_provider not in ('gemini','local_clip'):

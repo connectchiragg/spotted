@@ -60,25 +60,11 @@ function renderSearchResults(root,items){
   const citation=j.retrieval?.citation;
   if(citation){
    const preview=el('div','search-gif-preview');
-   const status=el('span','gif-status','Loading evidence frame…');status.setAttribute('role','status');
-   let image=null,hovered=false,focused=false,toggled=false,animated=false,gifFailed=false;
-   const toggle=el('button','secondary preview-toggle','Play preview');toggle.type='button';toggle.setAttribute('aria-pressed','false');toggle.setAttribute('aria-label','Play preview for '+jobLabel(j));
-   function showImage(play){
-    animated=Boolean(play&&citation.preview_url&&!gifFailed);toggle.textContent=animated?'Pause preview':'Play preview';toggle.setAttribute('aria-pressed',String(animated));toggle.setAttribute('aria-label',(animated?'Pause':'Play')+' preview for '+jobLabel(j));
-    status.classList.remove('loaded');status.textContent=animated?'Loading 5-second preview…':'Loading evidence frame…';
-    const next=el('img','citation-image');next.alt='Video evidence from '+jobLabel(j)+' at '+Number(citation.timestamp_seconds).toFixed(1)+' seconds';next.loading=animated?'eager':'lazy';
-    const requestedAnimation=animated;
-    next.onload=()=>{if(image!==next)return;status.textContent=requestedAnimation?'5-second preview · playing':gifFailed?'Animated preview unavailable · evidence frame':'Hover or focus to preview';status.classList.add('loaded')};
-    next.onerror=()=>{if(image!==next)return;if(requestedAnimation){gifFailed=true;toggled=false;toggle.disabled=true;showImage(false)}else{next.hidden=true;status.classList.add('loaded');status.textContent='Preview unavailable. Open the original video below.'}};
-    if(image)image.replaceWith(next);else preview.append(next);image=next;next.src=animated?citation.preview_url:citation.image_url;
-   }
-   const update=()=>{const play=Boolean((hovered||focused||toggled)&&citation.preview_url&&!gifFailed);if(play!==animated)showImage(play)};
-   card.addEventListener('pointerenter',event=>{if(event.pointerType==='touch')return;hovered=true;update()});
-   card.addEventListener('pointerleave',()=>{hovered=false;update()});
-   card.addEventListener('focusin',event=>{focused=event.target.matches(':focus-visible');update()});
-   card.addEventListener('focusout',event=>{if(!card.contains(event.relatedTarget)){focused=false;update()}});
-   toggle.onclick=()=>{toggled=!toggled;focused=false;hovered=false;update()};
-   showImage(false);preview.append(status);if(citation.preview_url)preview.append(toggle);card.append(preview);
+   const status=el('span','gif-status','Loading evidence frame…');
+   const image=el('img','citation-image');image.loading='lazy';image.alt='Evidence frame from '+jobLabel(j);
+   image.onload=()=>{status.textContent='Evidence at '+Number(citation.timestamp_seconds).toFixed(1)+'s';status.classList.add('loaded')};
+   image.onerror=()=>{image.hidden=true;status.textContent='Frame unavailable. Open the original video below.';status.classList.add('loaded')};
+   image.src=citation.image_url;preview.append(image,status);card.append(preview);
 
   }
   if(j.download_url){const link=el('a','download search-original','Open original video'+(citation?' at '+Number(citation.timestamp_seconds).toFixed(1)+'s':'')+' ↗');link.href=j.download_url+(citation?'#t='+Math.max(0,Number(citation.timestamp_seconds)||0):'');link.target='_blank';link.rel='noopener';card.append(link)}

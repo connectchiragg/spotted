@@ -130,23 +130,16 @@ Deployment uses a fresh database, not an assessment snapshot. Keep the API and w
 
 Authentication and per-user libraries, calibrated retrieval evaluation, denser scene sampling, an ANN index, database backups, per-job resource limits, and observability beyond process health. The tagging-provider interface allows model replacement; the experimental local CLIP adapter is available but is not the default because its evaluated labels were less reliable.
 
-### Evidence animations
-Ingestion prepares a five-second GIF and a still for every sampled timestamp,
-uploading them to the video's private S3 prefix before marking it complete.
-The worker decodes one temporary 480-pixel, 8-fps intermediate, then creates
-128-color GIFs from it. The intermediate is deleted; originals are preserved.
-Gemini tagging runs concurrently with preview preparation after frame extraction;
-video decoding remains serial to bound CPU and memory use on the small server.
-Search redirects to prepared signed assets and performs no GIF decoding.
-Near the end of a video the preview contains only the remaining footage.
-Cards animate on hover/focus and return to stills when leaving; touch controls
-provide a play/pause toggle. Original videos are linked separately.
-Run `PYTHONPATH=. python scripts/backfill_previews.py` to prepare missing assets
-for previously completed videos without repeating model inference.
+### Citation frames
+Ingestion uploads the already-extracted JPEG frames to the video's private S3
+prefix while Gemini tagging runs concurrently. No GIFs or resized intermediate
+videos are generated. Search cards show stored still frames and link to the
+original video at the cited timestamp. Completed legacy videos with prepared
+assets remain compatible. Cards keep consistent sizing and subtle hover zoom.
 
 ### Processing progress
 The worker persists claim-token guarded stages, progress and rough ETA estimates.
 The UI polls every three seconds and updates countdowns between polls; no manual
 refresh is required. Percentages represent pipeline stages, not bytes decoded.
 Queue/download estimates may be unknown; longer-than-estimated work is shown
-explicitly. A request reaches 100% only after tags and all previews are saved.
+explicitly. A request reaches 100% only after tags and citation frames are saved.

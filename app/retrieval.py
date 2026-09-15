@@ -202,5 +202,5 @@ def hybrid_search(store, embedder, query, min_similarity=0.60):
         ranked = [item for item in ranked if .75*item[1]+.25*item[2] >= .8*best]
     return [(job, {'score':round(.75*semantic+.25*lexical,4),
                    'semantic_score':round(semantic,4),'keyword_score':round(lexical,4),
-                   'frame_score':round(frame_score,4),'citation':evidence | {'preview_url':f"/videos/{job['id']}/previews/{evidence['frame_index']}.gif"}})
+                   'frame_score':round(frame_score,4),'citation':evidence})
             for job,semantic,lexical,evidence,frame_score in ranked]

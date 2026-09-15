@@ -14,7 +14,6 @@ from app.retrieval import index_jobs, index_frames, load_embedder
 from app.providers import create_tagger
 from app.storage import get_store
 from app.duplicates import possible_duplicate
-from app.previews import prepare_previews
 
 log = logging.getLogger(__name__)
 
@@ -50,29 +49,20 @@ def process_message(message, store, cloud, tagger, settings, duplicate_detector=
                 raise MediaError('Stored video exceeds upload limit')
             store.set_progress(request_id, token, "Selecting evidence frames", 15)
             duration, frames = extract_frames(path, settings.max_frames, settings.max_video_seconds)
-            # Overlap network-bound inference with one CPU-bound preview task.
-            # Keep decoding serial: this server also hosts the API and database.
-            phase_started = time.monotonic()
-            estimated_work = max(60, duration * 3 + len(frames) * 3)
-            store.set_progress(request_id, token, "Tagging and preparing previews", 30, estimated_work)
+            # Upload the already extracted JPEGs while Gemini analyzes them.
+            store.set_progress(request_id, token, "Tagging and saving citation frames", 35, 60)
             with ThreadPoolExecutor(max_workers=1) as executor:
                 tagging = executor.submit(tagger.tag_frames, frames)
                 for index, frame in enumerate(frames):
                     cloud.upload_frame(job, index, frame.data)
-                preview_indices = prepare_previews(
-                    path, [f.timestamp for f in frames], duration, directory,
-                    lambda index, data: cloud.upload_preview(job, index, data),
-                    progress=lambda done, total: store.set_progress(
-                        request_id, token, "Uploading evidence previews", 60 + int(30 * done / max(1, total)),
-                        max(5, (total - done) * 3)))
+                    store.set_progress(request_id, token, "Saving citation frames", 40 + int(35 * (index + 1) / len(frames)), 45)
                 if not tagging.done():
-                    store.set_progress(request_id, token, "Waiting for video tags", 92,
-                                       max(5, estimated_work - (time.monotonic() - phase_started)))
+                    store.set_progress(request_id, token, "Waiting for video tags", 80, 30)
                 result = tagging.result()
             output = result.model_dump() | {
                 'duration_seconds': duration, 'sampled_timestamps': [f.timestamp for f in frames],
                 'model': tagger.model, 'prompt_version': getattr(tagger,'prompt_version',PROMPT_VERSION),
-                'preview_indices': preview_indices,
+                'frame_indices': list(range(len(frames))),
             }
             store.set_progress(request_id, token, "Finalizing results", 96, 5)
             if duplicate_detector is not None:

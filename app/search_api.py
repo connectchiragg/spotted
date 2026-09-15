@@ -52,7 +52,7 @@ def frame_citation(request_id: str, frame_index: int,
     timestamps=job['result'].get('sampled_timestamps',[])
     if not 0<=frame_index<len(timestamps):
         raise HTTPException(404,'Sampled frame not found')
-    if frame_index in job['result'].get('preview_indices', []):
+    if frame_index in job['result'].get('frame_indices', job['result'].get('preview_indices', [])):
         try:
             return RedirectResponse(cloud.frame_url(job, frame_index), status_code=307,
                                     headers={'Cache-Control':'private, no-store'})

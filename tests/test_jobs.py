@@ -223,7 +223,7 @@ def test_search_rejects_invalid_tags(setup,tags):
     assert client.get('/videos',params=[('tags',tag) for tag in tags]).status_code==422
 
 
-def test_tagging_overlaps_preview_generation(setup, monkeypatch):
+def test_tagging_overlaps_frame_upload(setup, monkeypatch):
     from threading import Event
     client, store, cloud, settings, path = setup
     tagging_started, preview_started = Event(), Event()
@@ -232,11 +232,11 @@ def test_tagging_overlaps_preview_generation(setup, monkeypatch):
             tagging_started.set()
             assert preview_started.wait(2), 'Preview generation did not overlap tagging'
             return super().tag_frames(frames)
-    def prepare(*args, **kwargs):
+    def upload_frame(*args, **kwargs):
         assert tagging_started.wait(2)
         preview_started.set()
         return [0]
-    monkeypatch.setattr('app.worker.prepare_previews', prepare)
+    monkeypatch.setattr(cloud, 'upload_frame', upload_frame)
     response=upload(setup)
     process_message(cloud.messages[0],store,cloud,ConcurrentTagger(),settings)
     assert store.get(response.json()['id'])['status']=='completed'
