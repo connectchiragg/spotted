@@ -22,6 +22,8 @@ class FakeEmbedder:
 
 def result(summary, label='cleaning'):
     return {'summary': summary, 'sampled_timestamps': [1.5, 4.5],
+            'frame_descriptions':[{'frame_index':0,'description':'An empty room'},
+                                  {'frame_index':1,'description':summary}],
             'tags': [{'label': label, 'category': 'action', 'frame_indices': [1]}]}
 
 
@@ -59,7 +61,7 @@ def test_cached_vectors_survive_store_reopening_without_reembedding(tmp_path):
     completed_job(store, 'A worker cleans a grill')
     first = FakeEmbedder()
     hybrid_search(store, first, 'grill')
-    assert len(first.passage_calls) == 1
+    assert len(first.passage_calls) == 2
 
     reopened = Store(path)
     fresh_embedder = FakeEmbedder()
@@ -111,3 +113,37 @@ def test_citation_falls_back_to_valid_other_tag_then_none():
     assert citation(job, tokens('scrubbing'))['label'] == 'sink'
     job['result']['sampled_timestamps'] = []
     assert citation(job, tokens('scrubbing')) is None
+
+
+def test_unrelated_results_and_missing_evidence_are_excluded(tmp_path):
+    store = Store(str(tmp_path / 'jobs.db'))
+    job = completed_job(store, 'A worker tidies pillows', 'pillow')
+    embedder = FakeEmbedder({document(job):[.4, math.sqrt(1-.4**2)]})
+    assert hybrid_search(store,embedder,'driving a car') == []
+    # A relevant video description alone cannot establish a supporting moment.
+    embedder = FakeEmbedder(model='no-evidence')
+    with store.connect() as db:
+        body = job['result']; body['frame_descriptions'] = []
+        db.execute('UPDATE jobs SET result=? WHERE id=?',(json.dumps(body),job['id']))
+    assert hybrid_search(store,embedder,'pillow') == []
+
+
+def test_query_selects_action_frame_instead_of_first_object_presence(tmp_path):
+    store = Store(str(tmp_path / 'jobs.db'))
+    job = completed_job(store,'A person arranges pillows','pillow')
+    body = job['result']
+    body['frame_descriptions'] = [
+        {'frame_index':0,'description':'Pillows lie on an empty bed'},
+        {'frame_index':1,'description':'A person straightens and arranges pillows'}]
+    with store.connect() as db:
+        db.execute('UPDATE jobs SET result=? WHERE id=?',(json.dumps(body),job['id']))
+    embedder = FakeEmbedder({'Pillows lie on an empty bed':[.65, math.sqrt(1-.65**2)],
+                            'A person straightens and arranges pillows':[.95, math.sqrt(1-.95**2)]})
+    found = hybrid_search(store,embedder,'tidy up pillow')
+    assert len(found) == 1
+    assert found[0][1]['citation']['timestamp_seconds'] == 4.5
+    assert found[0][1]['citation']['description'] == 'A person straightens and arranges pillows'
+    # The frame index is persistent and unchanged queries do not reembed it.
+    calls = len(embedder.passage_calls)
+    hybrid_search(store,embedder,'tidy up pillow')
+    assert len(embedder.passage_calls) == calls

@@ -105,3 +105,38 @@ def test_docs_and_health(client):
     assert client.get('/health').json() == {'status': 'ok'}
     assert client.get('/docs').status_code == 200
     assert '/videos/tag' in client.get('/openapi.json').json()['paths']
+
+
+def test_frame_descriptions_accept_complete_coverage_and_old_results():
+    from app.models import FrameDescription
+    result = TaggingResult(summary='A person adjusts a pillow.', tags=[], frame_descriptions=[
+        FrameDescription(frame_index=1, description='A pillow rests on the bed.'),
+        FrameDescription(frame_index=0, description='A person holds a pillow.'),
+    ])
+    assert len(validate_evidence(result, 2).frame_descriptions) == 2
+    assert validate_evidence(TaggingResult(summary='Old result.', tags=[]), 2).frame_descriptions == []
+
+
+@pytest.mark.parametrize('indices', [[0], [0, 0], [0, 2]])
+def test_frame_descriptions_reject_incomplete_duplicate_or_out_of_bounds(indices):
+    from app.models import FrameDescription
+    result = TaggingResult(summary='A scene.', tags=[], frame_descriptions=[
+        FrameDescription(frame_index=i, description='Visible scene.') for i in indices])
+    with pytest.raises(TaggerError):
+        validate_evidence(result, 2)
+
+
+@pytest.mark.parametrize('index,description', [(-1, 'scene'), (True, 'scene'),
+                                             ('0', 'scene'), (0, ' '), (0, 'x' * 501)])
+def test_frame_description_rejects_invalid_fields(index, description):
+    from app.models import FrameDescription
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        FrameDescription(frame_index=index, description=description)
+
+
+def test_frame_description_count_is_bounded():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        TaggingResult(summary='Scenes.', tags=[], frame_descriptions=[
+            {'frame_index': i, 'description': 'A scene.'} for i in range(33)])

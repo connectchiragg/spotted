@@ -30,6 +30,11 @@ class Store:
                 job_id TEXT NOT NULL, model TEXT NOT NULL, text_hash TEXT NOT NULL,
                 vector TEXT NOT NULL, PRIMARY KEY(job_id,model)
             )''')
+            db.execute('''CREATE TABLE IF NOT EXISTS frame_embeddings (
+                job_id TEXT NOT NULL, frame_index INTEGER NOT NULL,
+                model TEXT NOT NULL, text_hash TEXT NOT NULL, vector TEXT NOT NULL,
+                PRIMARY KEY(job_id,frame_index,model)
+            )''')
 
     @contextmanager
     def connect(self):
@@ -144,3 +149,15 @@ class Store:
             db.execute('''INSERT INTO embeddings(job_id,model,text_hash,vector) VALUES(?,?,?,?)
                 ON CONFLICT(job_id,model) DO UPDATE SET text_hash=excluded.text_hash,vector=excluded.vector''',
                 (job_id,model,text_hash,json.dumps(vector)))
+
+    def frame_embeddings(self, model):
+        with self.connect() as db:
+            return {(r['job_id'],r['frame_index']): {'text_hash':r['text_hash'],'vector':json.loads(r['vector'])}
+                    for r in db.execute('SELECT * FROM frame_embeddings WHERE model=?',(model,))}
+
+    def save_frame_embedding(self, job_id, frame_index, model, text_hash, vector):
+        with self.connect() as db:
+            db.execute('''INSERT INTO frame_embeddings VALUES(?,?,?,?,?)
+                ON CONFLICT(job_id,frame_index,model) DO UPDATE SET
+                text_hash=excluded.text_hash,vector=excluded.vector''',
+                (job_id,frame_index,model,text_hash,json.dumps(vector)))

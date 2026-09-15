@@ -22,12 +22,15 @@ class Settings:
     aws_usage_enabled: bool = field(default_factory=lambda: os.getenv('AWS_USAGE_ENABLED', 'false').lower() == 'true')
     embedding_model: str = field(default_factory=lambda: os.getenv('EMBEDDING_MODEL', 'BAAI/bge-small-en-v1.5'))
     embedding_cache: str = field(default_factory=lambda: os.getenv('EMBEDDING_CACHE', 'data/models'))
+    search_min_similarity: float = field(default_factory=lambda: float(os.getenv('SEARCH_MIN_SIMILARITY', '0.60')))
 
     @property
     def lease_seconds(self) -> int:
         return max(600, self.max_frames * 10 + self.gemini_timeout_seconds + 180)
 
     def __post_init__(self):
+        if not 0 <= self.search_min_similarity <= 1:
+            raise ValueError('SEARCH_MIN_SIMILARITY must be between 0 and 1')
         if not 1 <= self.max_frames <= 32:
             raise ValueError('MAX_FRAMES must be between 1 and 32')
         if min(self.max_upload_mb, self.max_video_seconds, self.gemini_timeout_seconds) <= 0:

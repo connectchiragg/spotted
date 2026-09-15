@@ -24,6 +24,7 @@ def embedder_dependency(settings: Settings = Depends(settings_dependency)):
 @router.get('/search')
 def search(q: str = Query(...,min_length=1,max_length=500),
            store: Store = Depends(store_dependency), cloud=Depends(read_cloud_dependency),
+           settings: Settings = Depends(settings_dependency),
            embedder=Depends(embedder_dependency)):
     """Embed a natural-language query locally; rerank its three nearest videos.
 
@@ -34,10 +35,10 @@ def search(q: str = Query(...,min_length=1,max_length=500),
     if not query:
         raise HTTPException(422,'Query must not be blank')
     try:
-        ranked = hybrid_search(store,embedder,query)
+        ranked = hybrid_search(store,embedder,query,settings.search_min_similarity)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(503,'Local search index could not be built or queried') from exc
-    return {'query':query,'embedding_model':embedder.model,
+    return {'query':query,'embedding_model':embedder.model,'min_similarity':settings.search_min_similarity,
             'items':[present(job,cloud) | {'retrieval':retrieval} for job,retrieval in ranked]}
 
 

@@ -67,6 +67,47 @@ def cosine(left, right):
     return sum(a*b for a,b in zip(left,right))/norm if norm else 0.0
 
 
+def index_frames(store, embedder, jobs):
+    existing = store.frame_embeddings(embedder.model)
+    missing = []
+    for job in jobs:
+        for frame in job['result'].get('frame_descriptions', []):
+            index, text = frame['frame_index'], frame['description']
+            digest = hashlib.sha256(text.encode()).hexdigest()
+            key = (job['id'], index)
+            if key not in existing or existing[key]['text_hash'] != digest:
+                missing.append((key, text, digest))
+    if missing:
+        vectors = embedder.passages([text for _, text, _ in missing])
+        if len(vectors) != len(missing):
+            raise ValueError('Unexpected frame embedding count')
+        for ((job_id, index), _, digest), vector in zip(missing, vectors):
+            if not vector or not all(math.isfinite(v) for v in vector):
+                raise ValueError('Invalid frame embedding')
+            store.save_frame_embedding(job_id,index,embedder.model,digest,vector)
+            existing[(job_id,index)] = {'text_hash':digest,'vector':vector}
+    return existing
+
+
+def frame_citation(job, query_vector, query_tokens, vectors):
+    timestamps = job['result'].get('sampled_timestamps', [])
+    candidates = []
+    for frame in job['result'].get('frame_descriptions', []):
+        index = frame['frame_index']
+        if not 0 <= index < len(timestamps):
+            continue
+        semantic = cosine(query_vector, vectors[(job['id'],index)]['vector'])
+        lexical = len(tokens(frame['description']) & query_tokens) / max(1,len(query_tokens))
+        candidates.append((.85*semantic+.15*lexical,semantic,index,frame['description']))
+    if not candidates:
+        return None, 0.0
+    _, semantic, index, description = max(candidates,key=lambda c:(c[0],-c[2]))
+    return {'frame_index':index,'timestamp_seconds':timestamps[index],
+            'label':description,'description':description,
+            'source':'model-described sampled frame',
+            'image_url':f"/videos/{job['id']}/frames/{index}"}, semantic
+
+
 def citation(job, query_tokens):
     result = job['result']
     timestamps = result.get('sampled_timestamps', [])
@@ -81,21 +122,29 @@ def citation(job, query_tokens):
     return None
 
 
-def hybrid_search(store, embedder, query):
+def hybrid_search(store, embedder, query, min_similarity=0.60):
     jobs = store.completed()
     if not jobs:
         return []
     vectors = index_jobs(store, embedder, jobs)
+    frame_vectors = index_frames(store, embedder, jobs)
     query_vector = embedder.query(query)
     query_tokens = tokens(query)
     candidates = []
     for job in jobs:
         semantic = max(0.0, min(1.0, cosine(query_vector, vectors[job['id']]['vector'])))
+        if semantic < min_similarity:
+            continue
         lexical = len(query_tokens & tokens(document(job))) / max(1, len(query_tokens))
-        candidates.append((job, semantic, lexical))
+        evidence, frame_score = frame_citation(job,query_vector,query_tokens,frame_vectors)
+        # Results without a relevant sampled moment cannot support click-to-play.
+        if evidence is None or frame_score < min_similarity:
+            continue
+        candidates.append((job, semantic, lexical, evidence, frame_score))
     # Start with the three nearest embeddings, then rerank with lexical coverage.
     nearest = sorted(candidates, key=lambda item:(item[1],item[0]['id']), reverse=True)[:3]
     ranked = sorted(nearest, key=lambda item:(0.75*item[1]+0.25*item[2],item[0]['id']), reverse=True)
     return [(job, {'score':round(.75*semantic+.25*lexical,4),
                    'semantic_score':round(semantic,4),'keyword_score':round(lexical,4),
-                   'citation':citation(job,query_tokens)}) for job,semantic,lexical in ranked]
+                   'frame_score':round(frame_score,4),'citation':evidence})
+            for job,semantic,lexical,evidence,frame_score in ranked]

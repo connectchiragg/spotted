@@ -62,7 +62,7 @@ def tag_video(
                 filename=file.filename or 'video', duration_seconds=duration,
                 sampled_timestamps=[frame.timestamp for frame in frames],
                 model=tagger.model, prompt_version=PROMPT_VERSION,
-                summary=result.summary, tags=result.tags,
+                summary=result.summary, tags=result.tags, frame_descriptions=result.frame_descriptions,
             )
     except MediaError as exc:
         raise HTTPException(422, str(exc)) from exc

@@ -3,7 +3,7 @@
 Local API and worker services with private AWS S3 storage, an SQS queue, SQLite
 request history, and Gemini image tagging. The browser UI shows upload progress,
 processing state, video previews, summaries and tags. Exact OR tag search is
-available through the API and UI, alongside local natural-language retrieval.
+available through the API; the UI supports natural-language retrieval.
 
 ## Run locally
 
@@ -127,7 +127,8 @@ They do not establish real AWS access or Gemini accuracy.
 
 ### Executed verification (September 15, 2026)
 
-- 29 automated tests passed on Python 3.14.3, including local retrieval and regional URL signing.
+- 41 automated tests passed on Python 3.14.3, including local retrieval, frame descriptions, relevance rejection and regional URL signing.
+- Live query `tidy up pillow` returned only video 1 at 9.298s. The extracted frame was visually inspected and shows pillow handling; dog, cooking and cement queries returned no results across the two indexed videos.
 - Live natural search returned HTTP 200; bedding ranked video 1 first and cocoons ranked video 2 first. Both frame citations returned JPEGs (200), both video previews returned ranged MP4 responses (206), and blank natural queries returned 422.
 - All four supplied MP4s passed through the original synchronous upload endpoint with actual FFmpeg
   and Gemini 3.6 Flash inference at eight sampled frames each:
@@ -191,17 +192,27 @@ vector, model identifier and document hash. The worker indexes completed jobs;
 search also backfills missing or changed documents. Changing EMBEDDING_MODEL
 requires running the preparation script and restarting services.
 
-The three nearest video vectors by cosine similarity are reranked using
-75% semantic similarity and 25% query keyword coverage. These weights are an
-MVP heuristic, not calibrated relevance probabilities. Fewer than three indexed
-videos means fewer results; nearest results can still be irrelevant. This is a
-linear scan suited to the prototype, not a million-hour production index.
+Videos and their best supporting frame must both meet SEARCH_MIN_SIMILARITY
+(default cosine 0.60). Up to three qualifying videos are reranked using 75%
+video similarity and 25% query keyword coverage. No matches returns an empty
+list. These thresholds and weights are prototype heuristics, not calibrated
+relevance probabilities; false positives and missed matches remain possible.
+This is a linear scan, not a million-hour production index.
 
-Results include a sampled-frame citation selected from model-attributed tag
-evidence. `/videos/{id}/frames/{index}` downloads the original on a cache miss,
-extracts the timestamped JPEG and caches it locally. Evidence is not a separate
-frame embedding or a guarantee that the frame proves the user's query. Existing
-annotation errors remain possible. Natural search runs only on explicit submit.
+Prompt v2 adds a factual description for each sampled frame. These descriptions
+are embedded locally and cached separately by video, frame, model and text hash.
+The best frame uses 85% semantic similarity plus 15% keyword coverage. This
+distinguishes visible objects from descriptions of people interacting with them.
+Videos without frame descriptions are excluded from natural search; run
+`scripts/backfill_frame_descriptions.py` once for old records (Gemini calls).
+Original tags and summaries are preserved, with separate caption provenance.
+
+`/videos/{id}/frames/{index}` downloads the original on a cache miss, extracts
+the timestamped JPEG and caches it locally. A model-described frame is still
+not guaranteed visual proof: sparse samples and caption errors remain possible.
+Natural search has its own results component, runs only on explicit submit,
+and never filters request history. Clicking a result seeks and plays its
+supporting timestamp; searching does not automatically open a video.
 
 Original videos remain unchanged in S3. The ingestion pipeline resizes extracted
 frames to at most 768 pixels per edge; it does not transcode the complete video.

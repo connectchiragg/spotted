@@ -9,7 +9,7 @@ from app.config import Settings
 from app.media import Frame
 from app.models import TaggingResult
 
-PROMPT_VERSION = 'v1'
+PROMPT_VERSION = 'v2'
 PROMPT = '''Analyze these chronological sampled images from one video.
 Return a short factual summary and up to 20 useful tags describing visible
 environments, objects and actions. Use concise lowercase English labels.
@@ -19,10 +19,17 @@ Do not infer activity from an object's mere presence. Only include actions
 clearly supported by the images; omit uncertain labels. Do not identify people
 or infer sensitive attributes. These are sparse samples: do not claim an event
 occurred between frames. An empty tag list is valid if nothing is identifiable.
+Also return one concise factual description for EACH supplied frame in
+frame_descriptions, indexed by its zero-based frame_index. Focus on visible
+person-object interactions: distinguish holding, adjusting, folding or carrying
+an object from its mere presence. Do not infer actions from object presence or
+from another frame. When no action is clear, describe only the visible scene.
+Each description must be at most 500 characters. Cover every supplied frame
+exactly once.
 Return JSON only with this exact shape:
 {"summary":"Short factual description", "tags":[
   {"label":"short lowercase label", "category":"object", "frame_indices":[0]}
-]}
+], "frame_descriptions":[{"frame_index":0,"description":"Visible scene and interaction"}]}
 category must be environment, object, or action. frame_indices must be integers.
 '''
 
@@ -40,6 +47,10 @@ class Tagger(Protocol):
 
 
 def validate_evidence(result: TaggingResult, frame_count: int) -> TaggingResult:
+    if result.frame_descriptions:
+        indices = [item.frame_index for item in result.frame_descriptions]
+        if len(indices) != frame_count or set(indices) != set(range(frame_count)):
+            raise TaggerError('Model frame descriptions must cover every sampled frame exactly once')
     merged = {}
     for tag in result.tags:
         if any(i < 0 or i >= frame_count for i in tag.frame_indices):
