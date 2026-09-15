@@ -12,7 +12,7 @@ class Settings:
     model: str = field(default_factory=lambda: os.getenv('GEMINI_MODEL', 'gemini-3.6-flash'))
     max_upload_mb: int = field(default_factory=lambda: int(os.getenv('MAX_UPLOAD_MB', '100')))
     max_video_seconds: int = field(default_factory=lambda: int(os.getenv('MAX_VIDEO_SECONDS', '600')))
-    max_frames: int = field(default_factory=lambda: int(os.getenv('MAX_FRAMES', '16')))
+    max_frames: int = field(default_factory=lambda: int(os.getenv('MAX_FRAMES', '8')))
     gemini_timeout_seconds: int = field(default_factory=lambda: int(os.getenv('GEMINI_TIMEOUT_SECONDS', '90')))
 
     def __post_init__(self):

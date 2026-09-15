@@ -37,7 +37,7 @@ in each response. No automatic provider/model fallback hides a failed request.
 
 ## Sampling and limits
 
-- Default: up to 16 frames, distributed over the full video using bin centers.
+- Default: up to 8 frames, distributed over the full video using bin centers.
 - Short videos target approximately one frame per five seconds.
 - Images fit within 768 by 768 pixels, preserving aspect ratio.
 - Default upload limit: 100 MB; duration limit: 10 minutes.
@@ -60,6 +60,20 @@ a test adapter. They cover upload validation, missing credentials, size limits,
 provider failure, evidence validation, normalization, cleanup and API docs.
 They do not measure Gemini accuracy or prove live provider access.
 
+### Executed verification (September 15, 2026)
+
+- 8 automated tests passed on Python 3.14.3; dependency deprecation warnings only.
+- All four supplied MP4s passed through the upload endpoint with actual FFmpeg
+  and Gemini 3.6 Flash inference at eight sampled frames each:
+  1.mp4: 16.44s; 2.mp4: 19.71s; 3.mp4: 12.65s; 4.mp4: 14.87s.
+- These were in-process HTTP endpoint tests using FastAPI TestClient with real
+  inference. The running localhost server also passed health and invalid-upload
+  HTTP checks. Saved responses are local under ignored `artifacts/`.
+- Earlier provider requests timed out, including a 16-frame request. These
+  successful measurements are observations, not a latency or availability SLA.
+- Main scene/activity tags match the independent candidate reference. Specialist
+  material labels and precise evidence indices require further human review.
+
 ## Current scope and limits
 
 This slice has no database, search, authentication or background jobs. It runs
@@ -78,3 +92,7 @@ idempotency, cost controls, authentication and model-quality evaluation.
   succeeded. The adapter uses JSON mode plus strict application validation.
 - A model-list response did not guarantee inference access: the provider rejected
   Gemini 2.5 Flash for new users and recommended Gemini 3.6 Flash.
+- Reduced the default sample count after a 16-frame request hit the inference
+  timeout. This trades temporal coverage for synchronous demo latency.
+- Independent reference review initially mislabeled a hoe as a shovel; closer
+  inspection corrected the reference. Reference annotations also need validation.
