@@ -60,8 +60,11 @@ def test_direct_upload_outbox_recovery(setup):
 
 
 def test_intent_limits_and_unknown_request(setup):
-    client,*_=setup
-    for size in [0,-1,'10',True,101*1024*1024]:
+    client,store,cloud,settings,video=setup
+    maximum=settings.max_upload_mb*1024*1024
+    for size in [0,-1,'10',True,maximum+1]:
         r=client.post('/videos/uploads',json={'filename':'video.mp4','size_bytes':size})
         assert r.status_code in (413,422)
+    prepare(setup)
+    assert client.post('/videos/uploads',json={'filename':'maximum.mp4','size_bytes':maximum}).status_code==201
     assert client.post('/videos/unknown/complete').status_code==404
