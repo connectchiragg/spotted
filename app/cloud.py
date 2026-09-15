@@ -19,9 +19,12 @@ class Cloud:
             raise RuntimeError('Configure S3_BUCKET and SQS_QUEUE_URL before using queued ingestion')
         self.settings = settings
         session = boto3.Session(profile_name=settings.aws_profile, region_name=settings.aws_region)
-        config = Config(signature_version='s3v4', connect_timeout=5, read_timeout=30,
+        config = Config(signature_version='s3v4', s3={'addressing_style': 'virtual'},
+                        connect_timeout=5, read_timeout=30,
                         retries={'max_attempts': 1})
-        self.s3 = session.client('s3', config=config)
+        # Sign the regional hostname directly: S3 redirects invalidate a signed Host.
+        self.s3 = session.client('s3', config=config,
+                                 endpoint_url=f'https://s3.{settings.aws_region}.amazonaws.com')
         self.sqs = session.client('sqs', config=Config(connect_timeout=5, read_timeout=30,
                                                     retries={'max_attempts': 1}))
 

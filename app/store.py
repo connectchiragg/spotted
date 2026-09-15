@@ -26,6 +26,10 @@ class Store:
                 lease_until REAL, claim_token TEXT
             )''')
             db.execute('CREATE INDEX IF NOT EXISTS jobs_created ON jobs(created_at DESC)')
+            db.execute('''CREATE TABLE IF NOT EXISTS embeddings (
+                job_id TEXT NOT NULL, model TEXT NOT NULL, text_hash TEXT NOT NULL,
+                vector TEXT NOT NULL, PRIMARY KEY(job_id,model)
+            )''')
 
     @contextmanager
     def connect(self):
@@ -124,3 +128,19 @@ class Store:
         with self.connect() as db:
             db.execute("""UPDATE jobs SET status='failed',error='Upload interrupted; submit the video again',
                 updated_at=? WHERE status='uploading' AND updated_at<?""", (now(), cutoff))
+
+    def completed(self):
+        with self.connect() as db:
+            return [self.decode(row) for row in db.execute(
+                "SELECT * FROM jobs WHERE status='completed' ORDER BY created_at DESC,id DESC")]
+
+    def embeddings(self, model):
+        with self.connect() as db:
+            return {r['job_id']: {'text_hash':r['text_hash'],'vector':json.loads(r['vector'])}
+                    for r in db.execute('SELECT * FROM embeddings WHERE model=?',(model,))}
+
+    def save_embedding(self, job_id, model, text_hash, vector):
+        with self.connect() as db:
+            db.execute('''INSERT INTO embeddings(job_id,model,text_hash,vector) VALUES(?,?,?,?)
+                ON CONFLICT(job_id,model) DO UPDATE SET text_hash=excluded.text_hash,vector=excluded.vector''',
+                (job_id,model,text_hash,json.dumps(vector)))

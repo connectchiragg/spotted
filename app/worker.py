@@ -9,6 +9,7 @@ from app.config import Settings
 from app.media import MediaError, extract_frames
 from app.store import Store
 from app.tagger import GeminiTagger, PROMPT_VERSION, TaggerError
+from app.retrieval import index_jobs, load_embedder
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +78,11 @@ def main():
             publish_pending(store, cloud)
             for message in cloud.receive():
                 process_message(message, store, cloud, tagger, settings)
+                # Indexing can be recovered on search; never undo successful tagging.
+                try:
+                    index_jobs(store, load_embedder(settings.embedding_model, settings.embedding_cache), store.completed())
+                except Exception:
+                    log.exception('Local embedding index deferred; search will retry')
         except CLOUD_ERRORS as exc:
             log.error('AWS operation failed (%s); retrying in five seconds', type(exc).__name__)
             time.sleep(5)

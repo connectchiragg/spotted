@@ -1,9 +1,9 @@
-# Instawork video tagger
+# IRL — Instawork Robotics Lab
 
 Local API and worker services with private AWS S3 storage, an SQS queue, SQLite
 request history, and Gemini image tagging. The browser UI shows upload progress,
 processing state, video previews, summaries and tags. Exact OR tag search is
-available through the API.
+available through the API and UI, alongside local natural-language retrieval.
 
 ## Run locally
 
@@ -17,6 +17,8 @@ cp .env.example .env
 # Configure a valid default AWS profile and verify free-plan eligibility/allowance.
 # Only then set AWS_USAGE_ENABLED=true in .env and provision:
 .venv/bin/python scripts/provision_aws.py
+# Download the local embedding model once and index completed videos:
+.venv/bin/python scripts/prepare_embeddings.py
 .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -125,7 +127,8 @@ They do not establish real AWS access or Gemini accuracy.
 
 ### Executed verification (September 15, 2026)
 
-- 23 automated tests passed on Python 3.14.3; dependency deprecation warnings only.
+- 29 automated tests passed on Python 3.14.3, including local retrieval and regional URL signing.
+- Live natural search returned HTTP 200; bedding ranked video 1 first and cocoons ranked video 2 first. Both frame citations returned JPEGs (200), both video previews returned ranged MP4 responses (206), and blank natural queries returned 422.
 - All four supplied MP4s passed through the original synchronous upload endpoint with actual FFmpeg
   and Gemini 3.6 Flash inference at eight sampled frames each:
   1.mp4: 16.44s; 2.mp4: 19.71s; 3.mp4: 12.65s; 4.mp4: 14.87s.
@@ -142,7 +145,7 @@ They do not establish real AWS access or Gemini accuracy.
 
 ## Current scope and limits
 
-No search UI, authentication or cloud deployment is included yet. Bind the API to
+No authentication or cloud deployment is included yet. Bind the API to
 localhost. Multipart parsing spools uploads before the endpoint's size check;
 public hosting needs request-body and concurrency limits at the server boundary.
 SQLite and local polling suit one machine, not separately deployed replicas.
@@ -177,3 +180,33 @@ remaining allowances have been verified. Read-only local history/search works
 while AWS is disabled. Do not enable this flag merely because the workload is
 small: budget alerts are not hard spending caps, and free-tier eligibility is
 account-specific. No paid-plan upgrade is authorized.
+
+## Natural-language retrieval
+
+`GET /search?q=someone%20tidying%20bedding` embeds the query locally using
+FastEmbed / BAAI/bge-small-en-v1.5 (384 dimensions). The one-time model download
+requires internet; embedding inference runs locally without a paid API.
+Each completed video's tags and summary form one document. SQLite stores the
+vector, model identifier and document hash. The worker indexes completed jobs;
+search also backfills missing or changed documents. Changing EMBEDDING_MODEL
+requires running the preparation script and restarting services.
+
+The three nearest video vectors by cosine similarity are reranked using
+75% semantic similarity and 25% query keyword coverage. These weights are an
+MVP heuristic, not calibrated relevance probabilities. Fewer than three indexed
+videos means fewer results; nearest results can still be irrelevant. This is a
+linear scan suited to the prototype, not a million-hour production index.
+
+Results include a sampled-frame citation selected from model-attributed tag
+evidence. `/videos/{id}/frames/{index}` downloads the original on a cache miss,
+extracts the timestamped JPEG and caches it locally. Evidence is not a separate
+frame embedding or a guarantee that the frame proves the user's query. Existing
+annotation errors remain possible. Natural search runs only on explicit submit.
+
+Original videos remain unchanged in S3. The ingestion pipeline resizes extracted
+frames to at most 768 pixels per edge; it does not transcode the complete video.
+A proposed pre-upload compression step was rejected to preserve originals and
+avoid redundant CPU work. No audio is sent to the image model.
+
+Preview URLs are signed against the regional S3 endpoint to prevent redirects
+from invalidating the signature. Temporary credentials can shorten their lifetime.

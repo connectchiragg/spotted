@@ -9,8 +9,9 @@ from app.media import MediaError, extract_frames
 from app.models import VideoResponse
 from app.tagger import GeminiTagger, PROMPT_VERSION, Tagger, TaggerError
 from app.jobs_api import router
+from app.search_api import router as search_router
 
-app = FastAPI(title='Instawork Video Tagger', version='0.1.0')
+app = FastAPI(title='IRL — Instawork Robotics Lab', version='0.2.0')
 
 
 @app.get('/', include_in_schema=False)
@@ -74,3 +75,4 @@ def tag_video(
 
 
 app.include_router(router)
+app.include_router(search_router)

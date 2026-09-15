@@ -20,6 +20,8 @@ class Settings:
     sqs_queue_url: str = field(default_factory=lambda: os.getenv('SQS_QUEUE_URL', ''))
     database_path: str = field(default_factory=lambda: os.getenv('DATABASE_PATH', 'data/instawork.db'))
     aws_usage_enabled: bool = field(default_factory=lambda: os.getenv('AWS_USAGE_ENABLED', 'false').lower() == 'true')
+    embedding_model: str = field(default_factory=lambda: os.getenv('EMBEDDING_MODEL', 'BAAI/bge-small-en-v1.5'))
+    embedding_cache: str = field(default_factory=lambda: os.getenv('EMBEDDING_CACHE', 'data/models'))
 
     @property
     def lease_seconds(self) -> int:
