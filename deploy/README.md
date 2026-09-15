@@ -11,7 +11,7 @@ Framer uses one `t3.small` EC2 instance with standard CPU credits and an encrypt
 5. Enable and start `framer-api`, `framer-worker`, `framer-free-plan.timer` and `framer-expiration.timer` after checking configuration. PostgreSQL uses local socket peer authentication; AWS uses the instance role.
 6. Verify `/health`, a fresh empty library, then upload/query/delete behavior through the public hostname.
 
-The public configuration limits uploads to 25 MB, 10 uploads/day and 100 queries/day. Legacy synchronous upload routes are disabled. S3 CORS allows the Framer hostname; the origin firewall permits Cloudflare and the operator IP only.
+The public configuration limits uploads to 400 MB, 10 uploads/day and 100 queries/day. Legacy synchronous upload routes are disabled. S3 CORS allows the Framer hostname; the origin firewall permits Cloudflare and the operator IP only.
 
 ## Free-plan protection
 

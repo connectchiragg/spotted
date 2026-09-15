@@ -50,7 +50,7 @@ Vectors are stored in PostgreSQL, but retrieval currently scans candidates rathe
 
 ## Public demo limits and costs
 
-- 25 MB per upload, ten-minute maximum video duration.
+- 400 MB per upload, ten-minute maximum video duration.
 - Uploaded videos expire from S3 after seven days; incomplete multipart uploads are aborted after one day. Metadata may remain in request history after the original expires.
 - Shared budgets: 10 upload attempts and 100 query attempts per UTC day.
 - Counters persist across process restarts in a small local SQLite file. Failed attempts count toward the budget.

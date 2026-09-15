@@ -18,7 +18,7 @@ keys=['GEMINI_API_KEY','GEMINI_MODEL','AWS_REGION','S3_BUCKET','MAX_UPLOAD_MB','
       'MAX_FRAMES','GEMINI_TIMEOUT_SECONDS','EMBEDDING_MODEL','SEARCH_MIN_SIMILARITY']
 selected={k:values[k] for k in keys if values.get(k) is not None}
 selected['S3_BUCKET']=json.loads(Path('data/framer-deploy/manifest.json').read_text())['bucket']
-selected.update(PUBLIC_DEMO_LIMITS='true',DAILY_UPLOAD_LIMIT='10',DAILY_QUERY_LIMIT='100',MAX_UPLOAD_MB='25',AWS_PROFILE='default',AWS_USAGE_ENABLED='true',TAGGING_PROVIDER='gemini',
+selected.update(PUBLIC_DEMO_LIMITS='true',DAILY_UPLOAD_LIMIT='10',DAILY_QUERY_LIMIT='100',MAX_UPLOAD_MB='400',AWS_PROFILE='default',AWS_USAGE_ENABLED='true',TAGGING_PROVIDER='gemini',
                 DATABASE_URL='postgresql:///irl?host=/var/run/postgresql',
                 DATABASE_BACKEND='postgres',EMBEDDING_CACHE='data/models')
 p=Path(sys.argv[1]); p.write_text(''.join(f"{k}='{v}'\n" for k,v in selected.items())); p.chmod(0o600)
