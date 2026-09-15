@@ -147,3 +147,19 @@ def test_query_selects_action_frame_instead_of_first_object_presence(tmp_path):
     calls = len(embedder.passage_calls)
     hybrid_search(store,embedder,'tidy up pillow')
     assert len(embedder.passage_calls) == calls
+
+
+def test_explicit_grill_evidence_survives_semantic_cutoff(tmp_path):
+    store=Store(str(tmp_path/'jobs.db'))
+    grill=completed_job(store,'A metal grill grate in a sink','grill grate')
+    pillow=completed_job(store,'Pillows on a bed','pillow')
+    near=[.593,math.sqrt(1-.593**2)]
+    embedder=FakeEmbedder({document(grill):near,'A metal grill grate in a sink':near,
+                          document(pillow):near,'Pillows on a bed':near,'An empty room':near})
+    found=hybrid_search(store,embedder,'grill')
+    assert [job['id'] for job,_ in found]==[grill['id']]
+    assert found[0][1]['frame_score']==.593
+    assert 'grill' in found[0][1]['citation']['description']
+    # Whole-token match does not turn into substring or partial-query matching.
+    assert hybrid_search(store,embedder,'grilled')==[]
+    assert hybrid_search(store,embedder,'dog grill')==[]

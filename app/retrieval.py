@@ -13,6 +13,10 @@ def tokens(text):
     return set(re.findall(r'\w+', text.lower())) - STOPWORDS
 
 
+def full_keyword_match(query_tokens, text):
+    return bool(query_tokens) and query_tokens <= tokens(text)
+
+
 class LocalEmbedder:
     def __init__(self, model, cache):
         from fastembed import TextEmbedding
@@ -133,12 +137,14 @@ def hybrid_search(store, embedder, query, min_similarity=0.60):
     candidates = []
     for job in jobs:
         semantic = max(0.0, min(1.0, cosine(query_vector, vectors[job['id']]['vector'])))
-        if semantic < min_similarity:
+        tag_text = ' '.join(tag['label'] for tag in job['result']['tags'])
+        if semantic < min_similarity and not full_keyword_match(query_tokens,tag_text):
             continue
         lexical = len(query_tokens & tokens(document(job))) / max(1, len(query_tokens))
         evidence, frame_score = frame_citation(job,query_vector,query_tokens,frame_vectors)
         # Results without a relevant sampled moment cannot support click-to-play.
-        if evidence is None or frame_score < min_similarity:
+        if evidence is None or (frame_score < min_similarity and
+                               not full_keyword_match(query_tokens,evidence['description'])):
             continue
         candidates.append((job, semantic, lexical, evidence, frame_score))
     # Start with the three nearest embeddings, then rerank with lexical coverage.

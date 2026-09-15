@@ -26,6 +26,8 @@ class Store:
                 lease_until REAL, claim_token TEXT
             )''')
             db.execute('CREATE INDEX IF NOT EXISTS jobs_created ON jobs(created_at DESC)')
+            if 'expected_size' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
+                db.execute('ALTER TABLE jobs ADD COLUMN expected_size INTEGER')
             db.execute('''CREATE TABLE IF NOT EXISTS embeddings (
                 job_id TEXT NOT NULL, model TEXT NOT NULL, text_hash TEXT NOT NULL,
                 vector TEXT NOT NULL, PRIMARY KEY(job_id,model)
@@ -46,14 +48,14 @@ class Store:
         finally:
             db.close()
 
-    def create(self, filename: str, content_type: str) -> dict:
+    def create(self, filename: str, content_type: str, expected_size: int | None = None) -> dict:
         request_id = str(uuid.uuid4())
         timestamp = now()
         with self.connect() as db:
             db.execute('''INSERT INTO jobs
-                (id,filename,object_key,content_type,status,created_at,updated_at)
-                VALUES (?,?,?,?,'uploading',?,?)''',
-                (request_id, filename, f'videos/{request_id}/source', content_type, timestamp, timestamp))
+                (id,filename,object_key,content_type,status,created_at,updated_at,expected_size)
+                VALUES (?,?,?,?,'uploading',?,?,?)''',
+                (request_id, filename, f'videos/{request_id}/source', content_type, timestamp, timestamp,expected_size))
         return self.get(request_id)
 
     @staticmethod
@@ -87,8 +89,8 @@ class Store:
 
     def uploaded(self, request_id: str):
         with self.connect() as db:
-            db.execute("UPDATE jobs SET uploaded=1,status='pending',updated_at=? WHERE id=? AND status='uploading'",
-                       (now(), request_id))
+            return db.execute("UPDATE jobs SET uploaded=1,status='pending',updated_at=? WHERE id=? AND status='uploading'",
+                       (now(), request_id)).rowcount == 1
 
     def upload_failed(self, request_id: str, message: str):
         with self.connect() as db:

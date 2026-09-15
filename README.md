@@ -63,8 +63,10 @@ S3 object and preview link. An S3 upload failure has no video link.
 
 ### Data flow and recovery
 
-1. API saves an `uploading` request in SQLite and puts the video in private S3.
-2. API changes it to `pending` and sends only `request_id` to SQS.
+1. UI sends filename, content type and byte size to `POST /videos/uploads`. The
+   API creates an `uploading` record and returns a short-lived signed PUT URL.
+2. Browser streams the File directly to S3, then calls `POST /videos/{id}/complete`.
+   The API verifies S3 size/type, atomically marks it `pending` and queues its ID.
 3. Unpublished pending rows act as a durable outbox. The worker republishes them
    if the API crashes or SQS send fails. Duplicate sends are safe.
 4. Worker atomically claims the request as `processing`, with a lease/token.
@@ -127,7 +129,7 @@ They do not establish real AWS access or Gemini accuracy.
 
 ### Executed verification (September 15, 2026)
 
-- 47 automated tests passed on Python 3.14.3, including local retrieval, frame descriptions, relevance rejection and regional URL signing.
+- 72 automated tests passed on Python 3.14.3, including local retrieval, frame descriptions, relevance rejection and regional URL signing.
 - Live query `tidy up pillow` returned only video 1 at 9.298s. The extracted frame was visually inspected and shows pillow handling; dog, cooking and cement queries returned no results across the two indexed videos.
 - Live natural search returned HTTP 200; bedding ranked video 1 first and cocoons ranked video 2 first. Both frame citations returned JPEGs (200), both video previews returned ranged MP4 responses (206), and blank natural queries returned 422.
 - All four supplied MP4s passed through the original synchronous upload endpoint with actual FFmpeg
@@ -192,8 +194,9 @@ vector, model identifier and document hash. The worker indexes completed jobs;
 search also backfills missing or changed documents. Changing EMBEDDING_MODEL
 requires running the preparation script and restarting services.
 
-Videos and their best supporting frame must both meet SEARCH_MIN_SIMILARITY
-(default cosine 0.60). Up to three qualifying videos are reranked using 75%
+Videos and their best supporting frame must qualify through semantic similarity
+(SEARCH_MIN_SIMILARITY, default cosine 0.60) or full query-token coverage in
+the video tags and frame description respectively. Up to three qualifying videos are reranked using 75%
 video similarity and 25% query keyword coverage. No matches returns an empty
 list. These thresholds and weights are prototype heuristics, not calibrated
 relevance probabilities; false positives and missed matches remain possible.
@@ -211,8 +214,8 @@ Original tags and summaries are preserved, with separate caption provenance.
 the timestamped JPEG and caches it locally. A model-described frame is still
 not guaranteed visual proof: sparse samples and caption errors remain possible.
 Natural search has its own results component, runs only on explicit submit,
-and never filters request history. Clicking a result seeks and plays its
-supporting timestamp; searching does not automatically open a video.
+and never filters request history. The Play button opens an inline player in that result card at its supporting
+timestamp. Request details stay unchanged; searching does not autoplay.
 
 Original videos remain unchanged in S3. The ingestion pipeline resizes extracted
 frames to at most 768 pixels per edge; it does not transcode the complete video.
@@ -239,8 +242,9 @@ memory. Measure peak memory and throughput before choosing worker count.
 Production scaling would separate API and ingestion replicas, replace local
 SQLite with shared PostgreSQL, use a vector index instead of a linear scan,
 and autoscale ingestion from queue age/depth subject to a compute budget.
-Direct presigned S3 uploads can remove video transfer from the API; they require
-upload completion verification before enqueueing. Concurrency limits, per-job
+The UI uses direct presigned S3 uploads with metadata verification, keeping
+video transfer outside the API. The legacy multipart API remains available.
+Concurrency limits, per-job
 temporary disk quotas, lease heartbeats and shared citation storage remain
 production work, not features already shipped in this prototype.
 
@@ -266,3 +270,53 @@ incorrect cooking tags on workshop/construction footage, a brush on bedding, and
 missed workshop labels. The uncalibrated thresholds and limited vocabulary are
 not reliable enough to claim parity with Gemini. Gemini remains the recommended
 default; local CLIP is an explicit experimental choice without per-call API fees.
+
+## Browser-to-S3 uploads
+
+The UI now uses direct S3 PUTs. `POST /videos/uploads` accepts JSON with
+`filename`, `content_type`, and `size_bytes` and returns `{request,upload}`.
+The signed request expires in ten minutes, binds content length/type and AES256
+encryption, and includes `If-None-Match: *` to prevent overwriting the object.
+The browser sends the File directly to S3; it supplies Content-Length itself.
+No AWS account credentials are sent to the browser.
+
+S3 CORS allows exactly `http://127.0.0.1:8000` and `http://localhost:8000` for
+PUT/GET/HEAD. A different UI origin must be explicitly added. CORS permits the
+browser request; it does not make the bucket public or authorize unsigned access.
+The provisioning script merges this CORS rule without removing existing rules.
+
+After a successful upload, `POST /videos/{id}/complete` checks object size and
+content type against the stored request before queueing. Repeated completion
+calls are idempotent; queue failures remain recoverable through the outbox.
+Media decoding is still validated by the worker. Confirmation failures can be
+retried in the UI without uploading again. Browser upload timeout is 120 seconds.
+Interrupted uploads expire from the uploading state after 15 minutes while the
+worker runs. A completed S3 upload with no confirmation may leave an orphaned
+object; lifecycle cleanup remains future work.
+
+This first version is a single direct PUT, not resumable multipart upload.
+The configured 100 MB limit remains. Direct uploads avoid server video buffers and
+temporary files; they do not eliminate S3 storage/request or client network cost.
+The legacy `POST /videos` and synchronous diagnostic endpoint retain their
+server-mediated upload behavior.
+
+Live browser direct-upload verification passed for 3.mp4: S3 PUT and completion
+worked with local CORS, then preview decoded successfully. The first inference
+received a provider 503; a subsequent user upload completed. Live search now
+returns only 3.mp4 for `grill`, only 1.mp4 for `pillow`, and no results for
+`dog grill`. A regression test covers exact evidence below the cosine cutoff.
+
+## Container format verification
+
+Automated tests generate and decode MP4/H.264, MOV/H.264, MKV/MPEG-4,
+AVI/MPEG-4 and WebM/VP8. All five pass frame extraction, the synchronous API
+and direct-upload intent validation. Decoding checks actual media, not filename
+extensions; invalid and audio-only uploads are rejected by media validation.
+Browsers may not preview every container/codec combination even when ingestion
+works. The UI provides an original-file link if native playback fails. Originals
+are never transcoded or overwritten. Browser MIME values outside video/* are
+sent as application/octet-stream so uncommon containers can reach the decoder.
+
+Provider HTTP500/502/503 now activate the worker's existing maximum-three-attempt
+retry policy; HTTP504 remains a retryable timeout. Tests mock each error mapping
+without provider calls. Already failed jobs are not silently retried.

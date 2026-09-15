@@ -8,6 +8,26 @@ from dotenv import load_dotenv, set_key
 import os
 
 
+def configure_cors(s3, bucket):
+    try:
+        rules = s3.get_bucket_cors(Bucket=bucket)['CORSRules']
+    except s3.exceptions.ClientError as exc:
+        if exc.response['Error']['Code'] != 'NoSuchCORSConfiguration':
+            raise
+        rules = []
+    rule = {
+        'ID': 'instawork-local-ui',
+        'AllowedOrigins': ['http://127.0.0.1:8000', 'http://localhost:8000'],
+        'AllowedMethods': ['PUT', 'GET', 'HEAD'],
+        'AllowedHeaders': ['content-type', 'content-length', 'if-none-match',
+                           'x-amz-server-side-encryption', 'range'],
+        'ExposeHeaders': ['ETag'], 'MaxAgeSeconds': 600,
+    }
+    # Preserve unrelated bucket rules when this setup is rerun.
+    rules = [existing for existing in rules if existing.get('ID') != rule['ID']]
+    s3.put_bucket_cors(Bucket=bucket, CORSConfiguration={'CORSRules': rules + [rule]})
+
+
 def main():
     load_dotenv()
     if os.getenv('AWS_USAGE_ENABLED', 'false').lower() != 'true':
@@ -31,6 +51,7 @@ def main():
     s3.put_bucket_encryption(Bucket=bucket, ServerSideEncryptionConfiguration={
         'Rules': [{'ApplyServerSideEncryptionByDefault': {'SSEAlgorithm': 'AES256'}}]})
     s3.put_bucket_tagging(Bucket=bucket, Tagging={'TagSet': [{'Key': 'Project', 'Value': 'instawork-assessment'}]})
+    configure_cors(s3, bucket)
     queue_url = sqs.create_queue(QueueName=queue_name, Attributes={
         'VisibilityTimeout': '600', 'ReceiveMessageWaitTimeSeconds': '10',
         'MessageRetentionPeriod': '345600', 'SqsManagedSseEnabled': 'true'},

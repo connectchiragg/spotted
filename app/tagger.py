@@ -99,6 +99,8 @@ class GeminiTagger:
         except errors.APIError as exc:
             if exc.code == 504:
                 raise TaggerError('Gemini request timed out', 504) from exc
+            if exc.code in (500, 502, 503):
+                raise TaggerError('Gemini is temporarily unavailable; retry later', 503) from exc
             if exc.code == 429:
                 raise TaggerError('Gemini quota exceeded; wait or check your project quota', 503) from exc
             if exc.code in (401, 403):

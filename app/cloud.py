@@ -36,6 +36,24 @@ class Cloud:
     def download(self, job: dict, path: Path):
         self.s3.download_file(self.settings.s3_bucket, job['object_key'], str(path))
 
+    def direct_upload(self, job: dict, size: int):
+        if size <= 0 or size > self.settings.max_upload_mb * 1024 * 1024:
+            raise ValueError('Video size is outside the upload limit')
+        url = self.s3.generate_presigned_url('put_object', Params={
+            'Bucket': self.settings.s3_bucket, 'Key': job['object_key'],
+            'ContentLength': size, 'ContentType': job['content_type'],
+            'ServerSideEncryption': 'AES256', 'IfNoneMatch': '*',
+        }, ExpiresIn=600)
+        # Browser supplies Content-Length from the File; JS cannot set it manually.
+        return {'url': url, 'method': 'PUT', 'headers': {
+            'Content-Type': job['content_type'],
+            'x-amz-server-side-encryption': 'AES256', 'If-None-Match': '*',
+        }, 'expires_in': 600}
+
+    def upload_metadata(self, job: dict):
+        metadata = self.s3.head_object(Bucket=self.settings.s3_bucket, Key=job['object_key'])
+        return {'ContentLength': metadata['ContentLength'], 'ContentType': metadata['ContentType']}
+
     def publish(self, request_id: str):
         self.sqs.send_message(QueueUrl=self.settings.sqs_queue_url,
                               MessageBody=json.dumps({'request_id': request_id}))

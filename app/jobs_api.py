@@ -3,6 +3,8 @@ import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
+from pydantic import BaseModel, Field, field_validator
+from botocore.exceptions import ClientError
 
 from app.cloud import CLOUD_ERRORS, Cloud
 from app.config import Settings
@@ -50,6 +52,77 @@ def present(job, cloud):
         except CLOUD_ERRORS:
             result['download_error'] = 'Preview link temporarily unavailable'
     return result
+
+
+class UploadIntent(BaseModel):
+    filename: str = Field(min_length=1,max_length=255)
+    content_type: str = Field(default='application/octet-stream',max_length=100)
+    size_bytes: int = Field(gt=0,strict=True)
+
+    @field_validator('filename')
+    @classmethod
+    def valid_filename(cls,value):
+        if not value.strip() or any(ord(c)<32 for c in value):
+            raise ValueError('Filename must not be blank or contain control characters')
+        return value
+
+    @field_validator('content_type')
+    @classmethod
+    def valid_type(cls,value):
+        import re
+        if value!='application/octet-stream' and not re.fullmatch(r'video/[A-Za-z0-9.+-]+',value):
+            raise ValueError('Expected a video content type')
+        return value
+
+
+@router.post('/videos/uploads',status_code=201)
+def create_upload(body: UploadIntent, settings: Settings = Depends(settings_dependency),
+                  store: Store = Depends(store_dependency), cloud: Cloud = Depends(cloud_dependency)):
+    if body.size_bytes > settings.max_upload_mb*1024*1024:
+        raise HTTPException(413,'Video exceeds upload size limit')
+    job=store.create(body.filename,body.content_type,body.size_bytes)
+    try:
+        upload=cloud.direct_upload(job,body.size_bytes)
+    except CLOUD_ERRORS as exc:
+        store.upload_failed(job['id'],'Could not prepare direct upload; submit again')
+        raise HTTPException(503,'Could not prepare direct upload') from exc
+    return {'request':present(job,cloud),'upload':upload}
+
+
+@router.post('/videos/{request_id}/complete',status_code=202)
+def complete_upload(request_id: str, settings: Settings = Depends(settings_dependency),
+                    store: Store = Depends(store_dependency), cloud: Cloud = Depends(cloud_dependency)):
+    job=store.get(request_id)
+    if job is None:
+        raise HTTPException(404,'Upload request not found')
+    if job['uploaded']:
+        return present(job,cloud)  # Confirmation retry never initiates a new job.
+    if job['status']!='uploading' or job['expected_size'] is None:
+        raise HTTPException(409,'This request cannot be completed; start a new upload')
+    try:
+        metadata=cloud.upload_metadata(job)
+    except ClientError as exc:
+        if str(exc.response.get('Error',{}).get('Code')) in ('404','NoSuchKey','NotFound'):
+            raise HTTPException(409,'Video has not reached S3 yet; retry confirmation') from exc
+        raise HTTPException(502,'Could not verify S3 upload; retry confirmation') from exc
+    except CLOUD_ERRORS as exc:
+        raise HTTPException(502,'Could not verify S3 upload; retry confirmation') from exc
+    if metadata.get('ContentLength')!=job['expected_size'] or metadata.get('ContentLength',0)>settings.max_upload_mb*1024*1024:
+        store.upload_failed(job['id'],'Stored video size does not match upload request')
+        raise HTTPException(422,'Stored video size does not match upload request')
+    if metadata.get('ContentType')!=job['content_type']:
+        store.upload_failed(job['id'],'Stored video content type does not match upload request')
+        raise HTTPException(422,'Stored video content type does not match upload request')
+    if store.uploaded(job['id']):
+        try:
+            cloud.publish(job['id'])
+            store.published(job['id'])
+        except CLOUD_ERRORS:
+            log.warning('Queue send deferred for %s',job['id'])
+    latest=store.get(job['id'])
+    if not latest['uploaded']:
+        raise HTTPException(409,'Upload expired; start a new upload')
+    return present(latest,cloud)
 
 
 @router.post('/videos', status_code=202)
