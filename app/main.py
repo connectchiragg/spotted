@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 from app.config import Settings
 from app.media import MediaError, extract_frames
 from app.models import VideoResponse
+from app.providers import create_tagger
 from app.tagger import GeminiTagger, PROMPT_VERSION, Tagger, TaggerError
 from app.jobs_api import router
 from app.search_api import router as search_router
@@ -24,9 +25,10 @@ def get_settings() -> Settings:
 
 
 def get_tagger(settings: Settings = Depends(get_settings)) -> Tagger:
-    if not settings.api_key:
-        raise HTTPException(503, 'Set GEMINI_API_KEY in .env and restart the server')
-    return GeminiTagger(settings)
+    try:
+        return create_tagger(settings)
+    except (TaggerError, RuntimeError) as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 @app.get('/health')
@@ -61,7 +63,7 @@ def tag_video(
             return VideoResponse(
                 filename=file.filename or 'video', duration_seconds=duration,
                 sampled_timestamps=[frame.timestamp for frame in frames],
-                model=tagger.model, prompt_version=PROMPT_VERSION,
+                model=tagger.model, prompt_version=getattr(tagger,'prompt_version',PROMPT_VERSION),
                 summary=result.summary, tags=result.tags, frame_descriptions=result.frame_descriptions,
             )
     except MediaError as exc:

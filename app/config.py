@@ -8,6 +8,8 @@ load_dotenv()
 
 @dataclass(frozen=True)
 class Settings:
+    tagging_provider: str = field(default_factory=lambda: os.getenv('TAGGING_PROVIDER', 'gemini'))
+    image_model_cache: str = field(default_factory=lambda: os.getenv('IMAGE_MODEL_CACHE', 'data/models'))
     api_key: str = field(default_factory=lambda: os.getenv('GEMINI_API_KEY', ''), repr=False)
     model: str = field(default_factory=lambda: os.getenv('GEMINI_MODEL', 'gemini-3.6-flash'))
     max_upload_mb: int = field(default_factory=lambda: int(os.getenv('MAX_UPLOAD_MB', '100')))
@@ -29,6 +31,8 @@ class Settings:
         return max(600, self.max_frames * 10 + self.gemini_timeout_seconds + 180)
 
     def __post_init__(self):
+        if self.tagging_provider not in ('gemini','local_clip'):
+            raise ValueError('TAGGING_PROVIDER must be gemini or local_clip')
         if not 0 <= self.search_min_similarity <= 1:
             raise ValueError('SEARCH_MIN_SIMILARITY must be between 0 and 1')
         if not 1 <= self.max_frames <= 32:

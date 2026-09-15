@@ -10,6 +10,7 @@ from app.media import MediaError, extract_frames
 from app.store import Store
 from app.tagger import GeminiTagger, PROMPT_VERSION, TaggerError
 from app.retrieval import index_jobs, index_frames, load_embedder
+from app.providers import create_tagger
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ def process_message(message, store, cloud, tagger, settings):
             result = tagger.tag_frames(frames)
             output = result.model_dump() | {
                 'duration_seconds': duration, 'sampled_timestamps': [f.timestamp for f in frames],
-                'model': tagger.model, 'prompt_version': PROMPT_VERSION,
+                'model': tagger.model, 'prompt_version': getattr(tagger,'prompt_version',PROMPT_VERSION),
             }
             committed = store.finish(request_id, token, output)
             log.info('Request %s completed=%s', request_id, committed)
@@ -68,9 +69,7 @@ def process_message(message, store, cloud, tagger, settings):
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     settings = Settings()
-    if not settings.api_key:
-        raise RuntimeError('GEMINI_API_KEY must be configured for the worker')
-    store, cloud, tagger = Store(settings.database_path), Cloud(settings), GeminiTagger(settings)
+    store, cloud, tagger = Store(settings.database_path), Cloud(settings), create_tagger(settings)
     log.info('Worker polling SQS in %s', settings.aws_region)
     while True:
         try:

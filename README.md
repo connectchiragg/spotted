@@ -127,7 +127,7 @@ They do not establish real AWS access or Gemini accuracy.
 
 ### Executed verification (September 15, 2026)
 
-- 41 automated tests passed on Python 3.14.3, including local retrieval, frame descriptions, relevance rejection and regional URL signing.
+- 47 automated tests passed on Python 3.14.3, including local retrieval, frame descriptions, relevance rejection and regional URL signing.
 - Live query `tidy up pillow` returned only video 1 at 9.298s. The extracted frame was visually inspected and shows pillow handling; dog, cooking and cement queries returned no results across the two indexed videos.
 - Live natural search returned HTTP 200; bedding ranked video 1 first and cocoons ranked video 2 first. Both frame citations returned JPEGs (200), both video previews returned ranged MP4 responses (206), and blank natural queries returned 422.
 - All four supplied MP4s passed through the original synchronous upload endpoint with actual FFmpeg
@@ -221,3 +221,48 @@ avoid redundant CPU work. No audio is sent to the image model.
 
 Preview URLs are signed against the regional S3 endpoint to prevent redirects
 from invalidating the signature. Temporary credentials can shorten their lifetime.
+
+## Scaling discussion
+
+Current runtime is one Uvicorn API process plus one separate Python SQS worker.
+FastAPI runs synchronous endpoints in a thread pool: one API process can serve
+multiple overlapping requests. There is no explicit API concurrency cap yet.
+Uploaded video bytes are copied in chunks to temporary files, but multipart
+spooling and concurrent requests still require memory and disk budgets.
+
+Each worker currently processes one queued video at a time. Its memory budget
+includes model weights, sampled frames, inference workspace and FFmpeg decoding;
+the complete compressed original is kept on temporary disk rather than loaded
+as one Python byte string. Separate worker processes normally duplicate model
+memory. Measure peak memory and throughput before choosing worker count.
+
+Production scaling would separate API and ingestion replicas, replace local
+SQLite with shared PostgreSQL, use a vector index instead of a linear scan,
+and autoscale ingestion from queue age/depth subject to a compute budget.
+Direct presigned S3 uploads can remove video transfer from the API; they require
+upload completion verification before enqueueing. Concurrency limits, per-job
+temporary disk quotas, lease heartbeats and shared citation storage remain
+production work, not features already shipped in this prototype.
+
+## Experimental local image tagging
+
+A local CLIP adapter is available with `TAGGING_PROVIDER=local_clip`. Prepare
+weights using `.venv/bin/python scripts/prepare_image_model.py`, then restart
+API and worker. `TAGGING_PROVIDER=gemini` selects the existing provider. There is
+no automatic fallback and existing completed results are not overwritten.
+Both providers use the same `Tagger` contract and record model/prompt version.
+
+Local CLIP uses matched FastEmbed ONNX vision/text encoders and a reviewed finite
+candidate vocabulary. It emits thresholded candidate labels and evidence indices;
+its frame descriptions are templates from candidates, not generated captions.
+The adapter serializes inference within each process, batches up to eight frames,
+and caches one provider instance per settings configuration. Additional processes
+normally load additional model instances. Model assets stay in ignored data/models.
+
+All four provided videos ran locally: sampled-image inference took 1.24, 0.71,
+0.71 and 0.70 seconds respectively, excluding FFmpeg; initialization was 1.93s.
+These are single-run observations, not throughput guarantees. The trial produced
+incorrect cooking tags on workshop/construction footage, a brush on bedding, and
+missed workshop labels. The uncalibrated thresholds and limited vocabulary are
+not reliable enough to claim parity with Gemini. Gemini remains the recommended
+default; local CLIP is an explicit experimental choice without per-call API fees.

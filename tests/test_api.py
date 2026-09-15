@@ -65,7 +65,7 @@ def test_bad_upload(client, content):
 
 def test_missing_key(client, video):
     app.dependency_overrides.pop(get_tagger)
-    app.dependency_overrides[get_settings] = lambda: Settings(api_key='')
+    app.dependency_overrides[get_settings] = lambda: Settings(api_key='',tagging_provider='gemini')
     response = client.post('/videos/tag', files={'file': ('sample.mp4', video)})
     assert response.status_code == 503
 
