@@ -53,6 +53,7 @@ def main():
     s3.put_public_access_block(Bucket=bucket,PublicAccessBlockConfiguration={k:True for k in ['BlockPublicAcls','IgnorePublicAcls','BlockPublicPolicy','RestrictPublicBuckets']})
     s3.put_bucket_encryption(Bucket=bucket,ServerSideEncryptionConfiguration={'Rules':[{'ApplyServerSideEncryptionByDefault':{'SSEAlgorithm':'AES256'}}]})
     s3.put_bucket_cors(Bucket=bucket,CORSConfiguration={'CORSRules':[{'AllowedOrigins':['https://framer.haciensus.com'],'AllowedMethods':['PUT','GET','HEAD'],'AllowedHeaders':['*'],'ExposeHeaders':['ETag'],'MaxAgeSeconds':600}]})
+    s3.put_bucket_lifecycle_configuration(Bucket=bucket,LifecycleConfiguration={'Rules':[{'ID':'bound-demo-storage','Status':'Enabled','Filter':{'Prefix':'videos/'},'Expiration':{'Days':7},'AbortIncompleteMultipartUpload':{'DaysAfterInitiation':1}}]})
     iam.create_role(RoleName=name, AssumeRolePolicyDocument=json.dumps({'Version':'2012-10-17',
         'Statement':[{'Effect':'Allow','Principal':{'Service':'ec2.amazonaws.com'},'Action':'sts:AssumeRole'}]}))
     state['role'] = name

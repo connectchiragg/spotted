@@ -11,7 +11,7 @@ class Settings:
     tagging_provider: str = field(default_factory=lambda: os.getenv('TAGGING_PROVIDER', 'gemini'))
     image_model_cache: str = field(default_factory=lambda: os.getenv('IMAGE_MODEL_CACHE', 'data/models'))
     api_key: str = field(default_factory=lambda: os.getenv('GEMINI_API_KEY', ''), repr=False)
-    model: str = field(default_factory=lambda: os.getenv('GEMINI_MODEL', 'gemini-3.6-flash'))
+    model: str = field(default_factory=lambda: os.getenv('GEMINI_MODEL', 'gemini-3.5-flash'))
     max_upload_mb: int = field(default_factory=lambda: int(os.getenv('MAX_UPLOAD_MB', '100')))
     max_video_seconds: int = field(default_factory=lambda: int(os.getenv('MAX_VIDEO_SECONDS', '600')))
     max_frames: int = field(default_factory=lambda: int(os.getenv('MAX_FRAMES', '8')))

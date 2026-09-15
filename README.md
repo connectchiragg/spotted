@@ -37,7 +37,7 @@ The API and worker are separate systemd services on one AWS EC2 host. PostgreSQL
 2. The browser uploads directly to S3. Video bytes do not pass through the API process.
 3. `POST /videos/{id}/complete` verifies the object size/type, then atomically records a pending job and queues it in PostgreSQL.
 4. The worker leases a job using `FOR UPDATE SKIP LOCKED`, downloads the original to temporary disk, and extracts up to eight evenly spaced JPEGs at a maximum dimension of 768 pixels.
-5. Gemini returns a summary, tags and descriptions linked to sampled frames. The worker saves these before acknowledging the queue message.
+5. Gemini 3.5 Flash returns a summary, tags and descriptions linked to sampled frames. The worker saves these before acknowledging the queue message.
 6. FastEmbed runs `BAAI/bge-small-en-v1.5` locally and stores 384-dimensional embeddings in pgvector columns.
 
 Lease tokens reject stale updates. Transient provider failures retry up to three attempts. Completion is idempotent. A crash between inference and commit can still repeat an inference call. Systemd restarts failed services.
@@ -51,6 +51,7 @@ Vectors are stored in PostgreSQL, but retrieval currently scans candidates rathe
 ## Public demo limits and costs
 
 - 25 MB per upload, ten-minute maximum video duration.
+- Uploaded videos expire from S3 after seven days; incomplete multipart uploads are aborted after one day. Metadata may remain in request history after the original expires.
 - Shared budgets: 10 upload attempts and 100 query attempts per UTC day.
 - Counters persist across process restarts in a small local SQLite file. Failed attempts count toward the budget.
 - Legacy server-mediated upload endpoints are disabled in public mode.
@@ -104,6 +105,8 @@ The supplied PostgreSQL startup helper uses an isolated cluster under ignored `d
 TEST_POSTGRES_DSN=postgresql://YOUR_USER@127.0.0.1:54329/irl \
   .venv/bin/python -m pytest -q tests/test_postgres.py
 ```
+
+Latest verification: **92 tests passed**, including the PostgreSQL integration suite. A synthetic public upload completed tagging and was retrieved with a frame citation; a real browser played it inline. Generated query answers used the documented retrieval fallback during this check. The synthetic uploads were removed afterward.
 
 Tests cover real FFmpeg media decoding, upload validation, signed-upload constraints, durable queue races, retries, stale claims, PostgreSQL vectors, retrieval, answer citations and concurrent daily-budget enforcement. Provider unit tests use substitutes; they do not establish tagging accuracy.
 
