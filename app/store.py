@@ -29,7 +29,7 @@ class Store:
             if 'expected_size' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
                 db.execute('ALTER TABLE jobs ADD COLUMN expected_size INTEGER')
             columns = {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}
-            for column in ('display_name','archived_at'):
+            for column in ('display_name','archived_at','progress'):
                 if column not in columns:
                     db.execute(f'ALTER TABLE jobs ADD COLUMN {column} TEXT')
             db.execute('''CREATE TABLE IF NOT EXISTS embeddings (
@@ -68,6 +68,7 @@ class Store:
             return None
         item = dict(row)
         item['result'] = json.loads(item['result']) if item['result'] else None
+        item['progress'] = json.loads(item['progress']) if item.get('progress') else None
         return item
 
     def get(self, request_id: str):
@@ -127,6 +128,17 @@ class Store:
                 WHERE id=? AND (status='pending' OR (status='processing' AND lease_until<?))''',
                 (time.time() + lease_seconds, token, now(), request_id, time.time()))
             return token if result.rowcount else None
+
+    def set_progress(self, request_id, claim_token, stage, percent, eta_seconds=None):
+        if not isinstance(stage,str) or not stage.strip() or not 0 <= percent <= 100:
+            raise ValueError('Progress requires a stage and percentage between 0 and 100')
+        if eta_seconds is not None and eta_seconds < 0:
+            raise ValueError('ETA must not be negative')
+        timestamp=now()
+        progress={'stage':stage,'percent':percent,'eta_seconds':eta_seconds,'updated_at':timestamp}
+        with self.connect() as db:
+            return db.execute("UPDATE jobs SET progress=?,updated_at=? WHERE id=? AND status='processing' AND claim_token=?",
+                              (json.dumps(progress),timestamp,request_id,claim_token)).rowcount == 1
 
     def finish(self, request_id: str, token: str, result: dict):
         with self.connect() as db:

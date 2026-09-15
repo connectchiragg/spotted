@@ -46,6 +46,17 @@ def present(job, cloud):
     result = {key: job[key] for key in ('id','filename','status','created_at','updated_at','error','attempts','result')}
     result.update(display_name=job.get('display_name'), archived_at=job.get('archived_at'))
     result['possible_duplicate'] = (job.get('result') or {}).get('possible_duplicate')
+    progress = dict(job.get('progress') or {})
+    if job['status']=='completed':
+        progress.update(stage='Completed',percent=100,eta_seconds=0,updated_at=job['updated_at'])
+    elif job['status']=='failed':
+        progress.update(stage='Failed',percent=progress.get('percent',0),eta_seconds=None,updated_at=job['updated_at'])
+    elif job['status'] in ('pending','uploading'):
+        progress = {'stage':'Queued' if job['status']=='pending' else 'Uploading',
+                    'percent':0,'eta_seconds':None,'updated_at':job['updated_at']}
+    elif not progress:
+        progress = {'stage':'Processing','percent':0,'eta_seconds':None,'updated_at':job['updated_at']}
+    result['progress'] = progress
     result.update(download_url=None, download_url_expires_at=None)
     if job['uploaded']:
         if cloud is None:

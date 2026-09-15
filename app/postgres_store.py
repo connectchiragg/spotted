@@ -27,6 +27,7 @@ class PostgresStore:
                 lease_until DOUBLE PRECISION, claim_token TEXT, expected_size BIGINT)''')
             db.execute('ALTER TABLE jobs ADD COLUMN IF NOT EXISTS display_name TEXT')
             db.execute('ALTER TABLE jobs ADD COLUMN IF NOT EXISTS archived_at TEXT')
+            db.execute('ALTER TABLE jobs ADD COLUMN IF NOT EXISTS progress JSONB')
             db.execute('CREATE INDEX IF NOT EXISTS jobs_created ON jobs(created_at DESC)')
             db.execute('''CREATE TABLE IF NOT EXISTS embeddings (
                 job_id TEXT REFERENCES jobs(id), model TEXT, text_hash TEXT NOT NULL,
@@ -128,6 +129,17 @@ class PostgresStore:
                 AND (status='pending' OR (status='processing' AND lease_until<%s))''',
                 (time.time()+lease_seconds,token,now(),request_id,time.time())).rowcount
             return token if changed else None
+
+    def set_progress(self, request_id, claim_token, stage, percent, eta_seconds=None):
+        if not isinstance(stage,str) or not stage.strip() or not 0 <= percent <= 100:
+            raise ValueError('Progress requires a stage and percentage between 0 and 100')
+        if eta_seconds is not None and eta_seconds < 0:
+            raise ValueError('ETA must not be negative')
+        timestamp=now()
+        progress={'stage':stage,'percent':percent,'eta_seconds':eta_seconds,'updated_at':timestamp}
+        with self.connect() as db:
+            return db.execute("UPDATE jobs SET progress=%s,updated_at=%s WHERE id=%s AND status='processing' AND claim_token=%s",
+                              (Jsonb(progress),timestamp,request_id,claim_token)).rowcount == 1
 
     def finish(self, request_id, token, result):
         with self.connect() as db:

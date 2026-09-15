@@ -97,3 +97,13 @@ def test_postgres_archive_preserves_processing_and_name(pg):
     assert pg.list(tags=['kitchen'],include_archived=True)[0]['display_name']=='Named clip'
     assert pg.restore(job['id']) and pg.restore(job['id'])
     assert pg.completed()[0]['filename']=='original.mp4'
+
+
+def test_postgres_progress_is_persistent_and_claim_guarded(pg):
+    job=pg.create('clip.mp4','video/mp4');pg.uploaded(job['id']);token=pg.claim(job['id'],600)
+    assert not pg.set_progress(job['id'],'wrong','Tagging',50,30)
+    assert pg.set_progress(job['id'],token,'Tagging',50,30)
+    saved=PostgresStore(pg.dsn).get(job['id'])
+    assert saved['progress']['stage']=='Tagging' and saved['progress']['eta_seconds']==30
+    pg.finish(job['id'],token,{'summary':'done','tags':[]})
+    assert not pg.set_progress(job['id'],token,'Old worker',70)

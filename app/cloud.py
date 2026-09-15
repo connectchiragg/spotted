@@ -41,6 +41,32 @@ class Cloud:
     def download(self, job: dict, path: Path):
         self.s3.download_file(self.settings.s3_bucket, job['object_key'], str(path))
 
+    def upload_preview(self, job: dict, index: int, data: bytes):
+        key = f"videos/{job['id']}/previews/{index}.gif"
+        self.s3.put_object(Bucket=self.settings.s3_bucket, Key=key, Body=data,
+                           ContentType='image/gif', ServerSideEncryption='AES256')
+        return key
+
+    def preview_url(self, job: dict, index: int):
+        return self.s3.generate_presigned_url('get_object', Params={
+            'Bucket': self.settings.s3_bucket,
+            'Key': f"videos/{job['id']}/previews/{index}.gif",
+            'ResponseContentDisposition': 'inline',
+        }, ExpiresIn=86400)
+
+    def upload_frame(self, job: dict, index: int, data: bytes):
+        key = f"videos/{job['id']}/frames/{index}.jpg"
+        self.s3.put_object(Bucket=self.settings.s3_bucket, Key=key, Body=data,
+                           ContentType='image/jpeg', ServerSideEncryption='AES256')
+        return key
+
+    def frame_url(self, job: dict, index: int):
+        return self.s3.generate_presigned_url('get_object', Params={
+            'Bucket': self.settings.s3_bucket,
+            'Key': f"videos/{job['id']}/frames/{index}.jpg",
+            'ResponseContentDisposition': 'inline',
+        }, ExpiresIn=86400)
+
     def direct_upload(self, job: dict, size: int):
         if size <= 0 or size > self.settings.max_upload_mb * 1024 * 1024:
             raise ValueError('Video size is outside the upload limit')

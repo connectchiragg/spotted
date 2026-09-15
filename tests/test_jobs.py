@@ -30,6 +30,12 @@ class FakeCloud:
             raise EndpointConnectionError(endpoint_url='https://s3.invalid')
         self.objects[job['object_key']] = path.read_bytes()
 
+    def upload_frame(self, job, index, data):
+        self.objects[f"videos/{job['id']}/frames/{index}.jpg"] = data
+
+    def upload_preview(self, job, index, data):
+        self.objects[f"videos/{job['id']}/previews/{index}.gif"] = data
+
     def download(self, job, path):
         path.write_bytes(self.objects[job['object_key']])
 
@@ -215,3 +221,22 @@ def test_search_paginates_matches_not_all_jobs(setup):
 def test_search_rejects_invalid_tags(setup,tags):
     client,*_=setup
     assert client.get('/videos',params=[('tags',tag) for tag in tags]).status_code==422
+
+
+def test_tagging_overlaps_preview_generation(setup, monkeypatch):
+    from threading import Event
+    client, store, cloud, settings, path = setup
+    tagging_started, preview_started = Event(), Event()
+    class ConcurrentTagger(TestTagger):
+        def tag_frames(self, frames):
+            tagging_started.set()
+            assert preview_started.wait(2), 'Preview generation did not overlap tagging'
+            return super().tag_frames(frames)
+    def prepare(*args, **kwargs):
+        assert tagging_started.wait(2)
+        preview_started.set()
+        return [0]
+    monkeypatch.setattr('app.worker.prepare_previews', prepare)
+    response=upload(setup)
+    process_message(cloud.messages[0],store,cloud,ConcurrentTagger(),settings)
+    assert store.get(response.json()['id'])['status']=='completed'
