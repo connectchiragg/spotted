@@ -12,7 +12,7 @@ _preview_lock = threading.Lock()
 
 def evidence_gif(job, frame_index, cloud, cache_root):
     timestamp = job['result']['sampled_timestamps'][frame_index]
-    digest = hashlib.sha256(f"{job['object_key']}:{timestamp}:gif-v1".encode()).hexdigest()
+    digest = hashlib.sha256(f"{job['object_key']}:{timestamp}:gif-v2".encode()).hexdigest()
     cache = Path(cache_root) / 'previews'
     cache.mkdir(parents=True, exist_ok=True)
     output = cache / f'{digest}.gif'
@@ -28,12 +28,12 @@ def evidence_gif(job, frame_index, cloud, cache_root):
             cloud.download(job, source)
             data = run_media([
                 'ffmpeg', '-nostdin', '-v', 'error', '-threads', '1',
-                '-filter_threads', '1', '-protocol_whitelist', 'file,pipe',
+                '-skip_frame', 'noref', '-filter_threads', '1', '-protocol_whitelist', 'file,pipe',
                 '-ss', str(timestamp), '-i', str(source), '-t', '5',
                 '-map', '0:v:0', '-an', '-vf',
-                'fps=6,scale=320:320:force_original_aspect_ratio=decrease:flags=bilinear',
+                'fps=3,scale=240:240:force_original_aspect_ratio=decrease:flags=fast_bilinear',
                 '-threads', '1', '-loop', '0', '-f', 'gif', 'pipe:1',
-            ], timeout=30)
+            ], timeout=45)
             if not data.startswith((b'GIF87a', b'GIF89a')):
                 raise MediaError('No animation decoded')
             with tempfile.NamedTemporaryFile(dir=cache, delete=False) as temp:

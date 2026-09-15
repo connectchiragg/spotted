@@ -18,8 +18,8 @@ def test_gif_starts_at_citation_is_small_and_cached(tmp_path):
     job = {'object_key':'test', 'result':{'sampled_timestamps':[2.0,8.0]}}
     output = evidence_gif(job,0,cloud,tmp_path/'cache')
     metadata = json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-of','json',str(output)]))['streams'][0]
-    assert metadata['width'] == 320
-    assert metadata['height'] <= 320
+    assert metadata['width'] == 240
+    assert metadata['height'] <= 240
     assert 4.8 <= float(metadata['duration']) <= 5.2
     assert evidence_gif(job,0,cloud,tmp_path/'cache') == output
     assert cloud.calls == 1

@@ -2,14 +2,16 @@ import json
 import math
 import logging
 import os
-import re
+import time
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 
 logger = logging.getLogger(__name__)
-SCENE_SCAN_TIMEOUT = 90
+SCENE_SCAN_TIMEOUT = 15
+MAX_SCAN_PROBES = 16
+SCAN_PROBE_TIMEOUT = 2
 MIN_FRAME_GAP = 1.0
 
 
@@ -40,34 +42,33 @@ def _even_timestamps(duration: float, max_frames: int) -> list[float]:
 
 
 def _scene_changes(path: Path, duration: float, threshold: float) -> list[tuple[float, float]]:
-    # Decode once, then compare small images at 2 fps. Metadata goes to stdout;
-    # no decoded image stream is retained during the scan.
-    output = run_media([
-        'ffmpeg', '-nostdin', '-v', 'error', '-threads', '1',
-        '-filter_threads', '1', '-protocol_whitelist', 'file,pipe',
-        '-i', str(path), '-t', str(duration), '-map', '0:v:0',
-        '-vf', 'fps=2,scale=160:160:force_original_aspect_ratio=decrease,'
-               f'scdet=threshold={threshold:g},'
-               'metadata=mode=print:file=-',
-        '-an', '-threads', '1', '-f', 'null', '-',
-    ], timeout=SCENE_SCAN_TIMEOUT)
+    # Sparse input seeking avoids decoding every frame of a high-resolution video.
+    # These thumbnails only choose timestamps; final evidence images are extracted
+    # separately at those timestamps. Short events between probes can be missed.
+    started = time.monotonic()
+    step = max(.5, duration / MAX_SCAN_PROBES)
+    probe_times = [round(i * step, 3) for i in range(min(MAX_SCAN_PROBES, max(1, math.ceil(duration / step))))]
     changes = []
-    timestamp = None
-    pixel_difference = 0.0
-    for line in output.decode('utf-8', errors='replace').splitlines():
-        match = re.search(r'pts_time:([\d.eE+-]+)', line)
-        if match:
-            timestamp = float(match.group(1))
-            pixel_difference = 0.0
-        elif line.startswith('lavfi.scd.mafd='):
-            pixel_difference = float(line.split('=', 1)[1])
-        elif line.startswith('lavfi.scd.score=') and timestamp is not None:
-            # MAFD preserves substantial sustained motion whose scene-score
-            # derivative can cancel; neither metric understands semantics.
-            score = max(pixel_difference, float(line.split('=', 1)[1]))
-            if (math.isfinite(timestamp) and math.isfinite(score) and
-                    0 <= timestamp < duration and score >= threshold):
+    previous = None
+    for timestamp in probe_times:
+        remaining = SCENE_SCAN_TIMEOUT - (time.monotonic() - started)
+        if remaining <= 0:
+            cause = subprocess.TimeoutExpired('sparse scene scan', SCENE_SCAN_TIMEOUT)
+            raise MediaError('Scene scan exceeded its time budget') from cause
+        pixels = run_media([
+            'ffmpeg', '-nostdin', '-v', 'error', '-threads', '1',
+            '-filter_threads', '1', '-protocol_whitelist', 'file,pipe',
+            '-ss', str(timestamp), '-i', str(path), '-map', '0:v:0',
+            '-frames:v', '1', '-vf', 'scale=64:64', '-pix_fmt', 'gray',
+            '-an', '-threads', '1', '-f', 'rawvideo', 'pipe:1',
+        ], timeout=min(SCAN_PROBE_TIMEOUT, remaining))
+        if len(pixels) != 64 * 64:
+            raise MediaError('Could not extract a scene probe')
+        if previous is not None:
+            score = sum(abs(a - b) for a, b in zip(previous, pixels)) * 100 / (255 * len(pixels))
+            if score >= threshold:
                 changes.append((timestamp, score))
+        previous = pixels
     return changes
 
 

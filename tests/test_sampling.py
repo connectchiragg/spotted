@@ -68,12 +68,34 @@ def test_scan_timeout_falls_back_with_warning(monkeypatch, caplog):
     assert media.sampling_timestamps(Path('example.mp4'), 20, 3) == [3.333, 10.0, 16.667]
     assert 'using uniform frame sampling' in caplog.text
     command, limit = commands[0]
-    assert limit == 90
+    assert 0 < limit <= 2
     assert command[command.index('-filter_threads')+1] == '1'
     assert command[command.index('-protocol_whitelist')+1] == 'file,pipe'
 
 
-def test_sustained_pixel_difference_survives_zero_scene_score(monkeypatch):
-    metadata = b'frame:0 pts:0 pts_time:0\nlavfi.scd.mafd=0\nlavfi.scd.score=0\nframe:1 pts:1 pts_time:0.5\nlavfi.scd.mafd=12\nlavfi.scd.score=0\n'
-    monkeypatch.setattr(media, 'run_media', lambda *args, **kwargs: metadata)
-    assert media._scene_changes(Path('unused'), 3, 8) == [(.5, 12)]
+def test_sustained_pixel_difference_is_detected(monkeypatch):
+    samples=iter([bytes([0])*4096,bytes([50])*4096,bytes([100])*4096])
+    monkeypatch.setattr(media, 'run_media', lambda *args, **kwargs: next(samples))
+    changes=media._scene_changes(Path('unused'),1.5,8)
+    assert [timestamp for timestamp,_ in changes]==[.5,1.0]
+
+
+def test_long_video_scan_caps_probe_count_and_seeks_before_input(monkeypatch):
+    commands=[]
+    def probe(command,timeout):
+        commands.append((command,timeout))
+        return bytes(4096)
+    monkeypatch.setattr(media,'run_media',probe)
+    assert media._scene_changes(Path('unused'),600,8)==[]
+    assert len(commands)==16
+    assert all(command.index('-ss')<command.index('-i') for command,_ in commands)
+    assert all(timeout<=2 for _,timeout in commands)
+
+
+def test_scan_wall_budget_includes_prior_probes(monkeypatch):
+    ticks=iter([0,0,16])
+    monkeypatch.setattr(media.time,'monotonic',lambda:next(ticks))
+    monkeypatch.setattr(media,'run_media',lambda *a,**k:bytes(4096))
+    with pytest.raises(media.MediaError) as error:
+        media._scene_changes(Path('unused'),600,8)
+    assert isinstance(error.value.__cause__,subprocess.TimeoutExpired)

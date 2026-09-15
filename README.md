@@ -38,7 +38,7 @@ The API and worker are separate systemd services on one AWS EC2 host. PostgreSQL
 1. `POST /videos/uploads` validates filename, type and size and returns a ten-minute signed PUT URL.
 2. The browser uploads directly to S3. Video bytes do not pass through the API process.
 3. `POST /videos/{id}/complete` verifies the object size/type, then atomically records a pending job and queues it in PostgreSQL.
-4. The worker leases a job using `FOR UPDATE SKIP LOCKED`, downloads the original to temporary disk, and scans reduced images at two frames per second for pixel changes. It selects strong changes plus one to three coverage frames, keeps at least one second between selected moments, and extracts up to 16 JPEGs at a maximum dimension of 768 pixels. A scan exceeding 90 seconds falls back to evenly spaced samples.
+4. The worker leases a job using `FOR UPDATE SKIP LOCKED`, downloads the original to temporary disk, and compares up to 16 small, seeked thumbnails for pixel changes. It selects strong changes plus one to three coverage frames, keeps at least one second between selected moments, and extracts up to 16 JPEGs at a maximum dimension of 768 pixels. Each probe is capped at two seconds and the scan at 15 seconds; a timeout falls back to evenly spaced samples. Brief events between probes can be missed.
 5. Gemini 3.5 Flash returns a summary, tags and detailed descriptions linked to sampled frames, covering visible colors, materials, textures, positions, and foreground/background objects without guessing hidden attributes. The worker saves these before acknowledging the queue message.
 6. FastEmbed runs `BAAI/bge-small-en-v1.5` locally and stores 384-dimensional embeddings in pgvector columns.
 
@@ -128,10 +128,10 @@ Deployment uses a fresh database, not an assessment snapshot. Keep the API and w
 
 ## Next improvements
 
-Authentication and per-user libraries, calibrated retrieval evaluation, adaptive scene sampling, an ANN index, database backups, per-job resource limits, and observability beyond process health. The tagging-provider interface allows model replacement; the experimental local CLIP adapter is available but is not the default because its evaluated labels were less reliable.
+Authentication and per-user libraries, calibrated retrieval evaluation, denser scene sampling, an ANN index, database backups, per-job resource limits, and observability beyond process health. The tagging-provider interface allows model replacement; the experimental local CLIP adapter is available but is not the default because its evaluated labels were less reliable.
 
 ### Evidence animations
-Search results show compact, looping GIF previews (320-pixel bounding box, 6 fps),
+Search results show compact, looping GIF previews (240-pixel bounding box, 3 fps),
 starting at the cited timestamp for up to five seconds. Near the end of a video,
 the preview contains only the remaining footage. The original video is linked separately.
 GET `/videos/{request_id}/previews/{frame_index}.gif` generates previews on demand,
