@@ -73,6 +73,9 @@ They do not measure Gemini accuracy or prove live provider access.
   successful measurements are observations, not a latency or availability SLA.
 - Main scene/activity tags match the independent candidate reference. Specialist
   material labels and precise evidence indices require further human review.
+- Concrete review finding: video 3's `washing hands` tag cites frame 0 (16.715s),
+  which shows sponge handling. Handwashing occurs later in the video, but the
+  cited evidence is wrong. Index bounds validation cannot establish visual truth.
 
 ## Current scope and limits
 
