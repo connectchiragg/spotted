@@ -143,3 +143,18 @@ The UI polls every three seconds and updates countdowns between polls; no manual
 refresh is required. Percentages represent pipeline stages, not bytes decoded.
 Queue/download estimates may be unknown; longer-than-estimated work is shown
 explicitly. A request reaches 100% only after tags and citation frames are saved.
+
+### Bounded worker concurrency
+Run one worker process: it handles at most two jobs, with one shared download/
+decoding lane and up to three parallel JPEG uploads per job. Gemini calls overlap
+uploads and the next video's decoding. Duplicate detection and embedding indexing
+share a single worker-side lock. These are per-process limits; starting additional
+worker processes multiplies them.
+
+The default Gemini request timeout is 30 seconds. A transient inference failure
+gets one retry with 1–2 seconds of jitter, reusing the extracted images; it does
+not restart download/extraction. Quota, credential and malformed-output failures
+are not retried. Set `GEMINI_TIMEOUT_SECONDS=30` in the deployed environment too:
+an existing environment value overrides the default. Transport timeouts are not
+an end-to-end ingestion deadline. Logs report decoder wait, download, extraction,
+frame upload, model attempts, duplicate checks and indexing times.

@@ -145,19 +145,18 @@ def test_atomic_claim_and_stale_completion(setup):
     assert store.finish(job['id'],new_token,{'summary':'current'})
 
 
-def test_transient_retry_stops_after_three_attempts(setup):
+def test_provider_retry_reuses_frames_and_stops_after_two_calls(setup, monkeypatch):
     _,store,cloud,settings,_=setup
     job=upload(setup).json()
+    seen=[]
     class TimeoutTagger:
         def tag_frames(self,frames):
+            seen.append(frames)
             raise TaggerError('Gemini request timed out',504)
-    for attempt in range(3):
-        process_message(cloud.messages[-1],store,cloud,TimeoutTagger(),settings)
-        if attempt<2:
-            assert store.get(job['id'])['status']=='pending'
-            publish_pending(store,cloud)
+    process_message(cloud.messages[-1],store,cloud,TimeoutTagger(),settings)
+    assert len(seen)==2 and seen[0] is seen[1]
     assert store.get(job['id'])['status']=='failed'
-    assert store.get(job['id'])['attempts']==3
+    assert store.get(job['id'])['attempts']==1
 
 
 def test_delayed_publish_cannot_hide_new_retry(setup):

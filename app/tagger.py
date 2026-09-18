@@ -46,9 +46,10 @@ category must be environment, object, or action. frame_indices must be integers.
 
 
 class TaggerError(Exception):
-    def __init__(self, message: str, status_code: int = 502):
+    def __init__(self, message: str, status_code: int = 502, *, retryable: bool | None = None):
         super().__init__(message)
         self.status_code = status_code
+        self.retryable = status_code in (503, 504) if retryable is None else retryable
 
 
 class Tagger(Protocol):
@@ -113,15 +114,15 @@ class GeminiTagger:
             if exc.code in (500, 502, 503):
                 raise TaggerError('Gemini is temporarily unavailable; retry later', 503) from exc
             if exc.code == 429:
-                raise TaggerError('Gemini quota exceeded; wait or check your project quota', 503) from exc
+                raise TaggerError('Gemini quota exceeded; wait or check your project quota', 503, retryable=False) from exc
             if exc.code in (401, 403):
-                raise TaggerError('Gemini rejected the configured API credentials', 503) from exc
+                raise TaggerError('Gemini rejected the configured API credentials', 503, retryable=False) from exc
             if exc.code == 404:
-                raise TaggerError('Configured Gemini model is not available for inference', 503) from exc
+                raise TaggerError('Configured Gemini model is not available for inference', 503, retryable=False) from exc
             raise TaggerError('Gemini request failed; check model availability and provider status') from exc
         except httpx.TimeoutException as exc:
             raise TaggerError('Gemini request timed out', 504) from exc
         except httpx.RequestError as exc:
-            raise TaggerError('Could not connect to Gemini', 502) from exc
+            raise TaggerError('Could not connect to Gemini', 502, retryable=True) from exc
         except ValidationError as exc:
             raise TaggerError('Gemini returned malformed tagging data') from exc
