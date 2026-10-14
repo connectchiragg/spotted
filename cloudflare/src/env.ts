@@ -1,7 +1,6 @@
 export interface Env {
   ASSETS?: Fetcher;
-  SCHEDULER?: DurableObjectNamespace;
-  VIDEO_EVENTS?: DurableObjectNamespace;
+  VIDEO?: DurableObjectNamespace;
   DB?: D1Database;
   VECTORIZE?: VectorizeIndex;
   VIDEOS?: R2Bucket;

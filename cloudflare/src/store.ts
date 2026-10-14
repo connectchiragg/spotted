@@ -1,5 +1,5 @@
 /** Framer video requests in D1 (the EC2 Postgres "jobs" table, renamed "videos"). */
-import { nowSeconds } from './queue';
+export const nowSeconds = () => Math.floor(Date.now() / 1000);
 
 export interface Video {
   id: string;
@@ -83,19 +83,11 @@ export async function restoreVideo(db: D1Database, id: string): Promise<boolean>
   return (await db.prepare('UPDATE videos SET archived_at=NULL WHERE id=?1').bind(id).run()).meta.changes === 1;
 }
 
-/** Mark the upload verified and enqueue its first ingestion step in one D1 transaction. */
-export async function markUploadedAndEnqueue(db: D1Database, id: string): Promise<boolean> {
-  const now = nowSeconds();
-  const [updated] = await db.batch([
-    db.prepare(`UPDATE videos SET uploaded=1, status='pending', updated_at=?2 WHERE id=?1 AND status='uploading'`).bind(id, nowIso()),
-    // Runs in the same transaction; inserts only if the UPDATE above just happened.
-    db.prepare(
-      `INSERT INTO jobs (kind, payload, status, run_after, attempts, created_at, updated_at)
-       SELECT 'ingest.upload', json_object('video_id', ?1), 'queued', ?2, 0, ?2, ?2
-       WHERE changes() = 1`,
-    ).bind(id, now),
-  ]);
-  return updated.meta.changes === 1;
+/** Mark the upload verified (uploading -> pending). True only for the call that made the change. */
+export async function markUploaded(db: D1Database, id: string): Promise<boolean> {
+  const res = await db.prepare(`UPDATE videos SET uploaded=1, status='pending', updated_at=?2 WHERE id=?1 AND status='uploading'`)
+    .bind(id, nowIso()).run();
+  return res.meta.changes === 1;
 }
 
 export async function uploadFailed(db: D1Database, id: string, message: string): Promise<void> {

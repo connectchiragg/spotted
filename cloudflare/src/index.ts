@@ -1,14 +1,13 @@
 import { handle } from './api';
-import { build } from './consumer';
+import { build } from './deps';
 import { Env } from './env';
 
-export { build, runDueJobs } from './consumer';
-export { FramerScheduler } from './scheduler';
-export { VideoEvents } from './events';
+export { build } from './deps';
+export { VideoDO } from './video';
 
 /**
- * HTTP only. There is no cron: the FramerScheduler Durable Object's alarm runs
- * the queue, woken by the API when work is created (src/scheduler.ts).
+ * HTTP only. Each video's ingestion runs in its own VideoDO (actor per video),
+ * driven by that object's alarm; there is no cron, queue or scheduler.
  */
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {

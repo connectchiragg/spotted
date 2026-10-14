@@ -17,16 +17,19 @@
     "run_worker_first": true
   },
 
-  // No cron (owner decision). An explicit empty list removes the old per-minute
-  // trigger on deploy; omitting "triggers" would leave it in place. The queue is
-  // driven by the FramerScheduler Durable Object's alarm (src/scheduler.ts).
+  // No cron. An explicit empty list removes the old per-minute trigger on deploy;
+  // omitting "triggers" would leave it in place.
   "triggers": { "crons": [] },
 
-  // SQLite-backed Durable Objects (the only kind on Workers Free):
-  //   FramerScheduler  one global instance, the queue's alarm clock (src/scheduler.ts)
-  //   VideoEvents      one per video, holds its SSE streams (src/events.ts)
-  "durable_objects": { "bindings": [{ "name": "SCHEDULER", "class_name": "FramerScheduler" }, { "name": "VIDEO_EVENTS", "class_name": "VideoEvents" }] },
-  "migrations": [{ "tag": "v1-scheduler", "new_sqlite_classes": ["FramerScheduler"] }, { "tag": "v2-video-events", "new_sqlite_classes": ["VideoEvents"] }],
+  // Actor per video: VideoDO (SQLite-backed, the only kind on Workers Free) runs one
+  // video's ingestion from its own alarm and serves that video's SSE (src/video.ts).
+  // v1/v2 created the earlier FramerScheduler/VideoEvents classes; v3 deletes them.
+  "durable_objects": { "bindings": [{ "name": "VIDEO", "class_name": "VideoDO" }] },
+  "migrations": [
+        { "tag": "v1-scheduler", "new_sqlite_classes": ["FramerScheduler"] },
+        { "tag": "v2-video-events", "new_sqlite_classes": ["VideoEvents"] },
+        { "tag": "v3-actor-per-video", "deleted_classes": ["FramerScheduler", "VideoEvents"], "new_sqlite_classes": ["VideoDO"] }
+      ],
 
   "ai": { "binding": "AI" },
 
@@ -102,8 +105,8 @@
     "test": {
       "name": "framer-cf-test",
       "triggers": { "crons": [] },
-      "durable_objects": { "bindings": [{ "name": "SCHEDULER", "class_name": "FramerScheduler" }, { "name": "VIDEO_EVENTS", "class_name": "VideoEvents" }] },
-      "migrations": [{ "tag": "v1-scheduler", "new_sqlite_classes": ["FramerScheduler"] }, { "tag": "v2-video-events", "new_sqlite_classes": ["VideoEvents"] }],
+      "durable_objects": { "bindings": [{ "name": "VIDEO", "class_name": "VideoDO" }] },
+      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["VideoDO"] }],
       "d1_databases": [
         { "binding": "DB", "database_name": "framer-cf-test", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
       ],

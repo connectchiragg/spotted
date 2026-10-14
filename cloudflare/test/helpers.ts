@@ -148,6 +148,10 @@ export function fakeGemini(opts: FakeGeminiOptions = {}) {
         if (opts.tagGate) await opts.tagGate(init?.signal);
         if (init?.signal?.aborted) throw init.signal.reason;
       }
+      if (!isAnswer && opts.tagStatus === 429) {
+        return Response.json({ error: { code: 429, status: 'RESOURCE_EXHAUSTED',
+          details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '120s' }] } }, { status: 429 });
+      }
       if (!isAnswer && opts.tagStatus) return new Response('{}', { status: opts.tagStatus });
       const payload = isAnswer ? opts.answer : opts.tagging ?? defaultTagging;
       if (payload === undefined) return new Response('{}', { status: 503 });

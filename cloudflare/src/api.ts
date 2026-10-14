@@ -9,8 +9,7 @@ import { Presigner } from './storage';
 import * as store from './store';
 import { Video as Job } from './store';
 import { Embedder } from './vectors';
-import { hasDueJobs, Waker } from './schedule';
-import type { Notifier } from './notify';
+import { videoStub } from './actor';
 
 export interface AppDeps {
   db: D1Database | null;
@@ -23,10 +22,8 @@ export interface AppDeps {
   geminiConfigured: boolean;
   assets?: Fetcher;
   /** FramerScheduler stub; null when the binding is absent (tests, smoke). */
-  scheduler?: Waker | null;
-  /** VideoEvents namespace (SSE) and the publisher for committed state changes. */
-  events?: DurableObjectNamespace | null;
-  notify?: Notifier;
+  /** VideoDO namespace: one actor per video runs ingestion and serves its SSE. */
+  videos?: DurableObjectNamespace | null;
   waitUntil(promise: Promise<unknown>): void;
 }
 
@@ -165,6 +162,7 @@ export async function reserve(db: D1Database, operation: string, limit: number, 
        SELECT ?1, ?2, ?3, ?4 WHERE changes() = 1`,
     ).bind(eventKey, day, operation, Math.floor(Date.now() / 1000)),
     db.prepare('SELECT 1 AS counted FROM usage_events WHERE idempotency_key=?1').bind(eventKey),
+    db.prepare('DELETE FROM usage_events WHERE created_at < ?1').bind(Math.floor(Date.now() / 1000) - 2 * 86400),
   ]);
   return results[2].results.length === 1;
 }
@@ -218,49 +216,44 @@ async function createUpload(request: Request, deps: AppDeps) {
     await store.uploadFailed(db, job.id, 'Could not prepare direct upload; submit again');
     throw new HttpError(503, 'Could not prepare direct upload');
   }
-  // The scheduler expires the request if it is never confirmed (no cron sweeps it).
-  if (!existing) await wakeScheduler(deps, Date.now() + (store.UPLOAD_EXPIRY_SECONDS + 1) * 1000);
   return json({
     request: await present(job, presigner),
     upload: { url, method: 'PUT', headers: { 'Content-Type': job.content_type }, expires_in: 600 },
   }, 201);
 }
 
-// ---------------------------------------------------------------- SSE
+// ---------------------------------------------------------------- SSE and the per-video actor
 
 const VIDEO_EVENTS = /^\/videos\/([^/]+)\/events$/;
 
 /**
- * GET /videos/:id/events: text/event-stream of the video's ingestion progress.
- * The snapshot comes from D1; the stream itself is held by the video's
- * VideoEvents Durable Object (src/events.ts), which pushes committed changes.
- * Connecting (or reconnecting) also runs the lost-wake-up safety net.
+ * GET /videos/:id/events: text/event-stream of the video's ingestion progress,
+ * served by the video's VideoDO (src/video.ts), which runs the ingestion and
+ * pushes each committed transition. The D1 row is passed along as the snapshot
+ * for videos the actor has not started (uploading, imported). Connecting also
+ * runs the lost-alarm safety net.
  */
 async function videoEvents(request: Request, id: string, deps: AppDeps) {
   const db = need(deps.db, 'Database is not configured');
-  const events = need(deps.events, 'Live updates are not configured');
+  const videos = need(deps.videos, 'Live updates are not configured');
   let video = await store.getVideo(db, id);
   if (!video) throw new HttpError(404, 'Request not found');
   if (await nudge(deps, video) === 'confirmed') video = (await store.getVideo(db, id))!;
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   const last = request.headers.get('last-event-id');
   if (last) headers['Last-Event-ID'] = last;
-  // The DO request is cancelled with the client's request, which closes its writer.
-  return events.get(events.idFromName(id)).fetch('https://video-events/connect', {
-    method: 'POST', headers, body: JSON.stringify(videoState(video)), signal: request.signal,
-  });
+  // The actor's request is cancelled with the client's, which releases its writer.
+  return videoStub(videos, id).fetch('https://video/events', { method: 'POST', headers, body: JSON.stringify(videoState(video)), signal: request.signal });
 }
 
-// ---------------------------------------------------------------- scheduler wake-ups
-
-/** Wake the FramerScheduler alarm at `atMs` (advisory: failures are logged, never surfaced). */
-export async function wakeScheduler(deps: AppDeps, atMs: number): Promise<boolean> {
-  if (!deps.scheduler) return false;
+/** Start (or resume) the video's actor. start() is idempotent; failures are logged, the nudge retries. */
+export async function startActor(deps: AppDeps, id: string): Promise<boolean> {
+  if (!deps.videos) return false;
   try {
-    await deps.scheduler.wake(atMs);
+    await videoStub(deps.videos, id).start(id);
     return true;
   } catch (error) {
-    console.warn('scheduler wake failed', (error as Error)?.message);
+    console.warn('VideoDO start failed', id, (error as Error)?.message);
     return false;
   }
 }
@@ -269,14 +262,15 @@ const NUDGE_INTERVAL_MS = 10_000;
 const lastNudge = new Map<string, number>();
 
 /**
- * Safety net for a lost wake-up, run when a client looks at one video (status
- * read or SSE connect): at most one D1 check and one wake per request, and per
- * video at most one wake every 10 s per isolate, so reconnect storms cannot loop.
- *  - uploading, but the object is in R2: the browser never confirmed; confirm now.
- *  - due or expired-lease jobs: wake the scheduler now.
+ * Safety net, run when a client looks at one video (status read or SSE connect).
+ * At most one action per request, and per video at most one every 10 s per isolate:
+ *  - uploading, but the object is in R2: the browser never confirmed; confirm now
+ *    (which starts the actor);
+ *  - pending/processing: start() the actor, which is idempotent and re-arms a lost alarm;
+ *  - completed but imported without vectors (needs_index): re-embed it.
  */
-export async function nudge(deps: AppDeps, video: Job): Promise<'confirmed' | 'woken' | null> {
-  if (!deps.db) return null;
+export async function nudge(deps: AppDeps, video: Job): Promise<'confirmed' | 'started' | 'reindexed' | null> {
+  if (!deps.db || !deps.videos) return null;
   const now = Date.now();
   if ((lastNudge.get(video.id) ?? 0) > now - NUDGE_INTERVAL_MS) return null;
   if (lastNudge.size > 1000) lastNudge.clear();
@@ -284,11 +278,12 @@ export async function nudge(deps: AppDeps, video: Job): Promise<'confirmed' | 'w
   try {
     if (video.status === 'uploading') {
       if (!deps.bucket || !(await deps.bucket.head(video.object_key))) return null;
-      await completeUpload(video.id, deps); // verifies size and type, enqueues once, wakes
+      await completeUpload(video.id, deps); // verifies size and type, then starts the actor
       return 'confirmed';
     }
-    if ((video.status === 'pending' || video.status === 'processing') && await hasDueJobs(deps.db, video.id)) {
-      return (await wakeScheduler(deps, now)) ? 'woken' : null;
+    if (video.status === 'pending' || video.status === 'processing') return (await startActor(deps, video.id)) ? 'started' : null;
+    if (video.status === 'completed' && video.needs_index) {
+      return (await videoStub(deps.videos, video.id).reindex(video.id)) ? 'reindexed' : null;
     }
   } catch (error) {
     if (!(error instanceof HttpError)) console.warn('nudge failed', video.id, (error as Error)?.message);
@@ -301,7 +296,11 @@ async function completeUpload(id: string, deps: AppDeps) {
   const bucket = need(deps.bucket, 'Storage is not configured');
   const job = await store.getVideo(db, id);
   if (!job) throw new HttpError(404, 'Upload request not found');
-  if (job.uploaded) return json(await present(job, deps.presigner), 202); // Confirmation retry never starts a new job.
+  if (job.uploaded) {
+    // A confirmation retry never starts a second ingestion: start() is idempotent.
+    if (job.status === 'pending' || job.status === 'processing') await startActor(deps, job.id);
+    return json(await present(job, deps.presigner), 202);
+  }
   if (job.status !== 'uploading' || job.expected_size === null) throw new HttpError(409, 'This request cannot be completed; start a new upload');
   let head: R2Object | null;
   try {
@@ -318,10 +317,7 @@ async function completeUpload(id: string, deps: AppDeps) {
     await store.uploadFailed(db, job.id, 'Stored video content type does not match upload request');
     throw new HttpError(422, 'Stored video content type does not match upload request');
   }
-  if (await store.markUploadedAndEnqueue(db, job.id)) {
-    await deps.notify?.(job.id, 'status');
-    await wakeScheduler(deps, Date.now());
-  }
+  if (await store.markUploaded(db, job.id)) await startActor(deps, job.id);
   const latest = (await store.getVideo(db, job.id))!;
   if (!latest.uploaded) throw new HttpError(409, 'Upload expired; start a new upload');
   return json(await present(latest, deps.presigner), 202);
@@ -347,6 +343,7 @@ async function history(url: URL, deps: AppDeps) {
     tags = [...new Set(rawTags.map((t) => t.toLowerCase().trim().split(/\s+/).filter(Boolean).join(' ')))];
     if (tags.some((t) => !t || t.length > 80)) throw new HttpError(422, 'Each tag must contain between 1 and 80 characters');
   }
+  await store.expireUploads(db); // lazily: there is no background sweeper
   const jobs = await store.listVideos(db, { limit, offset, tags, includeArchived });
   return json({ items: await Promise.all(jobs.map((j) => present(j, deps.presigner))), limit, offset });
 }
