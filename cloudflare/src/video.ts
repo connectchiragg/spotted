@@ -89,6 +89,8 @@ export interface VideoDeps {
 export class PermanentError extends Error {}
 /** Thrown by test hooks to simulate an eviction: escapes the step's error handling. */
 export class EvictionError extends Error {}
+/** The video was purged by an admin: a step still in flight stops without writing. */
+export class PurgedError extends Error {}
 
 const live = (file: GeminiFile | null) => Boolean(file && (file.state === 'ACTIVE' || file.state === 'PROCESSING'));
 const encoder = new TextEncoder();
@@ -117,6 +119,7 @@ export class VideoDO extends DurableObject<Env> {
 
   /** Start ingestion. Idempotent: an existing state is returned unchanged (its alarm re-armed if work is pending). */
   async start(videoId: string): Promise<IngestState> {
+    if (await this.isPurged()) throw new PurgedError('Video was deleted');
     let state = await this.load();
     if (!state) {
       const ts = nowIso();
@@ -172,6 +175,37 @@ export class VideoDO extends DurableObject<Env> {
     return true;
   }
 
+  /**
+   * Admin purge: cancel the alarm, close streams, delete the Gemini file and all of this
+   * object's storage, keeping only a tombstone so a step still awaiting a provider cannot
+   * write again and start() refuses to revive the video. Idempotent.
+   */
+  async purge(videoId: string): Promise<{ gemini_files_deleted: string[] }> {
+    this.purged = true;
+    const state = await this.load();
+    await this.ctx.storage.deleteAlarm();
+    for (const id of [...this.clients.keys()]) this.drop(id, true);
+    const deleted: string[] = [];
+    const deps = this.deps(videoId);
+    if (deps) {
+      for (const name of new Set([geminiFileName(videoId), ...(state?.upload ? [state.upload.name] : [])])) {
+        if (await deps.gemini.findFile(name)) {
+          await deps.gemini.deleteFile(name);
+          deleted.push(name);
+        }
+      }
+    }
+    await this.ctx.storage.deleteAll();
+    await this.ctx.storage.put('purged', nowIso());
+    return { gemini_files_deleted: deleted };
+  }
+
+  private purged = false;
+  private async isPurged(): Promise<boolean> {
+    if (!this.purged && (await this.ctx.storage.get('purged')) !== undefined) this.purged = true;
+    return this.purged;
+  }
+
   async getState(): Promise<IngestState | null> {
     return this.load();
   }
@@ -182,6 +216,7 @@ export class VideoDO extends DurableObject<Env> {
     if (this.running) return; // alarms never overlap; defensive only
     this.running = true;
     try {
+      if (await this.isPurged()) return;
       let state = await this.load();
       while (state && !this.terminal(state)) {
         if (state.next_retry_at && state.next_retry_at > Date.now() && !this.staleQuotaWait(state)) {
@@ -200,6 +235,7 @@ export class VideoDO extends DurableObject<Env> {
       }
     } catch (error) {
       if (error instanceof EvictionError) throw error; // simulated crash: let the runtime retry the alarm
+      if (error instanceof PurgedError) return; // deleted mid-step: nothing left to do
       throw error;
     } finally {
       this.running = false;
@@ -220,7 +256,7 @@ export class VideoDO extends DurableObject<Env> {
         default: throw new PermanentError(`Unknown step ${state.step}`);
       }
     } catch (error) {
-      if (error instanceof EvictionError) throw error;
+      if (error instanceof EvictionError || error instanceof PurgedError) throw error;
       let message = 'Unexpected processing failure';
       let permanent = false;
       let retryAfter: number | null = null;
@@ -392,6 +428,7 @@ export class VideoDO extends DurableObject<Env> {
 
   /** Durable write without a visible transition (attempt counters, keys, recorded results). */
   private async save(state: IngestState): Promise<IngestState> {
+    if (this.purged) throw new PurgedError('Video was deleted');
     const next = { ...state, version: state.version + 1, updated_at: nowIso() };
     await this.ctx.storage.put('state', next);
     return next;

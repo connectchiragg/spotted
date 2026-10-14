@@ -8,6 +8,8 @@ export interface Env {
 
   // Secrets (wrangler secret put): never in wrangler.jsonc or git.
   GEMINI_API_KEY?: string;
+  /** Bearer token for DELETE /admin/videos/:id; without it the admin route does not exist. */
+  ADMIN_TOKEN?: string;
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
 

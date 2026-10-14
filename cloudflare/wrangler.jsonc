@@ -1,15 +1,16 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  // Separate from the existing "framer" proxy Worker (deploy/cloudflare/), which
-  // owns framer.haciensus.com. This Worker only serves *.workers.dev until cutover.
+  // Serves framer.haciensus.com (custom domain attached in the dashboard).
   "name": "framer-cf-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-15",
   "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
   "account_id": "0187f7c38bf35a8abcc4e9f9abfa213e",
-  "workers_dev": true,
+  // Off: the public *.workers.dev URL would bypass Cloudflare Access on the custom domain.
+  "workers_dev": false,
   "preview_urls": false,
-  // No "routes" on purpose: DNS/custom domains are changed only at cutover, by the owner.
+  // No "routes" on purpose: the custom domain framer.haciensus.com is attached in the
+  // dashboard and managed by the owner; a deploy without "routes" leaves it untouched.
 
   "assets": {
     "directory": "./public",

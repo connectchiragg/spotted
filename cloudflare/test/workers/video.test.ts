@@ -10,7 +10,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { geminiFileName } from '../../src/gemini';
 import * as store from '../../src/store';
 import { EvictionError, IngestState, MAX_ATTEMPTS, MAX_QUOTA_WINDOW_MS, VideoDO } from '../../src/video';
-import { defaultTagging, fakeBucket, fakeEmbedder, fakeGemini, FakeGeminiOptions, fakeVectorize, settings } from '../helpers';
+import { handle } from '../../src/api';
+import { appDeps, defaultTagging, fakeBucket, fakeEmbedder, fakeGemini, FakeGeminiOptions, fakeVectorize, settings } from '../helpers';
 
 const db: D1Database = env.DB;
 const ns = env.VIDEO as DurableObjectNamespace;
@@ -176,6 +177,37 @@ describe('VideoDO: ingestion run by the per-video actor', () => {
     const resumed = await t.stub.start(t.video.id);
     expect(resumed.next_retry_at).toBeNull();
     expect((await t.alarmAt())! - Date.now()).toBeLessThan(2000);
+  });
+
+  it('admin purge removes the video everywhere and stops its actor for good', async () => {
+    const t = await setup({ tagStatus: 429 });
+    await t.stub.start(t.video.id);
+    await t.drive((x) => x.step === 'tag' && x.next_retry_at !== null); // Gemini file uploaded, waiting on quota
+    expect(t.fake.files.size).toBe(1);
+    const objects = { [t.video.object_key]: { size: 100, contentType: 'video/mp4' }, [`videos/${t.video.id}/frames/0.jpg`]: { size: 1, contentType: 'image/jpeg' },
+      'videos/other/source': { size: 1, contentType: 'video/mp4' } };
+    await t.vectors.index.upsert([{ id: `v:${t.video.id}`, values: [1], metadata: {} }, { id: `f:${t.video.id}:3`, values: [1], metadata: {} }, { id: 'v:other', values: [1], metadata: {} }] as any);
+    const app = appDeps(db, { videos: ns, adminToken: 'admin-token-123', bucket: fakeBucket(objects), index: t.vectors.index });
+    const del = (auth?: string, method = 'DELETE') => handle(new Request(`https://x/admin/videos/${t.video.id}`, { method, headers: auth ? { Authorization: auth } : {} }), app);
+    expect((await del()).status).toBe(404);
+    expect((await del('Bearer wrong')).status).toBe(404);
+    expect((await del('Bearer admin-token-123', 'GET')).status).toBe(404);
+    const disabled = await handle(new Request(`https://x/admin/videos/${t.video.id}`, { method: 'DELETE', headers: { Authorization: 'Bearer admin-token-123' } }), appDeps(db));
+    expect(disabled.status).toBe(404); // no ADMIN_TOKEN configured: the route does not exist
+    const res = await del('Bearer admin-token-123');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ d1_row_deleted: true, actor_purged: true, gemini_files_deleted: [geminiFileName(t.video.id)],
+      r2_objects_deleted: [t.video.object_key, `videos/${t.video.id}/frames/0.jpg`] });
+    expect(await store.getVideo(db, t.video.id)).toBeNull();
+    expect(t.fake.files.size).toBe(0);
+    expect(Object.keys(objects)).toEqual(['videos/other/source']);
+    expect([...t.vectors.store.keys()]).toEqual(['v:other']);
+    expect(await t.state()).toBeNull();
+    expect(await t.alarmAt()).toBeNull();
+    await expect(t.stub.start(t.video.id)).rejects.toThrow(/deleted/);
+    await runDurableObjectAlarm(t.stub); // nothing left to run
+    expect(await t.state()).toBeNull();
+    expect((await del('Bearer admin-token-123')).status).toBe(200); // idempotent
   });
 
   it('a permanent error fails at once', async () => {

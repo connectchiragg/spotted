@@ -21,9 +21,10 @@ export interface AppDeps {
   settings: Settings;
   geminiConfigured: boolean;
   assets?: Fetcher;
-  /** FramerScheduler stub; null when the binding is absent (tests, smoke). */
   /** VideoDO namespace: one actor per video runs ingestion and serves its SSE. */
   videos?: DurableObjectNamespace | null;
+  /** ADMIN_TOKEN secret; null disables the admin routes (they answer 404). */
+  adminToken?: string | null;
   waitUntil(promise: Promise<unknown>): void;
 }
 
@@ -425,9 +426,53 @@ async function queryVideos(request: Request, deps: AppDeps) {
   return json(response);
 }
 
+// ---------------------------------------------------------------- admin
+
+/** Constant-time comparison of a bearer token (both sides hashed first, so lengths match). */
+export async function tokenMatches(header: string | null, expected: string): Promise<boolean> {
+  const presented = /^Bearer (.+)$/.exec(header ?? '')?.[1];
+  if (!presented) return false;
+  const digest = async (s: string) => new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)));
+  const [a, b] = await Promise.all([digest(presented), digest(expected)]);
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+
+/** Vector ids a video can own (vectors.ts): document, description, and one per frame (MAX_FRAMES <= 32). */
+export const vectorIds = (id: string) => [`v:${id}`, `d:${id}`, ...Array.from({ length: 64 }, (_, i) => `f:${id}:${i}`)];
+
+/**
+ * DELETE /admin/videos/:id (Authorization: Bearer ADMIN_TOKEN): remove a video completely.
+ * Order: the D1 row first (so no reader or safety-net nudge can revive it), then the actor
+ * (alarm, streams, Gemini file, all DO storage; a tombstone stops in-flight steps), then
+ * Vectorize vectors and every R2 object under videos/<id>/. Idempotent: re-run after a failure.
+ */
+async function purgeVideo(id: string, deps: AppDeps) {
+  const db = need(deps.db, 'Database is not configured');
+  const row = await store.getVideo(db, id);
+  await db.prepare('DELETE FROM videos WHERE id=?1').bind(id).run();
+  const actor = deps.videos ? await videoStub(deps.videos, id).purge(id) : null;
+  if (deps.index) await deps.index.deleteByIds(vectorIds(id));
+  const deletedObjects: string[] = [];
+  if (deps.bucket) {
+    let cursor: string | undefined;
+    do {
+      const page = await deps.bucket.list({ prefix: `videos/${id}/`, cursor });
+      const keys = page.objects.map((o) => o.key);
+      if (keys.length) await deps.bucket.delete(keys);
+      deletedObjects.push(...keys);
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
+  }
+  return json({ id, d1_row_deleted: Boolean(row), r2_objects_deleted: deletedObjects, vectors_deleted: Boolean(deps.index),
+    gemini_files_deleted: actor?.gemini_files_deleted ?? [], actor_purged: Boolean(actor) });
+}
+
 // ---------------------------------------------------------------- router
 
 const VIDEO = /^\/videos\/([^/]+)$/;
+const ADMIN_VIDEO = /^\/admin\/videos\/([^/]+)$/;
 const VIDEO_ACTION = /^\/videos\/([^/]+)\/(complete|archive|restore)$/;
 const FRAME = /^\/videos\/([^/]+)\/frames\/(\d+)$/;
 
@@ -441,6 +486,14 @@ export async function handle(request: Request, deps: AppDeps): Promise<Response>
       // Asset html_handling maps '/' to index.html (requesting /index.html would redirect to '/').
       if (deps.assets) return deps.assets.fetch(request);
       throw new HttpError(404, 'Not found');
+    }
+    const admin = ADMIN_VIDEO.exec(path);
+    if (admin) {
+      // Without ADMIN_TOKEN, or with a wrong token, the route does not exist.
+      if (!deps.adminToken || method !== 'DELETE' || !(await tokenMatches(request.headers.get('authorization'), deps.adminToken))) {
+        throw new HttpError(404, 'Not found');
+      }
+      return await purgeVideo(decodeURIComponent(admin[1]), deps);
     }
     const limited = await publicBudget(request, path, deps);
     if (limited) return limited;

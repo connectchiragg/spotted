@@ -18,6 +18,7 @@ export function build(env: Env, waitUntil: (p: Promise<unknown>) => void): AppDe
     geminiConfigured: Boolean(env.GEMINI_API_KEY),
     assets: env.ASSETS,
     videos: env.VIDEO ?? null,
+    adminToken: env.ADMIN_TOKEN || null,
     waitUntil,
   };
 }

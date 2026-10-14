@@ -76,6 +76,12 @@ export function fakeBucket(objects: Record<string, { size: number; contentType: 
       const o = objects[key];
       return o ? { size: o.size, body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(o.size)); c.close(); } }) } : null;
     },
+    async list(opts: { prefix?: string } = {}) {
+      return { objects: Object.keys(objects).filter((k) => k.startsWith(opts.prefix ?? '')).map((key) => ({ key })), truncated: false };
+    },
+    async delete(keys: string | string[]) {
+      for (const k of [keys].flat()) delete objects[k];
+    },
   } as unknown as R2Bucket;
 }
 
