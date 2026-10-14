@@ -10,6 +10,7 @@ import * as store from './store';
 import { Video as Job } from './store';
 import { Embedder } from './vectors';
 import { hasDueJobs, Waker } from './schedule';
+import type { Notifier } from './notify';
 
 export interface AppDeps {
   db: D1Database | null;
@@ -23,6 +24,9 @@ export interface AppDeps {
   assets?: Fetcher;
   /** FramerScheduler stub; null when the binding is absent (tests, smoke). */
   scheduler?: Waker | null;
+  /** VideoEvents namespace (SSE) and the publisher for committed state changes. */
+  events?: DurableObjectNamespace | null;
+  notify?: Notifier;
   waitUntil(promise: Promise<unknown>): void;
 }
 
@@ -45,19 +49,32 @@ function need<T>(value: T | null | undefined, message: string): T {
 
 // ---------------------------------------------------------------- presentation
 
-export async function present(job: Job, presigner: Presigner | null): Promise<Record<string, any>> {
-  const result: Record<string, any> = {};
-  for (const k of ['id', 'filename', 'status', 'created_at', 'updated_at', 'error', 'attempts', 'result']) result[k] = job[k];
-  result.display_name = job.display_name ?? null;
-  result.archived_at = job.archived_at ?? null;
-  result.possible_duplicate = job.result?.possible_duplicate ?? null;
+export function progressOf(job: Job): Record<string, any> {
   let progress: Record<string, any> = { ...(job.progress ?? {}) };
   if (job.status === 'completed') progress = { ...progress, stage: 'Completed', percent: 100, eta_seconds: 0, updated_at: job.updated_at };
   else if (job.status === 'failed') progress = { ...progress, stage: 'Failed', percent: progress.percent ?? 0, eta_seconds: null, updated_at: job.updated_at };
   else if (job.status === 'pending' || job.status === 'uploading') {
     progress = { stage: job.status === 'pending' ? 'Queued' : 'Uploading', percent: 0, eta_seconds: null, updated_at: job.updated_at };
   } else if (!Object.keys(progress).length) progress = { stage: 'Processing', percent: 0, eta_seconds: null, updated_at: job.updated_at };
-  result.progress = progress;
+  return progress;
+}
+
+/** The status fields of a video, as pushed in SSE events (no presigned URLs, no result body). */
+export function videoState(job: Job): Record<string, any> {
+  return {
+    id: job.id, filename: job.filename, display_name: job.display_name ?? null, status: job.status, error: job.error,
+    attempts: job.attempts, created_at: job.created_at, updated_at: job.updated_at, archived_at: job.archived_at ?? null,
+    possible_duplicate: job.result?.possible_duplicate ?? null, progress: progressOf(job),
+  };
+}
+
+export async function present(job: Job, presigner: Presigner | null): Promise<Record<string, any>> {
+  const result: Record<string, any> = {};
+  for (const k of ['id', 'filename', 'status', 'created_at', 'updated_at', 'error', 'attempts', 'result']) result[k] = job[k];
+  result.display_name = job.display_name ?? null;
+  result.archived_at = job.archived_at ?? null;
+  result.possible_duplicate = job.result?.possible_duplicate ?? null;
+  result.progress = progressOf(job);
   result.download_url = null;
   result.download_url_expires_at = null;
   if (job.uploaded) {
@@ -209,6 +226,31 @@ async function createUpload(request: Request, deps: AppDeps) {
   }, 201);
 }
 
+// ---------------------------------------------------------------- SSE
+
+const VIDEO_EVENTS = /^\/videos\/([^/]+)\/events$/;
+
+/**
+ * GET /videos/:id/events: text/event-stream of the video's ingestion progress.
+ * The snapshot comes from D1; the stream itself is held by the video's
+ * VideoEvents Durable Object (src/events.ts), which pushes committed changes.
+ * Connecting (or reconnecting) also runs the lost-wake-up safety net.
+ */
+async function videoEvents(request: Request, id: string, deps: AppDeps) {
+  const db = need(deps.db, 'Database is not configured');
+  const events = need(deps.events, 'Live updates are not configured');
+  let video = await store.getVideo(db, id);
+  if (!video) throw new HttpError(404, 'Request not found');
+  if (await nudge(deps, video) === 'confirmed') video = (await store.getVideo(db, id))!;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const last = request.headers.get('last-event-id');
+  if (last) headers['Last-Event-ID'] = last;
+  // The DO request is cancelled with the client's request, which closes its writer.
+  return events.get(events.idFromName(id)).fetch('https://video-events/connect', {
+    method: 'POST', headers, body: JSON.stringify(videoState(video)), signal: request.signal,
+  });
+}
+
 // ---------------------------------------------------------------- scheduler wake-ups
 
 /** Wake the FramerScheduler alarm at `atMs` (advisory: failures are logged, never surfaced). */
@@ -276,7 +318,10 @@ async function completeUpload(id: string, deps: AppDeps) {
     await store.uploadFailed(db, job.id, 'Stored video content type does not match upload request');
     throw new HttpError(422, 'Stored video content type does not match upload request');
   }
-  if (await store.markUploadedAndEnqueue(db, job.id)) await wakeScheduler(deps, Date.now());
+  if (await store.markUploadedAndEnqueue(db, job.id)) {
+    await deps.notify?.(job.id, 'status');
+    await wakeScheduler(deps, Date.now());
+  }
   const latest = (await store.getVideo(db, job.id))!;
   if (!latest.uploaded) throw new HttpError(409, 'Upload expired; start a new upload');
   return json(await present(latest, deps.presigner), 202);
@@ -413,6 +458,8 @@ export async function handle(request: Request, deps: AppDeps): Promise<Response>
       if (!ok) throw new HttpError(404, 'Request not found');
       return json(await present((await store.getVideo(db, id))!, deps.presigner));
     }
+    m = VIDEO_EVENTS.exec(path);
+    if (m && method === 'GET') return await videoEvents(request, decodeURIComponent(m[1]), deps);
     m = VIDEO.exec(path);
     if (m && method === 'GET' && m[1] !== 'uploads') {
       const db = need(deps.db, 'Database is not configured');

@@ -4,6 +4,7 @@ import { Env } from './env';
 
 export { build, runDueJobs } from './consumer';
 export { FramerScheduler } from './scheduler';
+export { VideoEvents } from './events';
 
 /**
  * HTTP only. There is no cron: the FramerScheduler Durable Object's alarm runs

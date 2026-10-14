@@ -1,6 +1,7 @@
 export interface Env {
   ASSETS?: Fetcher;
   SCHEDULER?: DurableObjectNamespace;
+  VIDEO_EVENTS?: DurableObjectNamespace;
   DB?: D1Database;
   VECTORIZE?: VectorizeIndex;
   VIDEOS?: R2Bucket;
@@ -25,6 +26,8 @@ export interface Env {
   DAILY_UPLOAD_LIMIT?: string;
   DAILY_QUERY_LIMIT?: string;
   QUEUE_STEPS_PER_TICK?: string;
+  SSE_PING_MS?: string;
+  SSE_MAX_STREAM_MS?: string;
 }
 
 export interface Settings {

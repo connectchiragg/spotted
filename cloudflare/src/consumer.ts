@@ -6,6 +6,7 @@ import { AppDeps } from './api';
 import { Env, settings } from './env';
 import { Gemini } from './gemini';
 import { drain, IngestDeps } from './ingest';
+import { videoNotifier } from './notify';
 import { purgeFinished } from './queue';
 import { schedulerStub, Waker } from './schedule';
 import { r2Presigner } from './storage';
@@ -25,6 +26,8 @@ export function build(env: Env, waitUntil: (p: Promise<unknown>) => void): AppDe
     geminiConfigured: Boolean(env.GEMINI_API_KEY),
     assets: env.ASSETS,
     scheduler: schedulerStub(env),
+    events: env.VIDEO_EVENTS ?? null,
+    notify: env.DB ? videoNotifier(env.VIDEO_EVENTS, env.DB) : undefined,
     waitUntil,
   };
 }
@@ -34,7 +37,7 @@ export function ingestDeps(env: Env, waker: Waker | null): IngestDeps | null {
   const deps = build(env, () => {});
   if (!deps.db || !deps.bucket || !deps.index || !deps.gemini || !deps.embedder) return null;
   return { db: deps.db, bucket: deps.bucket, index: deps.index, gemini: deps.gemini, embedder: deps.embedder,
-    settings: deps.settings, waker: waker ?? undefined };
+    settings: deps.settings, waker: waker ?? undefined, notify: deps.notify };
 }
 
 /**

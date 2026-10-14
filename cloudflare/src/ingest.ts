@@ -32,6 +32,7 @@ import { Gemini, geminiDisplayName, GeminiFile, geminiFileName, geminiMimeType, 
 import * as queue from './queue';
 import { QueueJob } from './queue';
 import type { Waker } from './schedule';
+import type { Notifier } from './notify';
 import { getVideo, nowIso, Video } from './store';
 import { duplicateCandidates, Embedder, indexResult } from './vectors';
 
@@ -46,6 +47,8 @@ export interface IngestDeps {
   heartbeatMs?: number;
   /** The scheduler's alarm clock: told when a step enqueues work for later. */
   waker?: Waker;
+  /** SSE publisher; called only after a fenced commit succeeded. */
+  notify?: Notifier;
 }
 
 /** Ask the scheduler to run at `atMs`; advisory (the alarm also reschedules from D1). */
@@ -104,7 +107,10 @@ async function next(deps: IngestDeps, job: QueueJob, kind: string, payload: Reco
     videoUpdate(deps, job, payload.video_id, `status='processing', error=NULL, progress=?, updated_at=?`, [progressJson(progress), nowIso()]),
     queue.completeStmt(deps.db, job, now),
   ]);
-  if (held) await wake(deps, (now + delaySeconds) * 1000);
+  if (held) {
+    await deps.notify?.(payload.video_id, kind === job.kind ? 'progress' : 'step', { step: job.kind, next_step: kind });
+    await wake(deps, (now + delaySeconds) * 1000);
+  }
   return held;
 }
 
@@ -140,7 +146,11 @@ export async function runJob(deps: IngestDeps, job: QueueJob): Promise<string> {
       videoUpdate(deps, job, videoId, `status=?, error=?, updated_at=?`, [dead ? 'failed' : 'pending', message, nowIso()]),
       permanent ? queue.deadStmt(deps.db, job, message, now) : queue.failStmt(deps.db, job, message, now),
     ]);
-    if (held && !dead) await wake(deps, queue.retryAt(job, now) * 1000);
+    if (held && dead) await deps.notify?.(videoId, 'failed', { step: job.kind });
+    if (held && !dead) {
+      await deps.notify?.(videoId, 'status', { step: job.kind, retry_at: queue.retryAt(job, now) });
+      await wake(deps, queue.retryAt(job, now) * 1000);
+    }
     if (held && dead && job.payload.file_name) await deps.gemini.deleteFile(job.payload.file_name);
     return held ? (dead ? 'dead' : 'retry') : 'lease-lost';
   }
@@ -239,6 +249,7 @@ async function indexStep(deps: IngestDeps, job: QueueJob, video: Video) {
     videoUpdate(deps, job, video.id, `status='completed', result=?, error=NULL, progress=NULL, updated_at=?`, [JSON.stringify(output), nowIso()]),
     queue.completeStmt(deps.db, job),
   ]);
+  if (held) await deps.notify?.(video.id, 'done', { step: job.kind });
   if (held && p.file_name) await deps.gemini.deleteFile(p.file_name);
   return held ? 'completed' : 'lease-lost';
 }
