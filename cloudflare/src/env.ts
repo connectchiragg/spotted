@@ -52,7 +52,7 @@ function num(value: string | undefined, fallback: number): number {
 
 export function settings(env: Env): Settings {
   const result: Settings = {
-    geminiModel: env.GEMINI_MODEL || 'gemini-3.5-flash',
+    geminiModel: env.GEMINI_MODEL || 'gemini-3.1-flash-lite',
     embeddingModel: env.EMBEDDING_MODEL || '@cf/baai/bge-small-en-v1.5',
     maxUploadBytes: num(env.MAX_UPLOAD_MB, 400) * 1024 * 1024,
     maxVideoSeconds: num(env.MAX_VIDEO_SECONDS, 600),

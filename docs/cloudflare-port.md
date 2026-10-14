@@ -88,7 +88,8 @@ A shared video library you can search in plain language:
 
 **Retries.**
 - Transient errors back off by `30 s × attempts²` through the alarm. After 5 attempts the video fails, and its Gemini file is deleted.
-- Gemini `429` waits for its `RetryInfo` delay, re-checking at least every 2 h.
+- **Quota is not failure.** A Gemini `429` (rate or daily quota) waits for its `RetryInfo` delay (15 min × waits if none is given), re-checking at least every 2 h. It does **not** use up the 5 attempts: the try is refunded and counted in `quota_waits` instead. The video gives up only after **48 h** on quota (`MAX_QUOTA_WINDOW_MS`), which always spans a daily reset (Gemini resets requests-per-day at midnight Pacific time, [rate limits](https://ai.google.dev/gemini-api/docs/rate-limits)). Before this fix, five 2 h quota waits (~8 h) failed a video and deleted its Gemini file.
+- **A quota wait belongs to a model.** The wait records `quota_model`. If `GEMINI_MODEL` changes, `start()` (which the `GET /videos/:id` and SSE safety net call) and the alarm treat the old wait as void and retry at once on the new model. States written before this field existed count as void if their last error was a quota error.
 - Waiting for Gemini to process a file is not a failed attempt; it polls at most 120 times.
 
 **Order of every visible transition.**
@@ -103,6 +104,10 @@ A shared video library you can search in plain language:
   - `pending` or `processing`: `start()`, which restores a lost alarm (alarm retries give up after 6 failures);
   - `completed` with `needs_index` (an EC2 import): re-embed it.
 - Unconfirmed uploads expire lazily, when the history is listed, after 15 minutes. There is no background sweeper.
+
+**Model and free-tier quota.** `GEMINI_MODEL` is `gemini-3.1-flash-lite` (GA id from `models.list`; a `-preview` id also exists), for both tagging and `/query` answers. On the key's project (AI Studio rate-limit page, 2026-10-15) its free tier is **15 RPM and 500 RPD**; `gemini-3.8-flash`/`3.6-flash` allow 20 RPD and `gemini-3-flash` 20 RPD, which is what blocked uploads. Each video costs 1 `generateContent` (Files API calls are not generation requests) and each `/query` 1 more, so the public budgets (10 uploads + 100 queries a day, at most 5 tries per video) stay under ~160 requests/day, a third of the 500 RPD. A burst above 15 RPM gets a 429: ingestion waits it out, and `/query` falls back to the retrieval-only answer. `/query` reports `answer_model` and `answer_usage` (token counts).
+
+`countTokens` on the owner's 105 s video with `gemini-3.1-flash-lite` and `MEDIA_RESOLUTION_LOW`: 1 fps = 7,455 video + 3,360 audio tokens; `videoMetadata.fps` 0.1523 (16 frames) = 1,136 video + 3,360 audio. The model honours `fps` (≈71 tokens per frame).
 
 **Global Gemini concurrency.** No cross-video limiter was added.
 - The public budgets cap ingestion at 10 uploads/day, so at most a handful of actors call Gemini at once.

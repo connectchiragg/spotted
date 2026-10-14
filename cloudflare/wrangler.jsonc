@@ -51,10 +51,12 @@
     { "binding": "VIDEOS", "bucket_name": "framer-cf-videos" }
   ],
 
+  // Gemini 3.1 Flash Lite free tier on the key's project: 15 RPM, 500 RPD (shared by
+  // tagging and /query). 10 uploads (<= 5 tries each) + 100 queries/day stay well under it.
   "vars": {
     "R2_ACCOUNT_ID": "0187f7c38bf35a8abcc4e9f9abfa213e",
     "R2_BUCKET_NAME": "framer-cf-videos",
-    "GEMINI_MODEL": "gemini-3.5-flash",
+    "GEMINI_MODEL": "gemini-3.1-flash-lite",
     "EMBEDDING_MODEL": "@cf/baai/bge-small-en-v1.5",
     "MAX_UPLOAD_MB": "400",
     "MAX_VIDEO_SECONDS": "600",
@@ -88,7 +90,7 @@
       "vars": {
         "R2_ACCOUNT_ID": "0187f7c38bf35a8abcc4e9f9abfa213e",
         "R2_BUCKET_NAME": "framer-cf-videos",
-        "GEMINI_MODEL": "gemini-3.5-flash",
+        "GEMINI_MODEL": "gemini-3.1-flash-lite",
         "EMBEDDING_MODEL": "@cf/baai/bge-small-en-v1.5",
         "MAX_UPLOAD_MB": "400",
         "MAX_VIDEO_SECONDS": "600",
