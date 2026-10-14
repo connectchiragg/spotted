@@ -176,7 +176,9 @@ function classify(status: number): TaggerError {
 }
 
 export class Gemini {
-  constructor(private apiKey: string, private model: string, private fetcher: typeof fetch = fetch) {}
+  // The default wraps the global fetch: calling it as `this.fetcher(...)` would bind `this` to
+  // the Gemini instance, which workerd rejects with "Illegal invocation".
+  constructor(private apiKey: string, private model: string, private fetcher: typeof fetch = (input, init) => fetch(input, init)) {}
 
   private async call(url: string, init: RequestInit, signal?: AbortSignal, passStatuses: number[] = []): Promise<Response> {
     let response: Response;
@@ -184,6 +186,8 @@ export class Gemini {
       response = await this.fetcher(url, { ...init, signal, headers: { 'x-goog-api-key': this.apiKey, ...(init.headers as Record<string, string>) } });
     } catch (error) {
       if (signal?.aborted) throw signal.reason ?? error;
+      // URL without query string: never logs credentials (the key travels in a header).
+      console.warn('gemini fetch failed', init.method ?? 'GET', url.split('?')[0], (error as Error)?.message);
       throw new TaggerError('Could not connect to Gemini', 502, true);
     }
     if (passStatuses.includes(response.status)) return response;
