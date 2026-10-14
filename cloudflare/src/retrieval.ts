@@ -144,8 +144,8 @@ export async function hybridSearch(db: Db, model: string, queryVector: number[],
        WHERE e.model = $2 ORDER BY e.vector <=> $1::vector LIMIT $3),
      keyword AS (
        SELECT j.id AS job_id FROM jobs j
-       WHERE j.status='completed' AND j.archived_at IS NULL AND jsonb_array_length($4::jsonb) > 0
-         AND EXISTS (SELECT 1 FROM jsonb_array_elements(j.result->'tags') t, jsonb_array_elements_text($4::jsonb) w
+       WHERE j.status='completed' AND j.archived_at IS NULL AND jsonb_array_length($4::text::jsonb) > 0
+         AND EXISTS (SELECT 1 FROM jsonb_array_elements(j.result->'tags') t, jsonb_array_elements_text($4::text::jsonb) w
                      WHERE lower(t->>'label') LIKE '%' || w || '%')
        LIMIT $3)
      SELECT j.*, COALESCE(n.score, 1 - (e.vector <=> $1::vector), 0) AS semantic_score
@@ -159,7 +159,7 @@ export async function hybridSearch(db: Db, model: string, queryVector: number[],
   const ids = rows.map((r) => r.id);
   const frames = await db.query(
     `SELECT job_id, frame_index, 1 - (vector <=> $1::vector) AS score FROM frame_embeddings
-     WHERE model = $2 AND job_id IN (SELECT jsonb_array_elements_text($3::jsonb))`,
+     WHERE model = $2 AND job_id IN (SELECT jsonb_array_elements_text($3::text::jsonb))`,
     [literal, model, JSON.stringify(ids)],
   );
   const frameScores: FrameScores = new Map(frames.map((f) => [key(f.job_id, f.frame_index), Number(f.score)]));

@@ -45,7 +45,7 @@ export async function claim(db: Db, stages: Stage[] | null = null): Promise<Clai
        WHERE run_after <= now()
          AND (locked_until IS NULL OR locked_until < now())
          AND attempts < max_attempts
-         AND ($2::jsonb IS NULL OR stage IN (SELECT jsonb_array_elements_text($2::jsonb)))
+         AND ($2::text::jsonb IS NULL OR stage IN (SELECT jsonb_array_elements_text($2::text::jsonb)))
        ORDER BY run_after, request_id
        FOR UPDATE SKIP LOCKED
        LIMIT 1),
@@ -77,11 +77,11 @@ export async function advance(
 ): Promise<boolean> {
   const rows = await db.query(
     `WITH q AS (
-       UPDATE ingest_queue SET stage=$3, state=$4::jsonb, attempts=0, lease_seconds=$5,
+       UPDATE ingest_queue SET stage=$3, state=$4::text::jsonb, attempts=0, lease_seconds=$5,
          lock_token=NULL, locked_until=NULL, last_error=NULL,
          run_after=now() + make_interval(secs => $6), updated_at=now()
        WHERE request_id=$1 AND lock_token=$2 RETURNING request_id)
-     UPDATE jobs SET progress=$7::jsonb, updated_at=$8, error=NULL FROM q WHERE jobs.id=q.request_id RETURNING jobs.id`,
+     UPDATE jobs SET progress=$7::text::jsonb, updated_at=$8, error=NULL FROM q WHERE jobs.id=q.request_id RETURNING jobs.id`,
     [claimed.request_id, claimed.lock_token, next, JSON.stringify(state), LEASES[next], delaySeconds, progressJson(progress), nowIso()],
   );
   return rows.length === 1;
@@ -91,10 +91,10 @@ export async function advance(
 export async function defer(db: Db, claimed: Claimed, state: Record<string, any>, delaySeconds: number, progress: Progress | null = null): Promise<boolean> {
   const rows = await db.query(
     `WITH q AS (
-       UPDATE ingest_queue SET attempts=GREATEST(attempts - 1, 0), state=$3::jsonb,
+       UPDATE ingest_queue SET attempts=GREATEST(attempts - 1, 0), state=$3::text::jsonb,
          lock_token=NULL, locked_until=NULL, run_after=now() + make_interval(secs => $4), updated_at=now()
        WHERE request_id=$1 AND lock_token=$2 RETURNING request_id)
-     UPDATE jobs SET progress=COALESCE($5::jsonb, jobs.progress), updated_at=$6 FROM q WHERE jobs.id=q.request_id RETURNING jobs.id`,
+     UPDATE jobs SET progress=COALESCE($5::text::jsonb, jobs.progress), updated_at=$6 FROM q WHERE jobs.id=q.request_id RETURNING jobs.id`,
     [claimed.request_id, claimed.lock_token, JSON.stringify(state), delaySeconds, progressJson(progress), nowIso()],
   );
   return rows.length === 1;
@@ -135,7 +135,7 @@ export async function fail(db: Db, claimed: Claimed, message: string, retryable:
 export async function complete(db: Db, claimed: Claimed, result: Record<string, any>): Promise<boolean> {
   const rows = await db.query(
     `WITH q AS (DELETE FROM ingest_queue WHERE request_id=$1 AND lock_token=$2 RETURNING request_id)
-     UPDATE jobs SET status='completed', result=$3::jsonb, error=NULL, claim_token=NULL, lease_until=NULL,
+     UPDATE jobs SET status='completed', result=$3::text::jsonb, error=NULL, claim_token=NULL, lease_until=NULL,
        progress=NULL, updated_at=$4
      FROM q WHERE jobs.id=q.request_id AND jobs.status='processing' RETURNING jobs.id`,
     [claimed.request_id, claimed.lock_token, JSON.stringify(result), nowIso()],
@@ -170,7 +170,7 @@ export async function sweepExhausted(db: Db): Promise<number> {
 export async function hasDueWork(db: Db, stages: Stage[]): Promise<boolean> {
   const rows = await db.query(
     `SELECT 1 FROM ingest_queue WHERE run_after <= now() AND (locked_until IS NULL OR locked_until < now())
-     AND attempts < max_attempts AND stage IN (SELECT jsonb_array_elements_text($1::jsonb)) LIMIT 1`,
+     AND attempts < max_attempts AND stage IN (SELECT jsonb_array_elements_text($1::text::jsonb)) LIMIT 1`,
     [JSON.stringify(stages)],
   );
   return rows.length > 0;

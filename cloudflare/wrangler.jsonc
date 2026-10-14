@@ -4,7 +4,7 @@
   // owns framer.haciensus.com. This Worker only serves *.workers.dev until cutover.
   "name": "framer-cf-api",
   "main": "src/index.ts",
-  "compatibility_date": "2026-09-15",
+  "compatibility_date": "2026-08-15",
   "compatibility_flags": ["nodejs_compat"],
   "account_id": "0187f7c38bf35a8abcc4e9f9abfa213e",
   "workers_dev": true,
@@ -59,7 +59,22 @@
     "smoke": {
       "name": "framer-cf-smoke",
       "triggers": { "crons": [] },
-      "vars": { "PUBLIC_DEMO_LIMITS": "true" }
+      // Data bindings (hyperdrive, r2_buckets, ai) are intentionally not declared here.
+      "vars": {
+        "R2_ACCOUNT_ID": "0187f7c38bf35a8abcc4e9f9abfa213e",
+        "R2_BUCKET_NAME": "framer-cf-videos",
+        "GEMINI_MODEL": "gemini-3.5-flash",
+        "EMBEDDING_MODEL": "@cf/baai/bge-small-en-v1.5",
+        "MAX_UPLOAD_MB": "400",
+        "MAX_VIDEO_SECONDS": "600",
+        "MAX_FRAMES": "16",
+        "SEARCH_MIN_SIMILARITY": "0.60",
+        "DUPLICATE_SIMILARITY_THRESHOLD": "0.95",
+        "PUBLIC_DEMO_LIMITS": "true",
+        "DAILY_UPLOAD_LIMIT": "10",
+        "DAILY_QUERY_LIMIT": "100",
+        "QUEUE_STEPS_PER_TICK": "2"
+      }
     }
   }
 }

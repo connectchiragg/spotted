@@ -50,7 +50,7 @@ export async function listJobs(db: Db, opts: { limit: number; offset: number; ta
   if (opts.tags && opts.tags.length) {
     params.push(JSON.stringify(opts.tags));
     where.push(`status='completed' AND EXISTS (SELECT 1 FROM jsonb_array_elements(result->'tags') t
-                WHERE t->>'label' IN (SELECT jsonb_array_elements_text($${params.length}::jsonb)))`);
+                WHERE t->>'label' IN (SELECT jsonb_array_elements_text($${params.length}::text::jsonb)))`);
   }
   params.push(opts.limit, opts.offset);
   const rows = await db.query(

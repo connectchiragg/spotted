@@ -326,7 +326,8 @@ export async function handle(request: Request, deps: AppDeps): Promise<Response>
   try {
     if ((method === 'GET' || method === 'HEAD') && path === '/health') return json({ status: 'ok' });
     if ((method === 'GET' || method === 'HEAD') && path === '/') {
-      if (deps.assets) return deps.assets.fetch(new Request(new URL('/index.html', url), request));
+      // Asset html_handling maps '/' to index.html (requesting /index.html would redirect to '/').
+      if (deps.assets) return deps.assets.fetch(request);
       throw new HttpError(404, 'Not found');
     }
     const limited = await publicBudget(request, path, deps);
