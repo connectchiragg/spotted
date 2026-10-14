@@ -200,6 +200,17 @@ export class VideoDO extends DurableObject<Env> {
     return { gemini_files_deleted: deleted };
   }
 
+  /** True only when the D1 record is reachable and the video's row is gone. */
+  private async orphaned(videoId: string): Promise<boolean> {
+    const db = VideoDO.testDeps.get(videoId)?.().db ?? this.env.DB;
+    if (!db) return false;
+    try {
+      return (await getVideo(db, videoId)) === null;
+    } catch {
+      return false; // D1 unavailable: never purge on doubt
+    }
+  }
+
   private purged = false;
   private async isPurged(): Promise<boolean> {
     if (!this.purged && (await this.ctx.storage.get('purged')) !== undefined) this.purged = true;
@@ -218,6 +229,12 @@ export class VideoDO extends DurableObject<Env> {
     try {
       if (await this.isPurged()) return;
       let state = await this.load();
+      if (state && await this.orphaned(state.video_id)) {
+        // The video's D1 row was deleted out of band (e.g. with wrangler): clean up after it.
+        const { gemini_files_deleted } = await this.purge(state.video_id);
+        console.log('VideoDO: purged orphaned actor', state.video_id, gemini_files_deleted);
+        return;
+      }
       while (state && !this.terminal(state)) {
         if (state.next_retry_at && state.next_retry_at > Date.now() && !this.staleQuotaWait(state)) {
           await this.ctx.storage.setAlarm(state.next_retry_at);

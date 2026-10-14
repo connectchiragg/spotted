@@ -210,6 +210,18 @@ describe('VideoDO: ingestion run by the per-video actor', () => {
     expect((await del('Bearer admin-token-123')).status).toBe(200); // idempotent
   });
 
+  it('an actor whose D1 row was deleted out of band purges itself at its next alarm', async () => {
+    const t = await setup({ tagStatus: 429 });
+    await t.stub.start(t.video.id);
+    await t.drive((x) => x.step === 'tag' && x.next_retry_at !== null);
+    await db.prepare('DELETE FROM videos WHERE id=?1').bind(t.video.id).run();
+    await runDurableObjectAlarm(t.stub); // the pending quota-wait alarm fires
+    expect(await t.state()).toBeNull();
+    expect(await t.alarmAt()).toBeNull();
+    expect(t.fake.files.size).toBe(0);
+    await expect(t.stub.start(t.video.id)).rejects.toThrow(/deleted/);
+  });
+
   it('a permanent error fails at once', async () => {
     const t = await setup({}, 'a.mkv', 'video/x-matroska');
     await t.stub.start(t.video.id);
