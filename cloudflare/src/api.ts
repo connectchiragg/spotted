@@ -52,7 +52,9 @@ export function progressOf(job: Job): Record<string, any> {
   else if (job.status === 'failed') progress = { ...progress, stage: 'Failed', percent: progress.percent ?? 0, eta_seconds: null, updated_at: job.updated_at };
   else if (job.status === 'pending' || job.status === 'uploading') {
     const stage = job.status === 'uploading' ? 'Uploading' : job.error ? 'Waiting to retry' : 'Queued';
-    progress = { stage, percent: 0, eta_seconds: progress.eta_seconds ?? null, updated_at: job.updated_at };
+    // A pending video waiting to retry keeps the percent of the step it reached (e.g. 55 at tag).
+    const percent = job.status === 'pending' && typeof progress.percent === 'number' ? progress.percent : 0;
+    progress = { stage, percent, eta_seconds: progress.eta_seconds ?? null, updated_at: job.updated_at };
   } else if (!Object.keys(progress).length) progress = { stage: 'Processing', percent: 0, eta_seconds: null, updated_at: job.updated_at };
   return progress;
 }
@@ -409,8 +411,13 @@ async function queryVideos(request: Request, deps: AppDeps) {
   });
   response.answer = `Found ${items.length} matching video(s). Review the tags and sampled-frame evidence below.`;
   try {
-    response.answer = validateAnswer(await need(deps.gemini, 'no model').answer(q, candidates), items.length);
+    const gemini = need(deps.gemini, 'no model');
+    const { value, usage } = await gemini.answer(q, candidates);
+    response.answer = validateAnswer(value, items.length);
     response.answer_source = 'gemini';
+    response.answer_model = gemini.modelName;
+    if (usage) response.answer_usage = { prompt_tokens: usage.promptTokenCount ?? null, output_tokens: usage.candidatesTokenCount ?? null,
+      thought_tokens: usage.thoughtsTokenCount ?? null, total_tokens: usage.totalTokenCount ?? null };
   } catch {
     // Generation is optional; never discard usable retrieval or leak provider errors.
     response.answer_warning = 'Answer generation was unavailable; showing retrieved matches.';

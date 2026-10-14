@@ -9,6 +9,8 @@ const API = 'https://generativelanguage.googleapis.com';
 export const PROMPT_VERSION = 'cf-video-v1';
 
 export class TaggerError extends Error {
+  /** A 429 rate/quota limit: waited out without using up the step's failure attempts. */
+  quota = false;
   /** retryAfterSeconds: Gemini's RetryInfo.retryDelay on 429, when given. */
   constructor(message: string, public status = 502, public retryable = false, public retryAfterSeconds: number | null = null) {
     super(message);
@@ -180,7 +182,7 @@ function classify(status: number): TaggerError {
   if (status === 504) return new TaggerError('Gemini request timed out', 504, true);
   if ([500, 502, 503].includes(status)) return new TaggerError('Gemini is temporarily unavailable; retry later', 503, true);
   // Quota/rate limits are waited out (budgets bound total use); the caller backs off by retryDelay.
-  if (status === 429) return new TaggerError('Gemini quota exceeded; analysis will retry later', 503, true);
+  if (status === 429) return Object.assign(new TaggerError('Gemini quota exceeded; analysis will retry later', 503, true), { quota: true });
   if (status === 401 || status === 403) return new TaggerError('Gemini rejected the configured API credentials', 503, false);
   if (status === 404) return new TaggerError('Configured Gemini model or file is not available', 503, false);
   return new TaggerError('Gemini request failed; check model availability and provider status', 502, false);
@@ -329,13 +331,15 @@ export class Gemini {
     return { result: validateTagging(parsed, durationSeconds, maxMoments), usage };
   }
 
-  async answer(query: string, candidates: unknown[]): Promise<unknown> {
-    const { text } = await this.generate({
+  get modelName() { return this.model; }
+
+  async answer(query: string, candidates: unknown[]): Promise<{ value: unknown; usage: TokenUsage | null }> {
+    const { text, usage } = await this.generate({
       systemInstruction: { parts: [{ text: ANSWER_PROMPT }] },
       contents: [{ role: 'user', parts: [{ text: JSON.stringify({ query, candidates }) }] }],
       generationConfig: { responseMimeType: 'application/json' },
     });
-    return JSON.parse(text);
+    return { value: JSON.parse(text), usage };
   }
 }
 

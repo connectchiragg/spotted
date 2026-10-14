@@ -37,6 +37,13 @@ export const MAX_ATTEMPTS = 5;
 const MAX_POLLS = 120; // 120 x 5 s: at most ~10 min waiting for Gemini to process a file
 const POLL_MS = 5_000;
 const MAX_QUOTA_WAIT_S = 2 * 3600; // honour Gemini's RetryInfo, but re-check at least every 2 h
+const QUOTA_FALLBACK_S = 15 * 60; // a 429 without RetryInfo: 15 min x waits, capped at MAX_QUOTA_WAIT_S
+/**
+ * Quota waits (429) do not use up MAX_ATTEMPTS; instead a video gives up once it has been
+ * waiting on quota for this long. Gemini's per-day quota resets at midnight Pacific time,
+ * so 48 h always spans at least one reset.
+ */
+export const MAX_QUOTA_WINDOW_MS = 48 * 3600_000;
 const DEFAULT_PING_MS = 15_000;
 const DEFAULT_MAX_STREAM_MS = 5 * 60_000;
 const RETRY_HINT_MS = 3_000;
@@ -52,6 +59,11 @@ export interface IngestState {
   step: Step;
   attempts: number; // attempts of the current step (persisted BEFORE each try)
   next_retry_at: number | null; // epoch ms
+  /** The Gemini model whose quota (429) the current wait is for; a model change voids that wait. */
+  quota_model?: string | null;
+  /** Quota (429) waits so far, and when the first one started (epoch ms). Not failure attempts. */
+  quota_waits?: number;
+  quota_since?: number | null;
   last_error: string | null;
   polls: number;
   /** Idempotency keys of side effects, written before the side effect: '<video_id>:<step>'. */
@@ -118,10 +130,35 @@ export class VideoDO extends DurableObject<Env> {
       return state;
     }
     if (state.video_id !== videoId) throw new Error('Video id does not match this object');
+    if (!this.terminal(state) && this.staleQuotaWait(state)) {
+      // The wait was for another model's quota (GEMINI_MODEL changed since): retry now on the current one.
+      state = await this.save({ ...state, next_retry_at: null, quota_model: null });
+      await this.ctx.storage.setAlarm(Date.now());
+      return state;
+    }
     if (!this.terminal(state) && (await this.ctx.storage.getAlarm()) === null) {
       await this.ctx.storage.setAlarm(Math.max(Date.now(), state.next_retry_at ?? 0)); // lost alarm: re-arm
     }
     return state;
+  }
+
+  /** The current Gemini model (test deps first), or null if unknown. */
+  private currentModel(videoId: string): string | null {
+    const injected = VideoDO.testDeps.get(videoId);
+    if (injected) return injected().settings.geminiModel;
+    try { return settings(this.env).geminiModel; } catch { return null; }
+  }
+
+  /**
+   * A quota wait recorded for a different model than the configured one. States written
+   * before quota_model existed have it undefined: their quota error is treated as stale too.
+   */
+  private staleQuotaWait(state: IngestState): boolean {
+    if (!state.next_retry_at || state.next_retry_at <= Date.now()) return false;
+    const model = this.currentModel(state.video_id);
+    if (!model) return false;
+    if (state.quota_model === undefined) return /quota/i.test(state.last_error ?? '');
+    return state.quota_model !== null && state.quota_model !== model;
   }
 
   /** Re-embed an imported, already-analysed video from its D1 result (migration backfill). */
@@ -147,7 +184,7 @@ export class VideoDO extends DurableObject<Env> {
     try {
       let state = await this.load();
       while (state && !this.terminal(state)) {
-        if (state.next_retry_at && state.next_retry_at > Date.now()) {
+        if (state.next_retry_at && state.next_retry_at > Date.now() && !this.staleQuotaWait(state)) {
           await this.ctx.storage.setAlarm(state.next_retry_at);
           return;
         }
@@ -172,7 +209,7 @@ export class VideoDO extends DurableObject<Env> {
   /** Run one step with attempt accounting; returns the new state, or 'wait' if an alarm was set. */
   private async runStep(deps: VideoDeps, state: IngestState): Promise<IngestState | 'wait'> {
     // Durable BEFORE the side effect: this try counts even if the object is evicted mid-call.
-    state = await this.save({ ...state, attempts: state.attempts + 1, next_retry_at: null });
+    state = await this.save({ ...state, attempts: state.attempts + 1, next_retry_at: null, quota_model: null });
     if (state.attempts > MAX_ATTEMPTS) return this.fail(deps, state, state.last_error ?? 'Processing exceeded the retry limit');
     try {
       switch (state.step) {
@@ -190,10 +227,20 @@ export class VideoDO extends DurableObject<Env> {
       if (error instanceof TaggerError) { message = error.message; permanent = !error.retryable; retryAfter = error.retryAfterSeconds; }
       else if (error instanceof PermanentError) { message = error.message; permanent = true; }
       else console.error('VideoDO step failed', state.video_id, state.step, (error as Error)?.message);
-      if (permanent || state.attempts >= MAX_ATTEMPTS) return this.fail(deps, state, message);
-      const delay = retryAfter !== null ? Math.min(retryAfter, MAX_QUOTA_WAIT_S) * 1000 : backoffMs(state.attempts);
+      const quota = error instanceof TaggerError && error.quota;
+      if (quota) {
+        // A rate/quota limit is not a failure: refund this try (it was counted before the call so a
+        // crash loop still stops) and wait, bounded by total time on quota rather than by attempts.
+        const since = state.quota_since ?? Date.now();
+        if (Date.now() - since >= MAX_QUOTA_WINDOW_MS) return this.fail(deps, state, 'Gemini quota stayed exhausted for 48 hours; upload the video again later');
+        const waits = (state.quota_waits ?? 0) + 1;
+        state = { ...state, attempts: Math.max(0, state.attempts - 1), quota_waits: waits, quota_since: since };
+        retryAfter ??= Math.min(QUOTA_FALLBACK_S * waits, MAX_QUOTA_WAIT_S);
+      } else if (permanent || state.attempts >= MAX_ATTEMPTS) return this.fail(deps, state, message);
+      const delay = quota ? Math.min(retryAfter!, MAX_QUOTA_WAIT_S) * 1000 : backoffMs(state.attempts);
       const retryAt = Date.now() + delay;
       await this.commit({ ...state, next_retry_at: retryAt, last_error: message,
+        quota_model: quota ? deps.settings.geminiModel : null,
         progress: { stage: 'Waiting to retry', percent: state.progress?.percent ?? 0, eta_seconds: Math.round(delay / 1000) } },
       'status', { retry_at: new Date(retryAt).toISOString() }, deps);
       await this.ctx.storage.setAlarm(retryAt);

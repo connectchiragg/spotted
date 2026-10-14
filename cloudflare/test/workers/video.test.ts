@@ -9,7 +9,7 @@ import { exports } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { geminiFileName } from '../../src/gemini';
 import * as store from '../../src/store';
-import { EvictionError, IngestState, MAX_ATTEMPTS, VideoDO } from '../../src/video';
+import { EvictionError, IngestState, MAX_ATTEMPTS, MAX_QUOTA_WINDOW_MS, VideoDO } from '../../src/video';
 import { defaultTagging, fakeBucket, fakeEmbedder, fakeGemini, FakeGeminiOptions, fakeVectorize, settings } from '../helpers';
 
 const db: D1Database = env.DB;
@@ -125,6 +125,57 @@ describe('VideoDO: ingestion run by the per-video actor', () => {
     expect(s.next_retry_at! - before).toBeGreaterThanOrEqual(119_000);
     expect(s.next_retry_at! - before).toBeLessThanOrEqual(121_000);
     expect(await t.alarmAt()).toBe(s.next_retry_at);
+  });
+
+  it('a quota 429 waits without using up failure attempts; the D1 row keeps the step percent', async () => {
+    const t = await setup({ tagStatus: 429 });
+    await t.stub.start(t.video.id);
+    for (let wait = 1; wait <= MAX_ATTEMPTS + 2; wait++) {
+      const s = (await t.drive((x) => x.step === 'tag' && x.next_retry_at !== null))!;
+      expect(s).toMatchObject({ step: 'tag', attempts: 0, quota_waits: wait, quota_model: settings.geminiModel });
+      if (wait === 1) {
+        const row = (await store.getVideo(db, t.video.id))!;
+        expect(row.status).toBe('pending');
+        expect(row.progress).toMatchObject({ stage: 'Waiting to retry', percent: 55 });
+        const api = await worker.fetch(`https://framer.test/videos/${t.video.id}`);
+        expect((await api.json<any>()).progress).toMatchObject({ stage: 'Waiting to retry', percent: 55 });
+      }
+      await t.skipWait();
+    }
+    expect(t.fake.counts.generate).toBe(MAX_ATTEMPTS + 2); // one call per wait, none skipped or repeated
+    expect((await t.state())!.step).toBe('tag'); // still waiting, not failed
+  });
+
+  it('gives up on quota only after MAX_QUOTA_WINDOW_MS (48 h) of waiting', async () => {
+    const t = await setup({ tagStatus: 429 });
+    await t.stub.start(t.video.id);
+    await t.drive((x) => x.step === 'tag' && x.next_retry_at !== null);
+    await runInDurableObject<VideoDO, void>(t.stub, async (_o, s) => {
+      const st = await s.storage.get<IngestState>('state');
+      await s.storage.put('state', { ...st!, quota_since: Date.now() - MAX_QUOTA_WINDOW_MS - 1000 });
+    });
+    await t.skipWait();
+    const s = (await t.drive())!;
+    expect(s.step).toBe('failed');
+    expect((await store.getVideo(db, t.video.id))!).toMatchObject({ status: 'failed', error: expect.stringMatching(/quota stayed exhausted/) });
+  });
+
+  it('a quota wait recorded for another model is voided by start(): the video retries now', async () => {
+    const t = await setup({ tagStatus: 429 });
+    await t.stub.start(t.video.id);
+    const waiting = (await t.drive((x) => x.step === 'tag' && x.next_retry_at !== null))!;
+    expect(waiting.next_retry_at! - Date.now()).toBeGreaterThan(100_000);
+    // Same model: start() keeps the wait.
+    expect((await t.stub.start(t.video.id)).next_retry_at).toBe(waiting.next_retry_at);
+    // A state written before quota_model existed (legacy) or for another model: the wait is void.
+    await runInDurableObject<VideoDO, void>(t.stub, async (_o, s) => {
+      const st = await s.storage.get<IngestState>('state');
+      const { quota_model: _drop, ...legacy } = st!;
+      await s.storage.put('state', legacy);
+    });
+    const resumed = await t.stub.start(t.video.id);
+    expect(resumed.next_retry_at).toBeNull();
+    expect((await t.alarmAt())! - Date.now()).toBeLessThan(2000);
   });
 
   it('a permanent error fails at once', async () => {
