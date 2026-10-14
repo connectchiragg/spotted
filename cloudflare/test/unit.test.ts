@@ -76,7 +76,9 @@ describe('Gemini client', () => {
     expect(file.name).toBe('files/gen1');
     expect(log).toEqual(['POST /upload/v1beta/files', 'POST https://upload.test/session']);
     const quota = fakeGemini({ tagStatus: 429 }).gemini;
-    await expect(quota.tagVideo(file, 20, 16)).rejects.toMatchObject({ retryable: false });
+    await expect(quota.tagVideo(file, 20, 16)).rejects.toMatchObject({ retryable: true, retryAfterSeconds: 120 });
+    const denied = fakeGemini({ tagStatus: 401 }).gemini;
+    await expect(denied.tagVideo(file, 20, 16)).rejects.toMatchObject({ retryable: false });
     const outage = fakeGemini({ tagStatus: 503 }).gemini;
     await expect(outage.tagVideo(file, 20, 16)).rejects.toMatchObject({ retryable: true });
   });
