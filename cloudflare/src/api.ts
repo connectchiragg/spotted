@@ -51,7 +51,8 @@ export function progressOf(job: Job): Record<string, any> {
   if (job.status === 'completed') progress = { ...progress, stage: 'Completed', percent: 100, eta_seconds: 0, updated_at: job.updated_at };
   else if (job.status === 'failed') progress = { ...progress, stage: 'Failed', percent: progress.percent ?? 0, eta_seconds: null, updated_at: job.updated_at };
   else if (job.status === 'pending' || job.status === 'uploading') {
-    progress = { stage: job.status === 'pending' ? 'Queued' : 'Uploading', percent: 0, eta_seconds: null, updated_at: job.updated_at };
+    const stage = job.status === 'uploading' ? 'Uploading' : job.error ? 'Waiting to retry' : 'Queued';
+    progress = { stage, percent: 0, eta_seconds: progress.eta_seconds ?? null, updated_at: job.updated_at };
   } else if (!Object.keys(progress).length) progress = { stage: 'Processing', percent: 0, eta_seconds: null, updated_at: job.updated_at };
   return progress;
 }
