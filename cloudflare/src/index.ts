@@ -23,14 +23,23 @@ export function build(env: Env, waitUntil: (p: Promise<unknown>) => void): AppDe
   };
 }
 
-/** Cron consumer: claim and process due queue jobs until none are due or the budget runs out. */
-export async function runCron(env: Env, ctx: ExecutionContext): Promise<string[]> {
+/**
+ * The queue consumer, independent of what woke it. D1 stays the source of truth:
+ * this claims and processes due jobs until none are due or the budget runs out,
+ * so it is safe to call from any trigger, as often as wanted, concurrently.
+ *   - today: the per-minute cron (`scheduled` below);
+ *   - option under consideration: R2 event notifications -> Cloudflare Queues as a
+ *     wake-up signal. A `queue(batch, env, ctx)` handler would ack the messages and
+ *     call runDueJobs(env, ctx); the cron would stay as a slower sweeper for
+ *     expired leases, retries and housekeeping. Messages carry no job state.
+ */
+export async function runDueJobs(env: Env, ctx: ExecutionContext): Promise<string[]> {
   const deps = build(env, (p) => ctx.waitUntil(p));
   if (!deps.db) return [];
   await expireUploads(deps.db);
   await purgeFinished(deps.db);
   if (!deps.bucket || !deps.index || !deps.gemini || !deps.embedder) {
-    console.warn('cron: R2, Vectorize, Workers AI or GEMINI_API_KEY missing; queue not processed');
+    console.warn('consumer: R2, Vectorize, Workers AI or GEMINI_API_KEY missing; queue not processed');
     return [];
   }
   const outcomes = await drain(
@@ -38,15 +47,18 @@ export async function runCron(env: Env, ctx: ExecutionContext): Promise<string[]
     // Cron wall-clock limit is 15 min; CPU (10 ms on Free) is not measurable in Workers, so cap steps.
     { maxSteps: deps.settings.stepsPerTick, deadlineMs: 10 * 60 * 1000 },
   );
-  if (outcomes.length) console.log('cron steps', outcomes.join(' '));
+  if (outcomes.length) console.log('consumer steps', outcomes.join(' '));
   return outcomes;
 }
+
+/** Back-compatible name for the cron entry point. */
+export const runCron = runDueJobs;
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     return handle(request, build(env, (p) => ctx.waitUntil(p)));
   },
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    await runCron(env, ctx);
+    await runDueJobs(env, ctx);
   },
 };
