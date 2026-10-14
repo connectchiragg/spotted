@@ -521,8 +521,15 @@ export async function handle(request: Request, deps: AppDeps): Promise<Response>
     m = VIDEO.exec(path);
     if (m && method === 'GET' && m[1] !== 'uploads') {
       const db = need(deps.db, 'Database is not configured');
-      let job = await store.getVideo(db, decodeURIComponent(m[1]));
-      if (!job) throw new HttpError(404, 'Request not found');
+      const id = decodeURIComponent(m[1]);
+      let job = await store.getVideo(db, id);
+      if (!job) {
+        // Safety net for out-of-band deletes: an actor left behind by a deleted row cleans itself up.
+        if (deps.videos && /^[0-9a-f-]{36}$/.test(id)) {
+          await videoStub(deps.videos, id).purgeIfOrphan(id).catch((e: Error) => console.warn('orphan purge failed', id, e?.message));
+        }
+        throw new HttpError(404, 'Request not found');
+      }
       if (await nudge(deps, job) === 'confirmed') job = (await store.getVideo(db, job.id))!;
       return json(await present(job, deps.presigner));
     }

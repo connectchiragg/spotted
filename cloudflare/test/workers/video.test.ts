@@ -222,6 +222,19 @@ describe('VideoDO: ingestion run by the per-video actor', () => {
     await expect(t.stub.start(t.video.id)).rejects.toThrow(/deleted/);
   });
 
+  it('GET of a deleted video purges its orphaned actor; unknown ids write nothing', async () => {
+    const t = await setup();
+    await t.stub.start(t.video.id);
+    expect((await t.drive())!.step).toBe('done'); // completed: no alarm left to notice the delete
+    await db.prepare('DELETE FROM videos WHERE id=?1').bind(t.video.id).run();
+    expect((await worker.fetch(`https://framer.test/videos/${t.video.id}`)).status).toBe(404);
+    expect(await t.state()).toBeNull();
+    const stranger = crypto.randomUUID();
+    expect((await worker.fetch(`https://framer.test/videos/${stranger}`)).status).toBe(404);
+    const other = ns.get(ns.idFromName(stranger));
+    expect(await runInDurableObject<VideoDO, unknown>(other as any, (_o, s) => s.storage.get('purged'))).toBeUndefined();
+  });
+
   it('a permanent error fails at once', async () => {
     const t = await setup({}, 'a.mkv', 'video/x-matroska');
     await t.stub.start(t.video.id);

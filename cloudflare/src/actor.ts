@@ -3,6 +3,7 @@ export interface VideoStub {
   start(videoId: string): Promise<{ version: number; step: string }>;
   reindex(videoId: string): Promise<boolean>;
   purge(videoId: string): Promise<{ gemini_files_deleted: string[] }>;
+  purgeIfOrphan(videoId: string): Promise<boolean>;
   getState(): Promise<Record<string, any> | null>;
   fetch(input: string, init?: RequestInit): Promise<Response>;
 }

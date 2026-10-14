@@ -200,6 +200,18 @@ export class VideoDO extends DurableObject<Env> {
     return { gemini_files_deleted: deleted };
   }
 
+  /**
+   * Purge this actor if it has state but its D1 row is gone (deleted out of band). An actor
+   * that never held state is left untouched, so probing unknown ids writes nothing.
+   */
+  async purgeIfOrphan(videoId: string): Promise<boolean> {
+    if (await this.isPurged()) return false;
+    const state = await this.load();
+    if (!state || state.video_id !== videoId || !(await this.orphaned(videoId))) return false;
+    await this.purge(videoId);
+    return true;
+  }
+
   /** True only when the D1 record is reachable and the video's row is gone. */
   private async orphaned(videoId: string): Promise<boolean> {
     const db = VideoDO.testDeps.get(videoId)?.().db ?? this.env.DB;
