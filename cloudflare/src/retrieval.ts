@@ -1,12 +1,11 @@
 /**
  * Port of app/retrieval.py hybrid_search. Scoring is identical; the difference is
- * the candidate set: pgvector returns the CANDIDATE_LIMIT nearest videos plus any
+ * the candidate set: Vectorize returns the CANDIDATE_LIMIT nearest videos plus any
  * video whose tag labels contain a query word, instead of scanning every video
  * in the Worker (Workers Free allows 10 ms CPU per request).
  */
-import { Db, vectorLiteral } from './db';
-import { documentText } from './embeddings';
-import { decode, Job } from './store';
+import { getVideos, Video as Job } from './store';
+import { documentText, frameScores, nearestVideos } from './vectors';
 
 const STOPWORDS = new Set('a an the and or of in on at to for is are was were with me show find video videos someone person people doing up'.split(' '));
 export const CANDIDATE_LIMIT = 50;
@@ -134,35 +133,33 @@ export function rank(query: string, candidates: Candidate[], frameScores: FrameS
   }));
 }
 
-export async function hybridSearch(db: Db, model: string, queryVector: number[], query: string, minSimilarity: number): Promise<Ranked[]> {
+export interface SearchDeps {
+  db: D1Database;
+  index: VectorizeIndex;
+}
+
+/**
+ * Candidates = the CANDIDATE_LIMIT nearest video vectors from Vectorize plus any
+ * active video whose tag labels contain a query word (D1), then the same ranking
+ * as the Python version. Keyword-only candidates have semantic score 0, so they
+ * qualify only through explicit tag evidence, as before.
+ */
+export async function hybridSearch(deps: SearchDeps, queryVector: number[], query: string, minSimilarity: number): Promise<Ranked[]> {
+  const nearest = await nearestVideos(deps.index, queryVector, CANDIDATE_LIMIT);
   const words = [...tokens(query)];
-  const literal = vectorLiteral(queryVector);
-  const rows = await db.query(
-    `WITH nearest AS (
-       SELECT e.job_id, 1 - (e.vector <=> $1::vector) AS score FROM embeddings e
-       JOIN jobs j ON j.id = e.job_id AND j.status='completed' AND j.archived_at IS NULL
-       WHERE e.model = $2 ORDER BY e.vector <=> $1::vector LIMIT $3),
-     keyword AS (
-       SELECT j.id AS job_id FROM jobs j
-       WHERE j.status='completed' AND j.archived_at IS NULL AND jsonb_array_length($4::text::jsonb) > 0
-         AND EXISTS (SELECT 1 FROM jsonb_array_elements(j.result->'tags') t, jsonb_array_elements_text($4::text::jsonb) w
-                     WHERE lower(t->>'label') LIKE '%' || w || '%')
-       LIMIT $3)
-     SELECT j.*, COALESCE(n.score, 1 - (e.vector <=> $1::vector), 0) AS semantic_score
-     FROM jobs j
-     LEFT JOIN nearest n ON n.job_id = j.id
-     LEFT JOIN embeddings e ON e.job_id = j.id AND e.model = $2
-     WHERE j.id IN (SELECT job_id FROM nearest UNION SELECT job_id FROM keyword)`,
-    [literal, model, CANDIDATE_LIMIT, JSON.stringify(words)],
-  );
-  if (!rows.length) return [];
-  const ids = rows.map((r) => r.id);
-  const frames = await db.query(
-    `SELECT job_id, frame_index, 1 - (vector <=> $1::vector) AS score FROM frame_embeddings
-     WHERE model = $2 AND job_id IN (SELECT jsonb_array_elements_text($3::text::jsonb))`,
-    [literal, model, JSON.stringify(ids)],
-  );
-  const frameScores: FrameScores = new Map(frames.map((f) => [key(f.job_id, f.frame_index), Number(f.score)]));
-  const candidates = rows.map((r) => ({ job: decode(r)!, semantic: Number(r.semantic_score) }));
-  return rank(normalizeQuery(query), candidates, frameScores, minSimilarity);
+  let keywordIds: string[] = [];
+  if (words.length) {
+    const { results } = await deps.db.prepare(
+      `SELECT DISTINCT v.id FROM videos v, json_each(v.result, '$.tags') t, json_each(?1) w
+       WHERE v.status='completed' AND v.archived_at IS NULL
+         AND lower(json_extract(t.value, '$.label')) LIKE '%' || w.value || '%'
+       LIMIT ?2`,
+    ).bind(JSON.stringify(words), CANDIDATE_LIMIT).all<{ id: string }>();
+    keywordIds = results.map((r) => r.id);
+  }
+  const ids = [...new Set([...nearest.keys(), ...keywordIds])];
+  const videos = (await getVideos(deps.db, ids)).filter((v) => v.status === 'completed' && !v.archived_at && v.result);
+  if (!videos.length) return [];
+  const scores = await frameScores(deps.index, queryVector, videos.map((v) => v.id));
+  return rank(query, videos.map((job) => ({ job, semantic: nearest.get(job.id) ?? 0 })), scores, minSimilarity);
 }

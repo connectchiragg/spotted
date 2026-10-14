@@ -1,98 +1,106 @@
-import { Db, Row, nowIso } from './db';
+/** Framer video requests in D1 (the EC2 Postgres "jobs" table, renamed "videos"). */
+import { nowSeconds } from './queue';
 
-export interface Job extends Row {
+export interface Video {
   id: string;
   filename: string;
+  display_name: string | null;
   object_key: string;
   content_type: string;
+  expected_size: number | null;
   status: string;
-  created_at: string;
-  updated_at: string;
-  error: string | null;
-  result: any;
   uploaded: number;
   attempts: number;
-  expected_size: number | null;
-  display_name: string | null;
-  archived_at: string | null;
+  error: string | null;
+  result: any;
   progress: any;
+  archived_at: string | null;
+  created_at: string;
+  updated_at: string;
+  [key: string]: any;
 }
 
-export function decode(row: Row | undefined): Job | null {
+export function nowIso(): string {
+  // Same format as Python's datetime.now(timezone.utc).isoformat().
+  return new Date().toISOString().replace('Z', '+00:00');
+}
+
+export function decode(row: any): Video | null {
   if (!row) return null;
-  const job = { ...row } as Job;
-  // postgres.js returns BIGINT as string.
-  job.expected_size = row.expected_size == null ? null : Number(row.expected_size);
-  if (typeof job.result === 'string') job.result = JSON.parse(job.result);
-  if (typeof job.progress === 'string') job.progress = JSON.parse(job.progress);
-  return job;
+  return { ...row, result: row.result ? JSON.parse(row.result) : null, progress: row.progress ? JSON.parse(row.progress) : null };
 }
 
-export async function createJob(db: Db, input: { filename: string; contentType: string; size: number; displayName?: string | null }): Promise<Job> {
+export async function createVideo(db: D1Database, input: { filename: string; contentType: string; size: number; displayName?: string | null }): Promise<Video> {
   const id = crypto.randomUUID();
   const ts = nowIso();
-  const rows = await db.query(
-    `INSERT INTO jobs (id,filename,object_key,content_type,status,created_at,updated_at,expected_size,display_name)
-     VALUES ($1,$2,$3,$4,'uploading',$5,$5,$6,$7) RETURNING *`,
-    [id, input.filename, `videos/${id}/source`, input.contentType, ts, input.size, input.displayName ?? null],
-  );
-  return decode(rows[0])!;
+  const row = await db.prepare(
+    `INSERT INTO videos (id, filename, display_name, object_key, content_type, expected_size, status, created_at, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'uploading', ?7, ?7) RETURNING *`,
+  ).bind(id, input.filename, input.displayName ?? null, `videos/${id}/source`, input.contentType, input.size, ts).first();
+  return decode(row)!;
 }
 
-export async function getJob(db: Db, id: string): Promise<Job | null> {
-  return decode((await db.query('SELECT * FROM jobs WHERE id=$1', [id]))[0]);
+export async function getVideo(db: D1Database, id: string): Promise<Video | null> {
+  return decode(await db.prepare('SELECT * FROM videos WHERE id=?1').bind(id).first());
 }
 
-export async function listJobs(db: Db, opts: { limit: number; offset: number; tags?: string[] | null; includeArchived?: boolean }): Promise<Job[]> {
+export async function getVideos(db: D1Database, ids: string[]): Promise<Video[]> {
+  if (!ids.length) return [];
+  const { results } = await db.prepare(`SELECT * FROM videos WHERE id IN (SELECT value FROM json_each(?1))`).bind(JSON.stringify(ids)).all();
+  return results.map((r) => decode(r)!);
+}
+
+export async function listVideos(db: D1Database, opts: { limit: number; offset: number; tags?: string[] | null; includeArchived?: boolean }): Promise<Video[]> {
   const where: string[] = [];
-  const params: unknown[] = [];
+  const binds: unknown[] = [];
   if (!opts.includeArchived) where.push('archived_at IS NULL');
-  if (opts.tags && opts.tags.length) {
-    params.push(JSON.stringify(opts.tags));
-    where.push(`status='completed' AND EXISTS (SELECT 1 FROM jsonb_array_elements(result->'tags') t
-                WHERE t->>'label' IN (SELECT jsonb_array_elements_text($${params.length}::text::jsonb)))`);
+  if (opts.tags?.length) {
+    binds.push(JSON.stringify(opts.tags));
+    where.push(`status='completed' AND EXISTS (SELECT 1 FROM json_each(videos.result, '$.tags') t
+                WHERE json_extract(t.value, '$.label') IN (SELECT value FROM json_each(?${binds.length})))`);
   }
-  params.push(opts.limit, opts.offset);
-  const rows = await db.query(
-    `SELECT * FROM jobs ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-     ORDER BY created_at DESC, id DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
-    params,
-  );
-  return rows.map((r) => decode(r)!);
+  binds.push(opts.limit, opts.offset);
+  const { results } = await db.prepare(
+    `SELECT * FROM videos ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+     ORDER BY created_at DESC, id DESC LIMIT ?${binds.length - 1} OFFSET ?${binds.length}`,
+  ).bind(...binds).all();
+  return results.map((r) => decode(r)!);
 }
 
-export async function archiveJob(db: Db, id: string): Promise<boolean> {
-  return (await db.query('UPDATE jobs SET archived_at=COALESCE(archived_at,$2) WHERE id=$1 RETURNING id', [id, nowIso()])).length === 1;
+export async function archiveVideo(db: D1Database, id: string): Promise<boolean> {
+  return (await db.prepare('UPDATE videos SET archived_at=COALESCE(archived_at, ?2) WHERE id=?1').bind(id, nowIso()).run()).meta.changes === 1;
 }
 
-export async function restoreJob(db: Db, id: string): Promise<boolean> {
-  return (await db.query('UPDATE jobs SET archived_at=NULL WHERE id=$1 RETURNING id', [id])).length === 1;
+export async function restoreVideo(db: D1Database, id: string): Promise<boolean> {
+  return (await db.prepare('UPDATE videos SET archived_at=NULL WHERE id=?1').bind(id).run()).meta.changes === 1;
 }
 
-/** Mark the upload verified and enqueue it in ONE statement (no lost or duplicate jobs). */
-export async function markUploadedAndEnqueue(db: Db, id: string): Promise<boolean> {
-  const rows = await db.query(
-    `WITH j AS (
-       UPDATE jobs SET uploaded=1, queued=1, status='pending', updated_at=$2
-       WHERE id=$1 AND status='uploading' RETURNING id)
-     INSERT INTO ingest_queue (request_id) SELECT id FROM j
-     ON CONFLICT (request_id) DO NOTHING RETURNING request_id`,
-    [id, nowIso()],
-  );
-  return rows.length === 1;
+/** Mark the upload verified and enqueue its first ingestion step in one D1 transaction. */
+export async function markUploadedAndEnqueue(db: D1Database, id: string): Promise<boolean> {
+  const now = nowSeconds();
+  const [updated] = await db.batch([
+    db.prepare(`UPDATE videos SET uploaded=1, status='pending', updated_at=?2 WHERE id=?1 AND status='uploading'`).bind(id, nowIso()),
+    // Runs in the same transaction; inserts only if the UPDATE above just happened.
+    db.prepare(
+      `INSERT INTO jobs (kind, payload, status, run_after, attempts, created_at, updated_at)
+       SELECT 'ingest.upload', json_object('video_id', ?1), 'queued', ?2, 0, ?2, ?2
+       WHERE changes() = 1`,
+    ).bind(id, now),
+  ]);
+  return updated.meta.changes === 1;
 }
 
-export async function uploadFailed(db: Db, id: string, message: string): Promise<void> {
-  await db.query(`UPDATE jobs SET status='failed', error=$2, updated_at=$3 WHERE id=$1 AND status='uploading'`, [id, message, nowIso()]);
+export async function uploadFailed(db: D1Database, id: string, message: string): Promise<void> {
+  await db.prepare(`UPDATE videos SET status='failed', error=?2, updated_at=?3 WHERE id=?1 AND status='uploading'`).bind(id, message, nowIso()).run();
 }
 
 /** Uploads never confirmed within 15 minutes fail, as on EC2. */
-export async function expireUploads(db: Db, ageSeconds = 900): Promise<number> {
+export async function expireUploads(db: D1Database, ageSeconds = 900): Promise<number> {
   const cutoff = new Date(Date.now() - ageSeconds * 1000).toISOString().replace('Z', '+00:00');
-  const rows = await db.query(
-    `UPDATE jobs SET status='failed', error='Upload interrupted; submit the video again', updated_at=$1
-     WHERE status='uploading' AND updated_at < $2 RETURNING id`,
-    [nowIso(), cutoff],
-  );
-  return rows.length;
+  const res = await db.prepare(
+    `UPDATE videos SET status='failed', error='Upload interrupted; submit the video again', updated_at=?1
+     WHERE status='uploading' AND updated_at < ?2`,
+  ).bind(nowIso(), cutoff).run();
+  return res.meta.changes;
 }
+

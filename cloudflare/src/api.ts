@@ -2,20 +2,18 @@
  * HTTP API: the same routes and response shapes as the FastAPI app (app/*.py),
  * so the existing UI works unchanged apart from citation thumbnails.
  */
-import { Db } from './db';
 import { Settings } from './env';
-import { Embedder } from './embeddings';
 import { Gemini, validateAnswer } from './gemini';
-import { drain, IngestDeps } from './ingest';
-import { hasDueWork, Stage } from './queue';
 import { hybridSearch, normalizeQuery } from './retrieval';
 import { Presigner } from './storage';
 import * as store from './store';
-import { Job } from './store';
+import { Video as Job } from './store';
+import { Embedder } from './vectors';
 
 export interface AppDeps {
-  db: Db | null;
+  db: D1Database | null;
   bucket: R2Bucket | null;
+  index: VectorizeIndex | null;
   presigner: Presigner | null;
   gemini: Gemini | null;
   embedder: Embedder | null;
@@ -36,8 +34,6 @@ export const json = (body: unknown, status = 200, headers: Record<string, string
   Response.json(body, { status, headers: { ...SECURITY_HEADERS, ...headers } });
 
 const DOWNLOAD_TTL = 86400;
-/** Stages short enough to run under ctx.waitUntil (30 s after the response). */
-export const REQUEST_PATH_STAGES: Stage[] = ['await_file', 'index'];
 
 function need<T>(value: T | null | undefined, message: string): T {
   if (value === null || value === undefined) throw new HttpError(503, message);
@@ -113,15 +109,14 @@ async function readJson(request: Request): Promise<any> {
 
 // ---------------------------------------------------------------- usage guard
 
-export async function reserve(db: Db, operation: string, limit: number, day = new Date().toISOString().slice(0, 10)): Promise<boolean> {
+export async function reserve(db: D1Database, operation: string, limit: number, day = new Date().toISOString().slice(0, 10)): Promise<boolean> {
   if (limit <= 0) return false;
-  const rows = await db.query(
-    `INSERT INTO usage_counters (day, operation, count) VALUES ($1::date, $2, 1)
-     ON CONFLICT (day, operation) DO UPDATE SET count = usage_counters.count + 1
-     WHERE usage_counters.count < $3 RETURNING count`,
-    [day, operation, limit],
-  );
-  return rows.length === 1;
+  const row = await db.prepare(
+    `INSERT INTO usage_counters (day, operation, count) VALUES (?1, ?2, 1)
+     ON CONFLICT (day, operation) DO UPDATE SET count = count + 1 WHERE count < ?3
+     RETURNING count`,
+  ).bind(day, operation, limit).first();
+  return row !== null;
 }
 
 /** Port of app/limits.py public_budget. Returns a response to short-circuit, or null. */
@@ -133,8 +128,10 @@ export async function publicBudget(request: Request, path: string, deps: AppDeps
   if (request.method === 'POST' && path === '/videos/uploads' && !deps.geminiConfigured) {
     return json({ detail: 'Video analysis is being configured. Please try uploading later.' }, 503);
   }
-  const operation = path === '/videos/uploads' ? 'upload' : path === '/query' ? 'query' : null;
-  if (request.method !== 'POST' || !operation) return null;
+  // /search is budgeted too: unlike EC2's local model, each search spends Workers AI neurons.
+  const operation = request.method === 'POST' && path === '/videos/uploads' ? 'upload'
+    : (request.method === 'POST' && path === '/query') || (request.method === 'GET' && path === '/search') ? 'query' : null;
+  if (!operation) return null;
   const length = Number(request.headers.get('content-length') ?? '0');
   if (!Number.isFinite(length)) return json({ detail: 'Invalid request size' }, 400);
   if (length > 16384) return json({ detail: 'Request is too large' }, 413);
@@ -153,32 +150,12 @@ export async function publicBudget(request: Request, path: string, deps: AppDeps
 
 // ---------------------------------------------------------------- handlers
 
-function ingestDeps(deps: AppDeps): IngestDeps | null {
-  if (!deps.db || !deps.bucket || !deps.gemini || !deps.embedder) return null;
-  return { db: deps.db, bucket: deps.bucket, gemini: deps.gemini, embedder: deps.embedder, settings: deps.settings };
-}
-
-/** Request-path consumer: claim short stages so results appear without waiting for cron. */
-function kickQueue(deps: AppDeps) {
-  const ingest = ingestDeps(deps);
-  if (!ingest) return;
-  deps.waitUntil((async () => {
-    try {
-      if (await hasDueWork(ingest.db, REQUEST_PATH_STAGES)) {
-        await drain(ingest, { maxSteps: 1, stages: REQUEST_PATH_STAGES, deadlineMs: 20000 });
-      }
-    } catch (error) {
-      console.warn('request-path queue step skipped', (error as Error)?.message);
-    }
-  })());
-}
-
 async function createUpload(request: Request, deps: AppDeps) {
   const db = need(deps.db, 'Database is not configured');
   const presigner = need(deps.presigner, 'Storage is not configured; set the R2 API token secrets');
   const body = validateUploadIntent(await readJson(request));
   if (body.size_bytes > deps.settings.maxUploadBytes) throw new HttpError(413, 'Video exceeds upload size limit');
-  const job = await store.createJob(db, { filename: body.filename, contentType: body.content_type, size: body.size_bytes, displayName: body.display_name });
+  const job = await store.createVideo(db, { filename: body.filename, contentType: body.content_type, size: body.size_bytes, displayName: body.display_name });
   let url: string;
   try {
     url = await presigner.putUrl(job.object_key, job.content_type, 600);
@@ -195,7 +172,7 @@ async function createUpload(request: Request, deps: AppDeps) {
 async function completeUpload(id: string, deps: AppDeps) {
   const db = need(deps.db, 'Database is not configured');
   const bucket = need(deps.bucket, 'Storage is not configured');
-  const job = await store.getJob(db, id);
+  const job = await store.getVideo(db, id);
   if (!job) throw new HttpError(404, 'Upload request not found');
   if (job.uploaded) return json(await present(job, deps.presigner), 202); // Confirmation retry never starts a new job.
   if (job.status !== 'uploading' || job.expected_size === null) throw new HttpError(409, 'This request cannot be completed; start a new upload');
@@ -215,7 +192,7 @@ async function completeUpload(id: string, deps: AppDeps) {
     throw new HttpError(422, 'Stored video content type does not match upload request');
   }
   await store.markUploadedAndEnqueue(db, job.id);
-  const latest = (await store.getJob(db, job.id))!;
+  const latest = (await store.getVideo(db, job.id))!;
   if (!latest.uploaded) throw new HttpError(409, 'Upload expired; start a new upload');
   return json(await present(latest, deps.presigner), 202);
 }
@@ -240,14 +217,13 @@ async function history(url: URL, deps: AppDeps) {
     tags = [...new Set(rawTags.map((t) => t.toLowerCase().trim().split(/\s+/).filter(Boolean).join(' ')))];
     if (tags.some((t) => !t || t.length > 80)) throw new HttpError(422, 'Each tag must contain between 1 and 80 characters');
   }
-  const jobs = await store.listJobs(db, { limit, offset, tags, includeArchived });
-  if (jobs.some((j) => j.status === 'pending' || j.status === 'processing')) kickQueue(deps);
+  const jobs = await store.listVideos(db, { limit, offset, tags, includeArchived });
   return json({ items: await Promise.all(jobs.map((j) => present(j, deps.presigner))), limit, offset });
 }
 
 async function frame(id: string, index: number, deps: AppDeps) {
   const db = need(deps.db, 'Database is not configured');
-  const job = await store.getJob(db, id);
+  const job = await store.getVideo(db, id);
   if (!job || job.status !== 'completed' || job.archived_at) throw new HttpError(404, 'Completed video not found');
   const timestamps: number[] = job.result?.sampled_timestamps ?? [];
   if (!(index >= 0 && index < timestamps.length)) throw new HttpError(404, 'Sampled frame not found');
@@ -270,11 +246,12 @@ function readQuery(value: unknown): string {
 
 async function retrieve(q: string, deps: AppDeps) {
   const db = need(deps.db, 'Database is not configured');
+  const index = need(deps.index, 'Search index is not configured');
   const embedder = need(deps.embedder, 'Embedding model unavailable');
   try {
     const normalized = normalizeQuery(q);
     const [vector] = await embedder.embed([normalized]);
-    return await hybridSearch(db, embedder.model, vector, normalized, deps.settings.searchMinSimilarity);
+    return await hybridSearch({ db, index }, vector, normalized, deps.settings.searchMinSimilarity);
   } catch (error) {
     if (error instanceof HttpError) throw error;
     console.warn('search failed', (error as Error)?.message);
@@ -347,15 +324,14 @@ export async function handle(request: Request, deps: AppDeps): Promise<Response>
       const id = decodeURIComponent(m[1]);
       if (m[2] === 'complete') return await completeUpload(id, deps);
       const db = need(deps.db, 'Database is not configured');
-      const ok = m[2] === 'archive' ? await store.archiveJob(db, id) : await store.restoreJob(db, id);
+      const ok = m[2] === 'archive' ? await store.archiveVideo(db, id) : await store.restoreVideo(db, id);
       if (!ok) throw new HttpError(404, 'Request not found');
-      return json(await present((await store.getJob(db, id))!, deps.presigner));
+      return json(await present((await store.getVideo(db, id))!, deps.presigner));
     }
     m = VIDEO.exec(path);
     if (m && method === 'GET' && m[1] !== 'uploads') {
-      const job = await store.getJob(need(deps.db, 'Database is not configured'), decodeURIComponent(m[1]));
+      const job = await store.getVideo(need(deps.db, 'Database is not configured'), decodeURIComponent(m[1]));
       if (!job) throw new HttpError(404, 'Request not found');
-      if (job.status === 'pending' || job.status === 'processing') kickQueue(deps);
       return json(await present(job, deps.presigner));
     }
     throw new HttpError(404, 'Not found');

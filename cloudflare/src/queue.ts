@@ -1,177 +1,93 @@
 /**
- * Postgres-table job queue claimed with FOR UPDATE SKIP LOCKED.
+ * D1 work queue (owner-approved design). Correctness relies on D1 serialising
+ * writes: the claim is ONE atomic UPDATE ... RETURNING, work happens outside any
+ * lock, and every later write is fenced by the lease_token the claim returned.
  *
- * Every operation is a single SQL statement (data-modifying CTEs), so it is
- * atomic under Hyperdrive's transaction-mode pooling without BEGIN/COMMIT.
- * Writes after a claim are fenced by lock_token: a consumer whose visibility
- * timeout expired (and whose row was re-claimed) can no longer change anything.
+ * Statements are returned unexecuted so callers can put them in a db.batch()
+ * (a single D1 transaction) together with fenced updates to the videos table.
+ * Order inside a batch: fenced side effects FIRST, then complete/fail (which
+ * clears lease_token), so all of them see the same lease.
  */
-import { Db, nowIso } from './db';
+export const LEASE_SECONDS = 300;
+export const MAX_ATTEMPTS = 5;
 
-export type Stage = 'upload' | 'await_file' | 'tag' | 'index';
-
-/** Visibility timeout per stage, in seconds. */
-export const LEASES: Record<Stage, number> = { upload: 900, await_file: 120, tag: 600, index: 300 };
-
-export interface Claimed {
-  request_id: string;
-  stage: Stage;
-  state: Record<string, any>;
+export interface QueueJob {
+  id: number;
+  kind: string;
+  payload: Record<string, any>;
+  status: string;
+  run_after: number;
+  locked_until: number | null;
+  lease_token: string | null;
   attempts: number;
-  max_attempts: number;
-  lock_token: string;
+  last_error: string | null;
 }
 
-export interface Progress {
-  stage: string;
-  percent: number;
-  eta_seconds: number | null;
+export const nowSeconds = () => Math.floor(Date.now() / 1000);
+
+function decode(row: any): QueueJob {
+  return { ...row, payload: JSON.parse(row.payload) };
 }
 
-function progressJson(p: Progress | null): string | null {
-  return p ? JSON.stringify({ ...p, updated_at: nowIso() }) : null;
+export function enqueueStmt(db: D1Database, kind: string, payload: unknown, runAfter: number, now = nowSeconds()) {
+  return db.prepare(
+    `INSERT INTO jobs (kind, payload, status, run_after, attempts, created_at, updated_at)
+     VALUES (?1, ?2, 'queued', ?3, 0, ?4, ?4)`,
+  ).bind(kind, JSON.stringify(payload), runAfter, now);
 }
 
-/**
- * Claim the next due row. Rows are due when run_after has passed, they are not
- * locked (or their lock expired: the previous consumer crashed or timed out) and
- * the current stage still has attempts left. The job row moves to 'processing'.
- */
-export async function claim(db: Db, stages: Stage[] | null = null): Promise<Claimed | null> {
-  const token = crypto.randomUUID();
-  const rows = await db.query<Claimed>(
-    `WITH next AS (
-       SELECT request_id FROM ingest_queue
-       WHERE run_after <= now()
-         AND (locked_until IS NULL OR locked_until < now())
-         AND attempts < max_attempts
-         AND ($2::text::jsonb IS NULL OR stage IN (SELECT jsonb_array_elements_text($2::text::jsonb)))
-       ORDER BY run_after, request_id
-       FOR UPDATE SKIP LOCKED
-       LIMIT 1),
-     claimed AS (
-       UPDATE ingest_queue q
-       SET lock_token=$1, locked_until=now() + make_interval(secs => q.lease_seconds),
-           attempts=q.attempts + 1, updated_at=now()
-       FROM next WHERE q.request_id = next.request_id
-       RETURNING q.request_id, q.stage, q.state, q.attempts, q.max_attempts, q.lock_token, q.lease_seconds),
-     job AS (
-       UPDATE jobs j
-       SET status='processing', claim_token=claimed.lock_token,
-           attempts=GREATEST(j.attempts, claimed.attempts),
-           lease_until=extract(epoch from now()) + claimed.lease_seconds, updated_at=$3
-       FROM claimed WHERE j.id = claimed.request_id AND j.status IN ('pending','processing')
-       RETURNING j.id)
-     SELECT request_id, stage, state, attempts, max_attempts, lock_token FROM claimed`,
-    [token, stages ? JSON.stringify(stages) : null, nowIso()],
-  );
-  const row = rows[0];
-  if (!row) return null;
-  if (typeof row.state === 'string') row.state = JSON.parse(row.state);
-  return row;
+/** 1. Claim: one atomic statement; picks due queued jobs or running jobs whose lease expired. */
+export async function claim(db: D1Database, now = nowSeconds(), token: string = crypto.randomUUID()): Promise<QueueJob | null> {
+  const row = await db.prepare(
+    `UPDATE jobs SET status='running', lease_token=?1, locked_until=?2+${LEASE_SECONDS}, attempts=attempts+1, updated_at=?2
+     WHERE id=(SELECT id FROM jobs
+               WHERE (status='queued' AND run_after<=?2) OR (status='running' AND locked_until<?2)
+               ORDER BY run_after, id LIMIT 1)
+     RETURNING *`,
+  ).bind(token, now).first();
+  return row ? decode(row) : null;
 }
 
-/** Stage succeeded: move to the next stage with a fresh attempt budget. */
-export async function advance(
-  db: Db, claimed: Claimed, next: Stage, state: Record<string, any>, progress: Progress, delaySeconds = 0,
-): Promise<boolean> {
-  const rows = await db.query(
-    `WITH q AS (
-       UPDATE ingest_queue SET stage=$3, state=$4::text::jsonb, attempts=0, lease_seconds=$5,
-         lock_token=NULL, locked_until=NULL, last_error=NULL,
-         run_after=now() + make_interval(secs => $6), updated_at=now()
-       WHERE request_id=$1 AND lock_token=$2 RETURNING request_id)
-     UPDATE jobs SET progress=$7::text::jsonb, updated_at=$8, error=NULL FROM q WHERE jobs.id=q.request_id RETURNING jobs.id`,
-    [claimed.request_id, claimed.lock_token, next, JSON.stringify(state), LEASES[next], delaySeconds, progressJson(progress), nowIso()],
-  );
-  return rows.length === 1;
+/** 3. Complete. 0 rows changed means the lease was lost (fencing token); nothing is overwritten. */
+export function completeStmt(db: D1Database, job: QueueJob, now = nowSeconds()) {
+  return db.prepare(`UPDATE jobs SET status='done', lease_token=NULL, updated_at=?1 WHERE id=?2 AND lease_token=?3`)
+    .bind(now, job.id, job.lease_token);
 }
 
-/** Not ready yet (e.g. Gemini still processing): release without consuming an attempt. */
-export async function defer(db: Db, claimed: Claimed, state: Record<string, any>, delaySeconds: number, progress: Progress | null = null): Promise<boolean> {
-  const rows = await db.query(
-    `WITH q AS (
-       UPDATE ingest_queue SET attempts=GREATEST(attempts - 1, 0), state=$3::text::jsonb,
-         lock_token=NULL, locked_until=NULL, run_after=now() + make_interval(secs => $4), updated_at=now()
-       WHERE request_id=$1 AND lock_token=$2 RETURNING request_id)
-     UPDATE jobs SET progress=COALESCE($5::text::jsonb, jobs.progress), updated_at=$6 FROM q WHERE jobs.id=q.request_id RETURNING jobs.id`,
-    [claimed.request_id, claimed.lock_token, JSON.stringify(state), delaySeconds, progressJson(progress), nowIso()],
-  );
-  return rows.length === 1;
+/** 4. Fail: retry with quadratic backoff (30 s * attempts^2); dead after 5 attempts. */
+export function failStmt(db: D1Database, job: QueueJob, error: string, now = nowSeconds()) {
+  return db.prepare(
+    `UPDATE jobs SET status=CASE WHEN attempts>=${MAX_ATTEMPTS} THEN 'dead' ELSE 'queued' END,
+       run_after=?1+30*attempts*attempts, lease_token=NULL, last_error=?2, updated_at=?1
+     WHERE id=?3 AND lease_token=?4`,
+  ).bind(now, error, job.id, job.lease_token);
 }
 
-/** Exponential backoff for transient failures: 30 s, 60 s, 120 s ... capped at 10 min. */
-export function backoffSeconds(attempts: number): number {
-  return Math.min(600, 30 * 2 ** Math.max(0, attempts - 1));
+/** Permanent errors (invalid video, quota, credentials) dead-letter immediately. */
+export function deadStmt(db: D1Database, job: QueueJob, error: string, now = nowSeconds()) {
+  return db.prepare(`UPDATE jobs SET status='dead', lease_token=NULL, last_error=?1, updated_at=?2 WHERE id=?3 AND lease_token=?4`)
+    .bind(error, now, job.id, job.lease_token);
 }
 
-/**
- * Stage failed. Retryable failures with attempts left are released with backoff
- * and last_error recorded; otherwise the job fails terminally and leaves the queue.
- */
-export async function fail(db: Db, claimed: Claimed, message: string, retryable: boolean): Promise<'retry' | 'failed' | 'stale'> {
-  if (retryable && claimed.attempts < claimed.max_attempts) {
-    const rows = await db.query(
-      `WITH q AS (
-         UPDATE ingest_queue SET lock_token=NULL, locked_until=NULL, last_error=$3,
-           run_after=now() + make_interval(secs => $4), updated_at=now()
-         WHERE request_id=$1 AND lock_token=$2 RETURNING request_id)
-       UPDATE jobs SET status='pending', error=$3, claim_token=NULL, lease_until=NULL, updated_at=$5
-       FROM q WHERE jobs.id=q.request_id RETURNING jobs.id`,
-      [claimed.request_id, claimed.lock_token, message, backoffSeconds(claimed.attempts), nowIso()],
-    );
-    return rows.length ? 'retry' : 'stale';
-  }
-  const rows = await db.query(
-    `WITH q AS (DELETE FROM ingest_queue WHERE request_id=$1 AND lock_token=$2 RETURNING request_id)
-     UPDATE jobs SET status='failed', error=$3, claim_token=NULL, lease_until=NULL, updated_at=$4
-     FROM q WHERE jobs.id=q.request_id RETURNING jobs.id`,
-    [claimed.request_id, claimed.lock_token, message, nowIso()],
-  );
-  return rows.length ? 'failed' : 'stale';
+/** SQL fragment + binds that make any statement conditional on still holding the lease. */
+export const LEASE_HELD = 'EXISTS (SELECT 1 FROM jobs WHERE id=? AND lease_token=?)';
+export const leaseBinds = (job: QueueJob) => [job.id, job.lease_token];
+
+/** Enqueue the next step only if the current lease is still held (put before completeStmt). */
+export function enqueueNextStmt(db: D1Database, job: QueueJob, kind: string, payload: unknown, runAfter: number, now = nowSeconds()) {
+  return db.prepare(
+    `INSERT INTO jobs (kind, payload, status, run_after, attempts, created_at, updated_at)
+     SELECT ?, ?, 'queued', ?, 0, ?, ? WHERE ${LEASE_HELD}`,
+  ).bind(kind, JSON.stringify(payload), runAfter, now, now, ...leaseBinds(job));
 }
 
-/** Final stage succeeded: persist the result and remove the queue row atomically. */
-export async function complete(db: Db, claimed: Claimed, result: Record<string, any>): Promise<boolean> {
-  const rows = await db.query(
-    `WITH q AS (DELETE FROM ingest_queue WHERE request_id=$1 AND lock_token=$2 RETURNING request_id)
-     UPDATE jobs SET status='completed', result=$3::text::jsonb, error=NULL, claim_token=NULL, lease_until=NULL,
-       progress=NULL, updated_at=$4
-     FROM q WHERE jobs.id=q.request_id AND jobs.status='processing' RETURNING jobs.id`,
-    [claimed.request_id, claimed.lock_token, JSON.stringify(result), nowIso()],
-  );
-  return rows.length === 1;
+/** Run a batch whose LAST statement is the fenced complete/fail; returns whether the lease held. */
+export async function commit(db: D1Database, statements: D1PreparedStatement[]): Promise<boolean> {
+  const results = await db.batch(statements);
+  return (results.at(-1)?.meta.changes ?? 0) === 1;
 }
 
-/** Drop a queue row whose job no longer needs work (already terminal or deleted). */
-export async function discard(db: Db, claimed: Claimed): Promise<void> {
-  await db.query('DELETE FROM ingest_queue WHERE request_id=$1 AND lock_token=$2', [claimed.request_id, claimed.lock_token]);
-}
-
-/**
- * Dead-letter sweep: rows that used every attempt and are no longer locked
- * (the last consumer crashed mid-attempt) fail the job with the last error.
- */
-export async function sweepExhausted(db: Db): Promise<number> {
-  const rows = await db.query(
-    `WITH q AS (
-       DELETE FROM ingest_queue
-       WHERE attempts >= max_attempts AND (locked_until IS NULL OR locked_until < now())
-       RETURNING request_id, last_error)
-     UPDATE jobs SET status='failed',
-       error=COALESCE(q.last_error, 'Processing exceeded three attempts'),
-       claim_token=NULL, lease_until=NULL, updated_at=$1
-     FROM q WHERE jobs.id=q.request_id AND jobs.status NOT IN ('completed','failed') RETURNING jobs.id`,
-    [nowIso()],
-  );
-  return rows.length;
-}
-
-export async function hasDueWork(db: Db, stages: Stage[]): Promise<boolean> {
-  const rows = await db.query(
-    `SELECT 1 FROM ingest_queue WHERE run_after <= now() AND (locked_until IS NULL OR locked_until < now())
-     AND attempts < max_attempts AND stage IN (SELECT jsonb_array_elements_text($1::text::jsonb)) LIMIT 1`,
-    [JSON.stringify(stages)],
-  );
-  return rows.length > 0;
+/** Housekeeping: finished queue rows are kept a week for debugging, then deleted. */
+export async function purgeFinished(db: D1Database, now = nowSeconds()) {
+  await db.prepare(`DELETE FROM jobs WHERE status IN ('done','dead') AND updated_at < ?1`).bind(now - 7 * 86400).run();
 }

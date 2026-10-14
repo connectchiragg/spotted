@@ -1,46 +1,22 @@
-import { readFileSync } from 'node:fs';
-import postgres from 'postgres';
+/** Fakes shared by the Node unit tests and the workerd (Miniflare D1) tests. */
 import { AppDeps } from '../src/api';
-import { ClosableDb, connect } from '../src/db';
-import { Embedder } from '../src/embeddings';
 import { Settings } from '../src/env';
 import { Gemini } from '../src/gemini';
 import { Presigner } from '../src/storage';
-
-export const DSN = process.env.TEST_POSTGRES_DSN;
+import { Embedder } from '../src/vectors';
 
 export const settings: Settings = {
   geminiModel: 'gemini-test', embeddingModel: '@cf/test-embed', maxUploadBytes: 400 * 1024 * 1024, maxVideoSeconds: 600,
   maxFrames: 16, searchMinSimilarity: 0.6, duplicateThreshold: 0.95, publicLimits: false, dailyUploadLimit: 10,
-  dailyQueryLimit: 100, stepsPerTick: 2,
+  dailyQueryLimit: 100, stepsPerTick: 6,
 };
 
-/** Fresh schema per test file, migrated with migrations/0001_init.sql. */
-export async function isolatedDb(): Promise<{ db: ClosableDb; drop: () => Promise<void> }> {
-  const schema = 'cf_test_' + crypto.randomUUID().replace(/-/g, '');
-  const admin = postgres(DSN!, { max: 1, onnotice: () => {} });
-  await admin.unsafe('CREATE EXTENSION IF NOT EXISTS vector');
-  await admin.unsafe(`CREATE SCHEMA ${schema}`);
-  const db = connect(DSN!, { max: 4, connection: { search_path: `${schema},public` } });
-  await db.query(readFileSync(new URL('../migrations/0001_init.sql', import.meta.url), 'utf8').replace(/^CREATE EXTENSION.*$/m, ''));
-  return {
-    db,
-    drop: async () => {
-      await db.close();
-      await admin.unsafe(`DROP SCHEMA ${schema} CASCADE`);
-      await admin.end();
-    },
-  };
-}
-
 /** Deterministic bag-of-words embedder: shared words -> high cosine. */
-export function fakeEmbedder(): Embedder & { calls: number } {
+export function fakeEmbedder(): Embedder {
   const dims = 64;
-  const e = {
+  return {
     model: '@cf/test-embed',
-    calls: 0,
     async embed(texts: string[]) {
-      e.calls++;
       return texts.map((t) => {
         const v = new Array(dims).fill(0);
         for (const w of t.toLowerCase().match(/[a-z]+/g) ?? []) {
@@ -53,7 +29,36 @@ export function fakeEmbedder(): Embedder & { calls: number } {
       });
     },
   };
-  return e;
+}
+
+const cosine = (a: number[], b: number[]) => {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return na && nb ? dot / Math.sqrt(na * nb) : 0;
+};
+
+/** In-memory Vectorize with the subset of filtering Framer uses ($eq on strings, $in). */
+export function fakeVectorize() {
+  const store = new Map<string, { values: number[]; metadata: Record<string, any> }>();
+  const matches = (metadata: Record<string, any>, filter: Record<string, any> = {}) =>
+    Object.entries(filter).every(([k, cond]) => (cond && typeof cond === 'object' && '$in' in cond ? cond.$in.includes(metadata[k]) : metadata[k] === cond));
+  const index = {
+    async upsert(vectors: { id: string; values: number[]; metadata: Record<string, any> }[]) {
+      for (const v of vectors) store.set(v.id, { values: v.values, metadata: v.metadata });
+      return { mutationId: 'm' };
+    },
+    async query(vector: number[], opts: { topK: number; filter?: Record<string, any> }) {
+      const found = [...store.entries()].filter(([, v]) => matches(v.metadata, opts.filter))
+        .map(([id, v]) => ({ id, score: cosine(vector, v.values) }))
+        .sort((a, b) => b.score - a.score).slice(0, opts.topK);
+      return { matches: found, count: found.length };
+    },
+    async deleteByIds(ids: string[]) {
+      ids.forEach((id) => store.delete(id));
+      return { mutationId: 'm' };
+    },
+  };
+  return { index: index as unknown as VectorizeIndex, store };
 }
 
 export const fakePresigner: Presigner = {
@@ -129,10 +134,9 @@ export const defaultTagging = {
   ],
 };
 
-export function appDeps(db: ClosableDb | null, overrides: Partial<AppDeps> = {}): AppDeps & { background: Promise<unknown>[] } {
-  const background: Promise<unknown>[] = [];
+export function appDeps(db: D1Database | null, overrides: Partial<AppDeps> = {}): AppDeps {
   return {
-    db, bucket: null, presigner: fakePresigner, gemini: null, embedder: fakeEmbedder(), settings, geminiConfigured: true,
-    waitUntil: (p) => background.push(p), background, ...overrides,
+    db, bucket: null, index: null, presigner: fakePresigner, gemini: null, embedder: fakeEmbedder(), settings,
+    geminiConfigured: true, waitUntil: () => {}, ...overrides,
   };
 }

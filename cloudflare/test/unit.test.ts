@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { handle, HttpError, validateUploadIntent } from '../src/api';
 import { settings as readSettings } from '../src/env';
 import { geminiMimeType, parseDuration, TaggerError, validateAnswer, validateTagging } from '../src/gemini';
-import { backoffSeconds } from '../src/queue';
 import { normalizeQuery, rank, tokens } from '../src/retrieval';
 import { appDeps, defaultTagging, fakeGemini } from './helpers';
 
@@ -115,10 +114,7 @@ describe('retrieval ranking (port of hybrid_search)', () => {
   });
 });
 
-describe('queue backoff and settings', () => {
-  it('backs off exponentially with a cap', () => {
-    expect([1, 2, 3, 10].map(backoffSeconds)).toEqual([30, 60, 120, 600]);
-  });
+describe('settings', () => {
   it('reads defaults and rejects invalid settings', () => {
     expect(readSettings({}).embeddingModel).toBe('@cf/baai/bge-small-en-v1.5');
     expect(() => readSettings({ MAX_FRAMES: '0' })).toThrow();

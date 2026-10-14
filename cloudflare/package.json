@@ -4,14 +4,15 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run && vitest run --config vitest.workers.config.ts",
+    "test:unit": "vitest run",
     "test:workers": "vitest run --config vitest.workers.config.ts",
-    "migrate": "node scripts/migrate.mjs",
-    "deploy": "wrangler deploy"
+    "db:migrate": "wrangler d1 migrations apply framer-cf-db --remote",
+    "deploy": "wrangler deploy --env=\"\"",
+    "deploy:smoke": "wrangler deploy --env smoke"
   },
   "dependencies": {
-    "aws4fetch": "1.0.20",
-    "postgres": "3.4.9"
+    "aws4fetch": "1.0.20"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.23.0",

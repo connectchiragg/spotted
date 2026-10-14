@@ -17,18 +17,25 @@
     "run_worker_first": true
   },
 
-  // Cron consumer for the Postgres ingestion queue (Workers Free: 5 crons/account).
+  // Cron consumer for the D1 work queue (Workers Free: 5 cron triggers per account).
   "triggers": { "crons": ["* * * * *"] },
 
   "ai": { "binding": "AI" },
 
-  // OWNER: create with `wrangler hyperdrive create framer-cf-db --connection-string=...`
-  // and paste the returned id. Until then `wrangler deploy` fails on purpose.
-  "hyperdrive": [
-    { "binding": "HYPERDRIVE", "id": "REPLACE_WITH_HYPERDRIVE_ID" }
+  // Created (free tier): `wrangler d1 create framer-cf-db`.
+  // Schema: `wrangler d1 migrations apply framer-cf-db --remote`.
+  "d1_databases": [
+    { "binding": "DB", "database_name": "framer-cf-db", "database_id": "88d79c4f-1ca9-42d7-9d26-9e7bea9ba2b7", "migrations_dir": "migrations" }
   ],
 
-  // OWNER: R2 must be enabled in the dashboard first; then `wrangler r2 bucket create framer-cf-videos`.
+  // Created (free tier): 384 dims, cosine, metadata indexes on "kind" and "video_id".
+  "vectorize": [
+    { "binding": "VECTORIZE", "index_name": "framer-cf-vectors" }
+  ],
+
+  // OWNER: R2 must be enabled in the dashboard first, then
+  // `wrangler r2 bucket create framer-cf-videos`. Until then a deploy of this
+  // top-level environment fails; the "smoke" environment below has no R2.
   "r2_buckets": [
     { "binding": "VIDEOS", "bucket_name": "framer-cf-videos" }
   ],
@@ -46,7 +53,7 @@
     "PUBLIC_DEMO_LIMITS": "true",
     "DAILY_UPLOAD_LIMIT": "10",
     "DAILY_QUERY_LIMIT": "100",
-    "QUEUE_STEPS_PER_TICK": "2"
+    "QUEUE_STEPS_PER_TICK": "6"
   },
   // Secrets (set with `wrangler secret put`, never committed):
   //   GEMINI_API_KEY, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
@@ -54,12 +61,19 @@
   "observability": { "enabled": true },
 
   "env": {
-    // Bindings-free smoke deployment (framer-cf-smoke.<subdomain>.workers.dev):
-    // serves the UI and /health; data routes answer 503 until the real bindings exist.
+    // Pre-cutover deployment without R2 or a cron (framer-cf-smoke.<subdomain>.workers.dev):
+    // UI, history, search and query run against the real D1, Vectorize and Workers AI;
+    // uploads answer 503 until R2 exists. Shares the D1 database and Vectorize index.
     "smoke": {
       "name": "framer-cf-smoke",
       "triggers": { "crons": [] },
-      // Data bindings (hyperdrive, r2_buckets, ai) are intentionally not declared here.
+      "ai": { "binding": "AI" },
+      "d1_databases": [
+        { "binding": "DB", "database_name": "framer-cf-db", "database_id": "88d79c4f-1ca9-42d7-9d26-9e7bea9ba2b7", "migrations_dir": "migrations" }
+      ],
+      "vectorize": [
+        { "binding": "VECTORIZE", "index_name": "framer-cf-vectors" }
+      ],
       "vars": {
         "R2_ACCOUNT_ID": "0187f7c38bf35a8abcc4e9f9abfa213e",
         "R2_BUCKET_NAME": "framer-cf-videos",
@@ -73,8 +87,17 @@
         "PUBLIC_DEMO_LIMITS": "true",
         "DAILY_UPLOAD_LIMIT": "10",
         "DAILY_QUERY_LIMIT": "100",
-        "QUEUE_STEPS_PER_TICK": "2"
+        "QUEUE_STEPS_PER_TICK": "6"
       }
+    },
+    // Test-only (vitest.workers.config.ts): local Miniflare D1, never deployed.
+    "test": {
+      "name": "framer-cf-test",
+      "triggers": { "crons": [] },
+      "d1_databases": [
+        { "binding": "DB", "database_name": "framer-cf-test", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+      ],
+      "vars": { "PUBLIC_DEMO_LIMITS": "false" }
     }
   }
 }

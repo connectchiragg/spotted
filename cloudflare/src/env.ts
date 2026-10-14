@@ -1,6 +1,7 @@
 export interface Env {
   ASSETS?: Fetcher;
-  HYPERDRIVE?: Hyperdrive;
+  DB?: D1Database;
+  VECTORIZE?: VectorizeIndex;
   VIDEOS?: R2Bucket;
   AI?: Ai;
 
@@ -58,7 +59,7 @@ export function settings(env: Env): Settings {
     publicLimits: (env.PUBLIC_DEMO_LIMITS || 'false').toLowerCase() === 'true',
     dailyUploadLimit: num(env.DAILY_UPLOAD_LIMIT, 10),
     dailyQueryLimit: num(env.DAILY_QUERY_LIMIT, 100),
-    stepsPerTick: num(env.QUEUE_STEPS_PER_TICK, 2),
+    stepsPerTick: num(env.QUEUE_STEPS_PER_TICK, 6),
   };
   if (!(result.maxFrames >= 1 && result.maxFrames <= 32)) throw new Error('MAX_FRAMES must be between 1 and 32');
   for (const value of [result.searchMinSimilarity, result.duplicateThreshold]) {
