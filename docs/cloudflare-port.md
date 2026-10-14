@@ -7,7 +7,7 @@ in `app/` is unchanged and its tests still pass.
 Status on 2026-10-15:
 - **Created (free):** the D1 database `framer-cf-db` (migrations 0001–0002 applied), the Vectorize index `framer-cf-vectors`, and the R2 bucket `framer-cf-videos` (by the owner).
 - **Deployed:** the API Worker `framer-cf-api` at https://framer-cf-api.connect-chirag-g.workers.dev, with the secrets `GEMINI_API_KEY`, `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`. The `framer-cf-smoke` Worker still exists (optional cleanup in §5). End-to-end results are in §7.
-- **No cron.** A Durable Object alarm drives the queue (§2.2). Progress reaches the browser over Server-Sent Events (§2.3).
+- **Actor per video.** Each video's ingestion runs in its own Durable Object (`VideoDO`), which also streams its progress over Server-Sent Events (§2.1). There is no cron, queue or scheduler. The earlier D1 lease queue and scheduler designs are in git history (commits up to `74eae37`).
 - **Unchanged:** nothing that points at `framer.haciensus.com`. That domain still belongs to the old `framer` proxy Worker. The EC2 instance is stopped, so the site is currently offline.
 
 ## 1. What Framer does today
@@ -48,10 +48,9 @@ A shared video library you can search in plain language:
 | Today (EC2) | Cloudflare | Free-tier limits that matter | Source |
 |---|---|---|---|
 | FastAPI + Uvicorn | **Worker** `framer-cf-api` (TypeScript), UI served as static assets | 100k requests/day; **10 ms CPU** per request or cron run; 128 MB memory; 50 subrequests (1,000 to Cloudflare services); 100 MB request body | [Workers limits](https://developers.cloudflare.com/workers/platform/limits/), [pricing](https://developers.cloudflare.com/workers/platform/pricing/) |
-| Background worker (systemd) | **Durable Object `FramerScheduler`** (one, SQLite-backed): an alarm drains the D1 queue when work is due; no cron | DOs on Free: SQLite backend only; 100k requests/day (alarms count); 13,000 GB-s/day duration; 30 s CPU per invocation; alarm handler 15 min wall time | [DO pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/), [DO limits](https://developers.cloudflare.com/durable-objects/platform/limits/), [alarms](https://developers.cloudflare.com/durable-objects/api/alarms/) |
-| 3 s status polling | **SSE** `GET /videos/:id/events`, held by a per-video Durable Object `VideoEvents` | an open stream keeps its DO awake: 13,000 GB-s/day ÷ 128 MB ≈ 28.9 stream-hours/day across all videos | same as above |
-| Postgres metadata | **D1** `framer-cf-db` (tables `videos`, `usage_counters`, `step_results`, `usage_events`) | 10 DBs; 500 MB per DB; 5M rows read and 100k rows written per day; 50 queries per invocation | [D1 limits](https://developers.cloudflare.com/d1/platform/limits/), [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/) |
-| Postgres `work_queue` + SKIP LOCKED | **D1 `jobs` table with leases** (owner's design, §2.1) | same as D1 | — |
+| Background worker (systemd) + `work_queue` | **Durable Object `VideoDO`**, one per video (SQLite-backed): runs that video's steps from its own alarm | DOs on Free: SQLite backend only; 100k requests/day (alarms count); 13,000 GB-s/day duration; 30 s CPU per invocation; alarm handler 15 min wall time; 100k rows written/day (each storage write and `setAlarm` is one) | [DO pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/), [DO limits](https://developers.cloudflare.com/durable-objects/platform/limits/), [alarms](https://developers.cloudflare.com/durable-objects/api/alarms/) |
+| 3 s status polling | **SSE** `GET /videos/:id/events`, served by the same `VideoDO` | an open stream keeps its DO awake: 13,000 GB-s/day ÷ 128 MB ≈ 28.9 stream-hours/day across all videos | same as above |
+| Postgres metadata | **D1** `framer-cf-db` (tables `videos`, `usage_counters`, `usage_events`): the record other code reads | 10 DBs; 500 MB per DB; 5M rows read and 100k rows written per day; 50 queries per invocation | [D1 limits](https://developers.cloudflare.com/d1/platform/limits/), [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/) |
 | pgvector | **Vectorize** `framer-cf-vectors` (384 dims, cosine; metadata indexes `kind` and `video_id`) | 5M stored dimensions (≈13k vectors, ≈700 videos at 18 vectors each); 30M queried dimensions/month; topK ≤ 100 | [Vectorize pricing](https://developers.cloudflare.com/vectorize/platform/pricing/), [limits](https://developers.cloudflare.com/vectorize/platform/limits/) |
 | FastEmbed in-process | **Workers AI** `@cf/baai/bge-small-en-v1.5` (384 dims; others: bge-base 768, bge-large 1024, bge-m3, embeddinggemma-300m, qwen3-embedding-0.6b, plamo-embedding-1b) | 10,000 neurons/day; bge-small costs 1,841 neurons per M tokens, so about 5 neurons per video | [Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/), [models](https://developers.cloudflare.com/workers-ai/models/) |
 | S3 (videos, frames) | **R2** `framer-cf-videos`: presigned PUT/GET over the S3 API; lifecycle 7 days | 10 GB-month; 1M Class A and 10M Class B ops per month; free egress; single PUT up to 5 GiB | [R2 pricing](https://developers.cloudflare.com/r2/pricing/), [presigned URLs](https://developers.cloudflare.com/r2/api/s3/presigned-urls/) |
@@ -60,107 +59,102 @@ A shared video library you can search in plain language:
 
 **Why D1 + Vectorize.** The owner first asked me to evaluate Postgres via Hyperdrive. Neon Free scales to zero after 5 idle minutes and gives 100 CU-hours per month, so a per-minute cron that touched Postgres would keep it awake past that budget. It also needed an external account. The owner then chose D1 + Vectorize; everything stays inside the Cloudflare account. The Postgres variant is in this branch's history (commits `f695474` and `3d98de4`) for reference.
 
-**Note for the owner: Cloudflare Queues are now on the Free plan** (10,000 operations/day, 24 h retention, [Queues pricing](https://developers.cloudflare.com/queues/platform/pricing/)), so "Queues are paid" is out of date. The D1 lease queue below was kept, as decided.
+**Note for the owner: Cloudflare Queues are now on the Free plan** (10,000 operations/day, 24 h retention, [Queues pricing](https://developers.cloudflare.com/queues/platform/pricing/)), so "Queues are paid" is out of date. The owner chose the actor-per-video design below instead.
 
-### 2.1 Queue design (D1, lease-based)
+### 2.1 Actor per video (owner decision)
 
-Schema (`cloudflare/migrations/0001_init.sql`):
+**`VideoDO`** (`cloudflare/src/video.ts`) is one SQLite-backed Durable Object per video (`VIDEO.idFromName(video_id)`). Durable Objects are on Workers Free with the SQLite backend ([DO pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/)). The object:
+- **owns** the video's ingestion state machine in its own storage:
+  - the current step (`upload → await_file → tag → index → done | failed`);
+  - attempts and `next_retry_at`;
+  - the last error;
+  - the per-step idempotency keys (`<video_id>:<step>`);
+  - the recorded external results: the Gemini file name and URI, the parsed tagging result with token usage, and the index result (duplicate check).
+- **runs** the steps itself from its own alarm: upload to Gemini → poll until `ACTIVE` (every 5 s) → `generateContent` with fps-capped sampling (§3.1) → Workers AI embeddings → Vectorize upsert → delete the Gemini file.
+- **streams** the video's status to viewers over SSE (§2.2).
 
-```sql
-CREATE TABLE jobs (
-  id INTEGER PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL,     -- JSON
-  status TEXT NOT NULL DEFAULT 'queued',                                 -- queued | running | done | dead
-  run_after INTEGER NOT NULL, locked_until INTEGER, lease_token TEXT,    -- epoch seconds
-  attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-CREATE INDEX jobs_status_run_after ON jobs (status, run_after);
-```
+**Single executor.** A Durable Object is a single-threaded actor, and its alarms never overlap, so the object is the lock. No lease queue, fencing token, scheduler or cron is needed. Those were removed:
+- D1 migration `0003` drops `jobs` and `step_results`;
+- DO migration `v3` deletes the earlier `FramerScheduler` and `VideoEvents` classes.
 
-The statements below are in `cloudflare/src/queue.ts`. Correctness relies on D1 serialising writes.
+**Rule: write durably before every side effect, and record each external result before moving on.**
+- Each try persists `attempts + 1` before running, so a crash loop still stops at 5 attempts.
+- Each side effect persists its idempotency key first.
+- Each external result is persisted the moment it returns.
+- After an eviction or crash, the alarm (at-least-once, retried by the runtime) or the next `start()` resumes from the recorded step and skips recorded side effects.
+- **The remaining window** is a crash between an HTTP response arriving and the storage write that follows it.
+  - For the Gemini upload, the deterministic file name closes it: a GET by name, or a 409 on re-upload, returns the existing file (§3.3).
+  - For `generateContent`, one repeated call is possible in that instant.
 
-```sql
--- 1. claim (one atomic statement)
-UPDATE jobs SET status='running', lease_token=:token, locked_until=:now+300,
-       attempts=attempts+1, updated_at=:now
-WHERE id=(SELECT id FROM jobs
-          WHERE (status='queued' AND run_after<=:now) OR (status='running' AND locked_until<:now)
-          ORDER BY run_after, id LIMIT 1)
-RETURNING *;
--- 2. the work happens outside any lock
--- 3. complete: 0 rows changed means the lease was lost; nothing is overwritten
-UPDATE jobs SET status='done', lease_token=NULL, updated_at=:now WHERE id=:id AND lease_token=:token;
--- 4. fail: quadratic backoff (30, 120, 270, 480 s), dead after 5 attempts
-UPDATE jobs SET status=CASE WHEN attempts>=5 THEN 'dead' ELSE 'queued' END,
-       run_after=:now+30*attempts*attempts, lease_token=NULL, last_error=:err, updated_at=:now
-WHERE id=:id AND lease_token=:token;
-```
+**Retries.**
+- Transient errors back off by `30 s × attempts²` through the alarm. After 5 attempts the video fails, and its Gemini file is deleted.
+- Gemini `429` waits for its `RetryInfo` delay, re-checking at least every 2 h.
+- Waiting for Gemini to process a file is not a failed attempt; it polls at most 120 times.
 
-**Behaviour:**
-- **Visibility timeout.** A consumer that crashes or hits a CPU-limit kill leaves the job `running`. Once `locked_until` passes, the claim picks it up again.
-- **Retry bound.** That reclaim path never checks `attempts`, so a job that keeps crashing would be retried forever. To stop this, a reclaimed job with `attempts > 5` is dead-lettered as soon as it is claimed.
-- **Permanent errors** go straight to `dead` with the same fencing. Examples: an unsupported format, a duration over 10 minutes, a Gemini quota or credential error.
+**Order of every visible transition.**
+1. The DO storage (the record).
+2. The D1 `videos` row: status, progress, error, attempts, and the result when done. API, search, history and duplicate readers use it. It is written with `state_version`, so a late write never overwrites a newer one.
+3. The SSE broadcast, which lives only in memory as a relay.
 
-**Ingestion as a job chain.** The kinds are `ingest.upload`, `ingest.await_file`, `ingest.tag`, `ingest.index` and `reindex`.
-- **Steps commit atomically.** A step ends with one `db.batch()` (a D1 transaction) that holds three statements. The first enqueues the next job and the second updates the `videos` row; both carry `AND EXISTS (SELECT 1 FROM jobs WHERE id=? AND lease_token=?)`. The third is the fenced complete. A consumer that lost its lease therefore changes nothing.
-- **Waits don't consume retries.** While Gemini is still processing a file, the step enqueues a fresh `ingest.await_file` job 5 s later, so waiting uses no retry attempts.
+**Starting.**
+- The browser PUTs to R2, then calls `POST /videos/:id/complete`. The API verifies the object, marks the row `pending`, and calls `VideoDO.start(id)`, which is idempotent: it returns the existing state, and re-arms the alarm if work is pending and none is set.
+- **Safety net.** `GET /videos/:id` and SSE (re)connects nudge the video, at most once per 10 s per video per isolate:
+  - `uploading` with the object already in R2 (the browser never confirmed): confirm it now;
+  - `pending` or `processing`: `start()`, which restores a lost alarm (alarm retries give up after 6 failures);
+  - `completed` with `needs_index` (an EC2 import): re-embed it.
+- Unconfirmed uploads expire lazily, when the history is listed, after 15 minutes. There is no background sweeper.
 
-**Consumer.** `runDueJobs(env, ctx)` in `cloudflare/src/consumer.ts` is trigger-agnostic. Each call:
-- expires unconfirmed uploads after 15 minutes;
-- purges `done`/`dead` rows and step records older than 7 days;
-- claims and processes jobs until none are due, `QUEUE_STEPS_PER_TICK` (6) steps have run, or 10 minutes have passed.
+**Global Gemini concurrency.** No cross-video limiter was added.
+- The public budgets cap ingestion at 10 uploads/day, so at most a handful of actors call Gemini at once.
+- Rate and quota errors (`429`) are waited out per actor using Gemini's own `RetryInfo`.
+- A limiter (a D1 permit counter or a tiny limiter DO) would add a coordination point to every step, for a load the budgets already bound.
+- Revisit if `DAILY_UPLOAD_LIMIT` is raised.
 
-Workers expose no CPU clock, so the CPU budget is enforced as a step count.
+**Free-plan usage per video:**
+- about 15 DO storage writes, 1–3 alarms, ~8 D1 writes and ~15 D1 reads;
+- one `generateContent`;
+- three Gemini file calls plus 1–20 polls;
+- one Workers AI call.
 
-### 2.2 Scheduler: a Durable Object alarm instead of cron (owner decision)
+### 2.2 Live progress: Server-Sent Events from the same actor (owner decision)
 
-`FramerScheduler` (`cloudflare/src/scheduler.ts`) is one global, SQLite-backed Durable Object (`idFromName("scheduler")`). It is **only an alarm clock**: D1 remains the queue and the source of truth, and the leases, fencing, idempotency and resumable steps are unchanged. Cloudflare Queues are not used.
+`GET /videos/:id/events` returns `text/event-stream`. The API Worker reads the D1 row, runs the safety-net nudge, and forwards the request to `VideoDO.fetch`, with the D1 row as the snapshot for videos the actor has not started (uploading or imported).
 
-- **Free plan.** Durable Objects are on Workers Free with the SQLite storage backend only ([DO pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/)). Alarms count as requests (100,000/day) and each `setAlarm()` is one row written (100,000/day).
-- **`wake(atMs)`** sets the alarm to the earlier of the current alarm and `atMs`. It is called when:
-  - the API confirms an upload (`now`), and when it creates an upload request (its 15-minute expiry);
-  - a step enqueues its next step (`run_after`) or schedules a retry (`now + 30·attempts²`).
-- **`alarm()`** runs `runDueJobs`, then queries D1 for the next due time: the earliest queued `run_after`, running `locked_until + 1` (lease reclaim), or unconfirmed-upload expiry. It sets that alarm; **if nothing is pending it sets none**, so an idle site does no work. If more work is due than one invocation may do, the next alarm is "now", and each invocation gets a fresh budget.
-- **Failure handling.** The handler never throws: if rescheduling fails it retries in 30 s. Alarms are at-least-once and retried on throw ([alarms](https://developers.cloudflare.com/durable-objects/api/alarms/)). Without the ingestion bindings or `GEMINI_API_KEY` it sets no alarm rather than spinning.
-- **Duplicate or early wakes are harmless.** The alarm claims nothing that is not due.
-- **Upload completion.** The browser `PUT`s to R2, then calls `POST /videos/:id/complete`. That handler verifies the object, creates the job and wakes the scheduler. The status endpoints never polled R2 before. Now, if a client reads `GET /videos/:id` or opens its SSE stream while the video is still `uploading` and the object is already in R2, the server runs the same verified completion. This covers a browser that died between the PUT and the confirmation.
-- **Safety net for a lost wake-up.** `GET /videos/:id` and SSE (re)connects check whether the video has due or expired-lease jobs, and if so call `wake(now)`. Each request makes at most one D1 check and one wake, and each video is nudged at most once per 10 s per isolate, so reconnects cannot loop.
-- **Cron removed.** `triggers.crons` is `[]` in `wrangler.jsonc`; an empty list is needed because omitting the key leaves an existing trigger in place. There is no `scheduled()` handler. Verified after deploy: the Worker has no schedules.
-- **CPU.** The Workers limits page gives 10 ms CPU per invocation on Free. The DO limits page gives 30 s per invocation, including alarms ([DO limits](https://developers.cloudflare.com/durable-objects/platform/limits/)), and does not single out the Free plan. Each step is mostly network wait either way.
+**On connect.**
+- The stream starts with `retry: 3000`.
+- If `Last-Event-ID` is sent, every stored transition after it is replayed.
+- Then comes the snapshot, as event `status`, taken from durable state and the D1 row.
+- A finished video also gets `done`/`failed`, and its stream closes at once.
 
-### 2.3 Live progress: Server-Sent Events (owner decision)
+**Broadcast.**
+- After each committed transition, the actor pushes the event to every open stream. The event `id` is the state version.
+- The events are:
+  - `step`: a step finished;
+  - `progress`: still waiting on Gemini;
+  - `status`: started, or a retry scheduled (with `retry_at`);
+  - `done` and `failed`.
+- The last 200 events are kept in the actor's SQLite storage for resume.
 
-`GET /videos/:id/events` returns `text/event-stream`.
+**Hygiene.**
+- `: ping` every 15 s.
+- All streams close on `done`/`failed`.
+- Each stream is capped at **5 minutes**, after which `EventSource` reconnects with `Last-Event-ID`.
+- Client disconnects are detected through `request.signal` (compat flag `enable_request_signal`).
+- Writes are never awaited, so a slow reader cannot block a step, and a reader 32 chunks behind is dropped.
+- The writer `Set` is memory only; DO storage and D1 are the record.
 
-**Topology.** The stream is held by one **`VideoEvents` Durable Object per video** (`idFromName(video_id)`, SQLite-backed; `cloudflare/src/events.ts`). It does not live on the scheduler. An open SSE stream keeps its object awake, because hibernation applies only to WebSockets. Streams on the global scheduler would keep the scheduler awake for every viewer of every video. Per-video objects isolate traffic, need no routing table, and stop once their video's streams close.
-
-**Flow.**
-1. The API reads the video from D1, runs the safety-net nudge (§2.2), and forwards the snapshot to the video's object.
-2. The object answers with the stream:
-   - `retry: 3000`;
-   - then, if `Last-Event-ID` is sent, every stored event after it (replay);
-   - then the snapshot as event `status`.
-   - A finished video also gets `done` or `failed`, and its stream closes immediately.
-3. After every **committed** fenced change, the writer calls `publish()`, which stores the event (its sequence number is the event `id`) and pushes it to every open stream. A write whose fence failed never publishes, because callers check `commit()`'s result first. The events are:
-   - `step`: a step finished;
-   - `progress`: still waiting on Gemini;
-   - `status`: upload confirmed, or a retry scheduled (with `retry_at`);
-   - `failed` and `done`.
-4. **Hygiene.**
-   - `: ping` every 20 s.
-   - All streams close on `done`/`failed`.
-   - Each stream is capped at **5 minutes**, after which `EventSource` reconnects with `Last-Event-ID`.
-   - Client disconnects are detected through `request.signal` (compat flag `enable_request_signal`). Writes are never awaited, so a slow reader cannot block an ingestion step, and a reader 32 chunks behind is dropped.
-   - The event log keeps 200 events and is deleted a day after the last event.
-5. **UI** (`cloudflare/public/index.html`).
-   - One `EventSource` per active video (at most 5 per tab). Events update the history in place, and `done`/`failed` close the stream and refresh once.
-   - The history list refreshes every 60 s (it was every 3 s), so other visitors' uploads still appear.
-   - If `EventSource` is missing or errors 5 times in a row, the UI falls back to 3 s polling.
+**UI** (`cloudflare/public/index.html`).
+- One `EventSource` per active video (at most 5 per tab). Events update the history in place, and `done`/`failed` close the stream and refresh once.
+- The history list refreshes every 60 s (it was every 3 s).
+- If `EventSource` is missing or errors 5 times in a row, the UI falls back to 3 s polling.
 
 **Free-plan sizing** ([DO pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/)).
-- **Duration.** DO duration is wall-clock time while the object is active, charged at 128 MB. That is 13,000 GB-s/day ÷ 0.125 GB = **104,000 object-seconds ≈ 28.9 hours/day**. Streams on the same video share one object's duration.
-- **Typical use.** With 10 uploads/day, ingestion of 1–3 minutes, and up to ~15 minutes of retry backoff in the worst case, this is minutes per day. A viewer of a stuck video costs at most 12 reconnects/hour.
-- **Requests.** Each connection costs one Worker request plus one DO request (100,000/day each), and each publish is one DO request.
-- **Worker side.** Workers Free charges CPU, not wall time ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/)). The Worker only forwards the DO's stream.
+- **Duration.** DO duration is wall-clock time while the object is active, charged at 128 MB. That is 13,000 GB-s/day ÷ 0.125 GB = **104,000 object-seconds ≈ 28.9 hours/day**. An open stream keeps the object active, because hibernation applies only to WebSockets. Streams on one video share its object's duration, and ingestion itself (mostly waiting on Gemini) also counts.
+- **Typical use.** With 10 uploads/day, a few minutes each, this is well under 1 hour/day. A viewer of a stuck video costs 12 reconnects/hour.
+- **Requests.** Each connection is one Worker request plus one DO request (100,000/day each).
+- **Worker side.** Workers Free charges CPU, not wall time ([Workers limits](https://developers.cloudflare.com/workers/platform/limits/)). The Worker only forwards the stream.
+
+**CPU.** The Workers limits page gives 10 ms CPU per invocation on Free, while the DO limits page gives 30 s per invocation, including alarms ([DO limits](https://developers.cloudflare.com/durable-objects/platform/limits/)). Measured on the earlier scheduler build, a step that included a Gemini call used 7–10 ms of CPU.
 
 ## 3. Feasibility and risks
 
@@ -171,7 +165,7 @@ Workers expose no CPU clock, so the CPU budget is enforced as a step count.
   - **Formats:** MKV is not accepted by Gemini and fails with a clear error. MP4, MOV, WebM, AVI, MPEG, WMV, FLV and 3GP work.
   - **Unverified:**
     - **CPU time** of streaming 400 MB through a Worker. Body pass-through should be native and not count as JS CPU.
-    - **Gemini timing.** Whether a `gemini-3.5-flash` call on a 10-minute video finishes within the 300 s lease.
+    - **Gemini timing.** Whether a `gemini-3.5-flash` call on a 10-minute video finishes within the alarm's 15-minute wall-time limit (very likely, but unmeasured).
     - **Fallback** if either fails: limit the upload size, or run ingestion off-Worker (e.g. a GitHub Actions job) against the same D1 queue through D1's HTTP API.
 ### 3.1 Frame sampling and token cost
 
@@ -214,56 +208,40 @@ EC2 picked frames by pixel change. Uniform sampling (§3.1) can miss short event
 
 ### 3.3 Idempotency and resume
 
-**Owner requirement.** Never repeat an external side effect for the same request. A reclaimed job resumes from the last durable state.
+**Owner requirement.** Never repeat an external side effect for the same request. A reclaimed or resumed job continues from the last durable state.
 
-**Step records.** `step_results(video_id, step, idempotency_key = '<video_id>:<step>', result)` (migration `0002`) holds:
-- **`upload`**: the Gemini file name and URI.
-- **`tag`**: the validated `generateContent` result and its `usageMetadata`. The `index` step reads it from here, not from the job payload.
+**Records in the `VideoDO` (§2.1).** Each step's idempotency key is persisted before the call, and each result is persisted right after it.
 
-**When records are written.**
-- A record is written as soon as the call returns, before the fenced commit.
-- It is **not fenced**. It records an external fact (this file exists; this analysis was paid for), which stays true whoever holds the lease.
-- The first writer wins (`ON CONFLICT DO NOTHING`).
-- State transitions (next job, video row, completion) stay fenced. A crash between the call and the commit therefore loses nothing: the reclaimed job finds the record and moves straight on.
-
-**Uploads are never repeated.**
-- They use a deterministic Gemini file id, `files/framer-<uuid hex>` (≤ 40 chars of `[a-z0-9-]`, [File.name](https://ai.google.dev/api/files)), and display name `framer-<video_id>`.
-- On retry the step reuses, in order:
+**Gemini upload.**
+- It uses a deterministic file id, `files/framer-<uuid hex>` (≤ 40 chars of `[a-z0-9-]`, [File.name](https://ai.google.dev/api/files)), and display name `framer-<video_id>`.
+- Before uploading, the step reuses, in order:
   1. the recorded file;
   2. the deterministic name (GET);
   3. the display name (list).
-  It reuses any of these if the file is `ACTIVE` or `PROCESSING`, and uploads only if none exists.
-- A second upload under the same name gets 409 `ALREADY_EXISTS`, verified live. The client then returns the existing file.
-- An expired or deleted file (Gemini keeps files 48 h) is uploaded again under the same name.
+  It reuses any of these if the file is `ACTIVE` or `PROCESSING`.
+- A second upload under the same name gets 409 `ALREADY_EXISTS`, verified live, and the client returns the existing file.
+- An expired or deleted file (Gemini keeps files 48 h) sends the actor back to `upload`, under the same name.
 
-**`generateContent`.** If a `tag` record exists, the call is skipped.
+**`generateContent`.** If a tagging result is recorded, the call is skipped.
 
-**`index`.** It is idempotent by construction: Vectorize upserts deterministic ids, and the Gemini delete tolerates 404.
-
-**Lease heartbeat** (`queue.withHeartbeat`).
-- While an upload or `generateContent` runs, `locked_until` is extended every 60 s, which is a fifth of the 300 s lease. The update is fenced by `lease_token` and never shortens the lease.
-- If a heartbeat finds the lease lost, the call is aborted through its `AbortSignal`, nothing is written, and the outcome is `lease-lost`.
-- Each beat is one D1 query, so a 5-minute call costs 5 of the 50 queries per invocation.
-- A killed Worker stops beating, and its lease lapses within 300 s.
+**Index.** It is idempotent by construction: Vectorize upserts deterministic ids, and the Gemini delete tolerates 404.
 
 **Budgets.**
 - `usage_events` counts each `Idempotency-Key` once, in one D1 transaction with the counter.
 - `POST /videos/uploads` with a key already used returns the same upload request; the UI sends a fresh key per upload.
 
-**Tests.** Miniflare tests in `test/workers/resume.test.ts` cover:
-- a crash after the upload;
-- a lost record;
-- an expired file;
-- a crash after `generateContent`;
-- stale and new holders;
-- concurrent claims;
-- heartbeat extension and lease loss;
-- keyed budgets.
+**Tests** (`test/workers/video.test.ts`). Evicting the object at six points shows Gemini upload and `generate` called exactly once each:
+- after the upload returned, before it was recorded;
+- after the upload was recorded;
+- after `await_file`;
+- after the tag result was recorded;
+- after the tag transition;
+- after indexing.
 
 ### 3.4 Other risks
 
 - **10 ms CPU** per invocation on Workers Free.
-  - Each step is mostly network wait, and the ranking runs on at most 50 candidates. A step that is killed for CPU is retried through its lease and dead-letters after 5 attempts.
+  - Each step is mostly network wait, and the ranking runs on at most 50 candidates. A step that is killed for CPU is retried by the actor's alarm, and fails after 5 attempts.
   - Observability is enabled so `cpuTime` can be checked after cutover.
 - **Embeddings change.** All stored vectors must be recomputed:
   - Workers AI vectors are not interchangeable with the FastEmbed vectors on EC2. They also live in a different store (Vectorize, not pgvector).
@@ -290,7 +268,9 @@ The EC2 instance is **stopped**; don't leave it running. It has no Elastic IP, s
 **Import:**
 1. `cd cloudflare && node scripts/ec2-to-d1.mjs framer-jobs.jsonl > framer-import.sql`
 2. `wrangler d1 execute framer-cf-db --remote --file framer-import.sql`
-3. Imported jobs are not woken automatically, because nothing called the scheduler. Open any imported video (`GET /videos/:id`, or the UI) to trigger the safety-net wake. Alternatively, upload any video: its wake drains everything that is due.
+3. Imported videos are started lazily. Run `node scripts/kick-imported.mjs <base-url> framer-jobs.jsonl`, which visits each video once:
+   - `pending` videos have their `VideoDO` start ingestion;
+   - `completed` ones (`needs_index`) are re-embedded.
 4. Delete the `.jsonl`/`.sql` files afterwards: they contain user metadata.
 
 **Objects:**
@@ -335,20 +315,20 @@ npm run typecheck
 
 - **Layout:**
   - `src/api.ts`: routes, matching FastAPI's shapes.
-  - `src/queue.ts`: the lease queue and heartbeat.
-  - `src/ingest.ts`: the job chain, step records and `drain`.
-  - `src/consumer.ts`: dependency wiring and `runDueJobs`.
-  - `src/scheduler.ts` and `src/schedule.ts`: the `FramerScheduler` Durable Object and its D1 queries.
-  - `src/events.ts` and `src/notify.ts`: the `VideoEvents` Durable Object (SSE) and its publisher.
+  - `src/video.ts`: the `VideoDO` actor (ingestion state machine, alarm executor, SSE).
+  - `src/actor.ts`: its typed stub. `src/deps.ts`: dependency wiring for the API Worker.
   - `src/gemini.ts`, `src/vectors.ts`, `src/retrieval.ts`, `src/store.ts`.
   - `migrations/`.
   - `scripts/ec2-to-d1.mjs`.
 - **Wrangler environments:**
   - top-level (`framer-cf-api`): the production config;
-  - `smoke`: no R2, no Durable Object bindings;
+  - `smoke`: no R2, no Durable Object bindings (to be deleted after cutover);
   - `test`: local only.
 
 ## 7. Live verification (2026-10-15)
+
+The first runs used the intermediate designs: first the cron with the D1 queue, then the scheduler DO with SSE.
+
 
 Run without a browser against `framer-cf-api`, with a 5 s, 45 KB synthetic MP4 (ffmpeg colour clip plus `say` audio).
 
