@@ -84,6 +84,7 @@ export interface FakeGeminiOptions {
   duration?: string;
   tagging?: unknown;
   tagStatus?: number;
+  uploadStatus?: number; // status for the upload start request
   answer?: unknown;
   /** Awaited before generateContent for tagging answers (to hold a call open). */
   tagGate?: (signal?: AbortSignal | null) => Promise<void>;
@@ -110,6 +111,7 @@ export function fakeGemini(opts: FakeGeminiOptions = {}) {
     const path = url.replace('https://generativelanguage.googleapis.com', '');
     log.push(`${method} ${path}`);
     if (url.endsWith('/upload/v1beta/files')) {
+      if (opts.uploadStatus) return new Response('{}', { status: opts.uploadStatus });
       const file = JSON.parse(String(init?.body)).file ?? {};
       pending = { name: file.name ?? `files/gen${++generated}`, displayName: file.display_name ?? '' };
       return new Response('{}', { headers: { 'x-goog-upload-url': 'https://upload.test/session' } });

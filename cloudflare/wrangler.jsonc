@@ -17,8 +17,15 @@
     "run_worker_first": true
   },
 
-  // Cron consumer for the D1 work queue (Workers Free: 5 cron triggers per account).
-  "triggers": { "crons": ["* * * * *"] },
+  // No cron (owner decision). An explicit empty list removes the old per-minute
+  // trigger on deploy; omitting "triggers" would leave it in place. The queue is
+  // driven by the FramerScheduler Durable Object's alarm (src/scheduler.ts).
+  "triggers": { "crons": [] },
+
+  // One global, SQLite-backed Durable Object: the queue's alarm clock. SQLite-backed
+  // classes are the ones available on Workers Free.
+  "durable_objects": { "bindings": [{ "name": "SCHEDULER", "class_name": "FramerScheduler" }] },
+  "migrations": [{ "tag": "v1-scheduler", "new_sqlite_classes": ["FramerScheduler"] }],
 
   "ai": { "binding": "AI" },
 
@@ -94,6 +101,8 @@
     "test": {
       "name": "framer-cf-test",
       "triggers": { "crons": [] },
+      "durable_objects": { "bindings": [{ "name": "SCHEDULER", "class_name": "FramerScheduler" }] },
+      "migrations": [{ "tag": "v1-scheduler", "new_sqlite_classes": ["FramerScheduler"] }],
       "d1_databases": [
         { "binding": "DB", "database_name": "framer-cf-test", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
       ],

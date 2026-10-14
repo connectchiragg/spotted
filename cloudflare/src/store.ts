@@ -103,7 +103,8 @@ export async function uploadFailed(db: D1Database, id: string, message: string):
 }
 
 /** Uploads never confirmed within 15 minutes fail, as on EC2. */
-export async function expireUploads(db: D1Database, ageSeconds = 900): Promise<number> {
+export const UPLOAD_EXPIRY_SECONDS = 900;
+export async function expireUploads(db: D1Database, ageSeconds = UPLOAD_EXPIRY_SECONDS): Promise<number> {
   const cutoff = new Date(Date.now() - ageSeconds * 1000).toISOString().replace('Z', '+00:00');
   const res = await db.prepare(
     `UPDATE videos SET status='failed', error='Upload interrupted; submit the video again', updated_at=?1

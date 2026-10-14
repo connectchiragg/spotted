@@ -31,6 +31,7 @@ import { Settings } from './env';
 import { Gemini, geminiDisplayName, GeminiFile, geminiFileName, geminiMimeType, parseDuration, PROMPT_VERSION, TaggerError } from './gemini';
 import * as queue from './queue';
 import { QueueJob } from './queue';
+import type { Waker } from './schedule';
 import { getVideo, nowIso, Video } from './store';
 import { duplicateCandidates, Embedder, indexResult } from './vectors';
 
@@ -43,6 +44,17 @@ export interface IngestDeps {
   settings: Settings;
   /** Lease heartbeat period during long calls (tests shorten it). */
   heartbeatMs?: number;
+  /** The scheduler's alarm clock: told when a step enqueues work for later. */
+  waker?: Waker;
+}
+
+/** Ask the scheduler to run at `atMs`; advisory (the alarm also reschedules from D1). */
+async function wake(deps: IngestDeps, atMs: number) {
+  try {
+    await deps.waker?.wake(atMs);
+  } catch (error) {
+    console.warn('scheduler wake failed', (error as Error)?.message);
+  }
 }
 
 // ---------------------------------------------------------------- step records
@@ -87,11 +99,13 @@ function progressJson(p: Progress) {
 /** Enqueue the next step, update progress and complete this job atomically. */
 async function next(deps: IngestDeps, job: QueueJob, kind: string, payload: Record<string, any>, progress: Progress, delaySeconds = 0) {
   const now = queue.nowSeconds();
-  return queue.commit(deps.db, [
+  const held = await queue.commit(deps.db, [
     queue.enqueueNextStmt(deps.db, job, kind, payload, now + delaySeconds, now),
     videoUpdate(deps, job, payload.video_id, `status='processing', error=NULL, progress=?, updated_at=?`, [progressJson(progress), nowIso()]),
     queue.completeStmt(deps.db, job, now),
   ]);
+  if (held) await wake(deps, (now + delaySeconds) * 1000);
+  return held;
 }
 
 export async function runJob(deps: IngestDeps, job: QueueJob): Promise<string> {
@@ -121,10 +135,12 @@ export async function runJob(deps: IngestDeps, job: QueueJob): Promise<string> {
     else if (error instanceof PermanentError) { message = error.message; permanent = true; }
     else console.error('ingest step failed', job.id, job.kind, (error as Error)?.message);
     const dead = permanent || job.attempts >= queue.MAX_ATTEMPTS;
+    const now = queue.nowSeconds();
     const held = await queue.commit(deps.db, [
       videoUpdate(deps, job, videoId, `status=?, error=?, updated_at=?`, [dead ? 'failed' : 'pending', message, nowIso()]),
-      permanent ? queue.deadStmt(deps.db, job, message) : queue.failStmt(deps.db, job, message),
+      permanent ? queue.deadStmt(deps.db, job, message, now) : queue.failStmt(deps.db, job, message, now),
     ]);
+    if (held && !dead) await wake(deps, queue.retryAt(job, now) * 1000);
     if (held && dead && job.payload.file_name) await deps.gemini.deleteFile(job.payload.file_name);
     return held ? (dead ? 'dead' : 'retry') : 'lease-lost';
   }

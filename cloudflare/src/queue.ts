@@ -78,6 +78,9 @@ export function failStmt(db: D1Database, job: QueueJob, error: string, now = now
   ).bind(now, error, job.id, job.lease_token);
 }
 
+/** When failStmt makes a job due again (mirrors its SQL). */
+export const retryAt = (job: QueueJob, now: number) => now + 30 * job.attempts * job.attempts;
+
 /** Permanent errors (invalid video, quota, credentials) dead-letter immediately. */
 export function deadStmt(db: D1Database, job: QueueJob, error: string, now = nowSeconds()) {
   return db.prepare(`UPDATE jobs SET status='dead', lease_token=NULL, last_error=?1, updated_at=?2 WHERE id=?3 AND lease_token=?4`)

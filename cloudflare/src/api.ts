@@ -9,6 +9,7 @@ import { Presigner } from './storage';
 import * as store from './store';
 import { Video as Job } from './store';
 import { Embedder } from './vectors';
+import { hasDueJobs, Waker } from './schedule';
 
 export interface AppDeps {
   db: D1Database | null;
@@ -20,6 +21,8 @@ export interface AppDeps {
   settings: Settings;
   geminiConfigured: boolean;
   assets?: Fetcher;
+  /** FramerScheduler stub; null when the binding is absent (tests, smoke). */
+  scheduler?: Waker | null;
   waitUntil(promise: Promise<unknown>): void;
 }
 
@@ -198,10 +201,57 @@ async function createUpload(request: Request, deps: AppDeps) {
     await store.uploadFailed(db, job.id, 'Could not prepare direct upload; submit again');
     throw new HttpError(503, 'Could not prepare direct upload');
   }
+  // The scheduler expires the request if it is never confirmed (no cron sweeps it).
+  if (!existing) await wakeScheduler(deps, Date.now() + (store.UPLOAD_EXPIRY_SECONDS + 1) * 1000);
   return json({
     request: await present(job, presigner),
     upload: { url, method: 'PUT', headers: { 'Content-Type': job.content_type }, expires_in: 600 },
   }, 201);
+}
+
+// ---------------------------------------------------------------- scheduler wake-ups
+
+/** Wake the FramerScheduler alarm at `atMs` (advisory: failures are logged, never surfaced). */
+export async function wakeScheduler(deps: AppDeps, atMs: number): Promise<boolean> {
+  if (!deps.scheduler) return false;
+  try {
+    await deps.scheduler.wake(atMs);
+    return true;
+  } catch (error) {
+    console.warn('scheduler wake failed', (error as Error)?.message);
+    return false;
+  }
+}
+
+const NUDGE_INTERVAL_MS = 10_000;
+const lastNudge = new Map<string, number>();
+
+/**
+ * Safety net for a lost wake-up, run when a client looks at one video (status
+ * read or SSE connect): at most one D1 check and one wake per request, and per
+ * video at most one wake every 10 s per isolate, so reconnect storms cannot loop.
+ *  - uploading, but the object is in R2: the browser never confirmed; confirm now.
+ *  - due or expired-lease jobs: wake the scheduler now.
+ */
+export async function nudge(deps: AppDeps, video: Job): Promise<'confirmed' | 'woken' | null> {
+  if (!deps.db) return null;
+  const now = Date.now();
+  if ((lastNudge.get(video.id) ?? 0) > now - NUDGE_INTERVAL_MS) return null;
+  if (lastNudge.size > 1000) lastNudge.clear();
+  lastNudge.set(video.id, now);
+  try {
+    if (video.status === 'uploading') {
+      if (!deps.bucket || !(await deps.bucket.head(video.object_key))) return null;
+      await completeUpload(video.id, deps); // verifies size and type, enqueues once, wakes
+      return 'confirmed';
+    }
+    if ((video.status === 'pending' || video.status === 'processing') && await hasDueJobs(deps.db, video.id)) {
+      return (await wakeScheduler(deps, now)) ? 'woken' : null;
+    }
+  } catch (error) {
+    if (!(error instanceof HttpError)) console.warn('nudge failed', video.id, (error as Error)?.message);
+  }
+  return null;
 }
 
 async function completeUpload(id: string, deps: AppDeps) {
@@ -226,7 +276,7 @@ async function completeUpload(id: string, deps: AppDeps) {
     await store.uploadFailed(db, job.id, 'Stored video content type does not match upload request');
     throw new HttpError(422, 'Stored video content type does not match upload request');
   }
-  await store.markUploadedAndEnqueue(db, job.id);
+  if (await store.markUploadedAndEnqueue(db, job.id)) await wakeScheduler(deps, Date.now());
   const latest = (await store.getVideo(db, job.id))!;
   if (!latest.uploaded) throw new HttpError(409, 'Upload expired; start a new upload');
   return json(await present(latest, deps.presigner), 202);
@@ -365,8 +415,10 @@ export async function handle(request: Request, deps: AppDeps): Promise<Response>
     }
     m = VIDEO.exec(path);
     if (m && method === 'GET' && m[1] !== 'uploads') {
-      const job = await store.getVideo(need(deps.db, 'Database is not configured'), decodeURIComponent(m[1]));
+      const db = need(deps.db, 'Database is not configured');
+      let job = await store.getVideo(db, decodeURIComponent(m[1]));
       if (!job) throw new HttpError(404, 'Request not found');
+      if (await nudge(deps, job) === 'confirmed') job = (await store.getVideo(db, job.id))!;
       return json(await present(job, deps.presigner));
     }
     throw new HttpError(404, 'Not found');

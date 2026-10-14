@@ -1,5 +1,6 @@
 export interface Env {
   ASSETS?: Fetcher;
+  SCHEDULER?: DurableObjectNamespace;
   DB?: D1Database;
   VECTORIZE?: VectorizeIndex;
   VIDEOS?: R2Bucket;

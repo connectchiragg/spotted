@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
 import { exports } from 'cloudflare:workers';
-import { runCron } from '../../src/index';
+import { runDueJobs } from '../../src/index';
 import { describe, expect, it } from 'vitest';
 
 const worker = (exports as any).default as Fetcher;
@@ -29,11 +29,11 @@ describe('Worker entrypoint in workerd (D1 only: no R2, Vectorize or AI)', () =>
     expect((await worker.fetch('https://framer.test/nope')).status).toBe(404);
   });
 
-  it('the cron handler runs housekeeping even without the ingestion bindings', async () => {
+  it('the consumer runs housekeeping even without the ingestion bindings', async () => {
     const db: D1Database = env.DB;
     await db.prepare(`INSERT INTO videos (id, filename, object_key, content_type, status, created_at, updated_at)
       VALUES ('old', 'a.mp4', 'videos/old/source', 'video/mp4', 'uploading', '2000-01-01T00:00:00+00:00', '2000-01-01T00:00:00+00:00')`).run();
-    expect(await runCron(env as any, { waitUntil: () => {} } as unknown as ExecutionContext)).toEqual([]);
+    expect(await runDueJobs(env as any, { waitUntil: () => {} })).toEqual({ outcomes: [], configured: false });
     expect(await db.prepare("SELECT status FROM videos WHERE id='old'").first()).toEqual({ status: 'failed' });
   });
 });
