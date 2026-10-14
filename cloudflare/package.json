@@ -1,0 +1,24 @@
+{
+  "name": "framer-cf",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:workers": "vitest run --config vitest.workers.config.ts",
+    "migrate": "node scripts/migrate.mjs",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "aws4fetch": "1.0.20",
+    "postgres": "3.4.9"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.23.0",
+    "@cloudflare/workers-types": "5.20260815.1",
+    "@types/node": "22.18.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11",
+    "wrangler": "4.124.0"
+  }
+}
