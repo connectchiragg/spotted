@@ -124,6 +124,8 @@ MP4, MOV, MKV, AVI and WebM decoding are tested. Browser playback depends on the
 
 Framer deployment scripts and systemd units are under `scripts/` and `deploy/`. Private resource manifests and SSH keys stay in ignored `data/framer-deploy/`. Cloudflare's fixed-origin HTTPS proxy is configured in `deploy/cloudflare/wrangler.jsonc`.
 
+A Cloudflare free-tier port (Worker + D1 + Vectorize + Workers AI + R2, no EC2) lives in `cloudflare/`; see [docs/cloudflare-port.md](docs/cloudflare-port.md).
+
 Deployment uses a fresh database, not an assessment snapshot. Keep the API and worker pointed at the same database. Do not stop a working local worker for a remote cutover until the remote services are verified.
 
 ## Next improvements
