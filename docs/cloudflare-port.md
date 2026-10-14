@@ -356,3 +356,42 @@ Run without a browser against `framer-cf-api`, with a 5 s, 45 KB synthetic MP4 (
   - SSE connect in the API Worker: 4 ms.
 
 **Bug found and fixed.** The Gemini client called the global `fetch` with the wrong receiver ("Illegal invocation"), which failed every Gemini call in workerd. The fix is commit `94f54fe`.
+
+## 8. Operations: Access, admin purge and deleting videos
+
+- **Access.** `framer.haciensus.com` is behind Cloudflare Access (Google login), and `workers_dev` is `false`, so every route, including `/health`, needs an Access session. The custom domain is attached in the dashboard; `wrangler deploy` leaves it in place, because the config has no `routes`.
+- **Deleting a video completely:** `DELETE /admin/videos/:id` with `Authorization: Bearer $FRAMER_ADMIN_TOKEN` (Worker secret `ADMIN_TOKEN`; the value is in the ignored `instawork/.env`).
+  - What it removes, in order:
+    1. the D1 row;
+    2. the actor: its alarm, streams, Gemini file and all its storage, leaving a tombstone so an in-flight step cannot write again;
+    3. its Vectorize vectors;
+    4. every R2 object under `videos/<id>/`.
+  - Without the secret, or with a wrong token, the route answers 404. Behind Access it needs an Access session or a service token too.
+- **Out-of-band deletes.** If a row is deleted directly (`wrangler d1 execute ... DELETE FROM videos ...`), the actor purges itself:
+  - at its next alarm;
+  - or when a signed-in client requests `GET /videos/<id>`, which then answers 404.
+  - An actor that never held state is never written to.
+- **2026-10-15:** all videos were dummies and were deleted on the owner's instruction:
+  - D1 rows, R2 objects and Gemini files were deleted with wrangler and the Gemini API;
+  - Vectorize was already empty;
+  - the two actors purge at their pending alarms (~22:06 and ~22:21 UTC).
+
+## 9. Incident: the ghost per-minute cron (2026-10-14/15)
+
+See the report in this section's commit history for the full RCA; summary:
+
+- **Symptom.** `framer-cf-api` received `cron: "* * * * *"` scheduled events every minute. Each failed with "Handler does not export a scheduled() function", although the dashboard, `GET .../workers/scripts/framer-cf-api/schedules` and `wrangler deployments` showed no cron.
+- **Timeline (UTC, from the GraphQL `workersInvocationsScheduled` dataset):**
+  - 19:07: the first per-minute run succeeds. The code then exported `scheduled()`, and `crons: ["* * * * *"]` was deployed by commit `f695474`/`72d22bb`.
+  - 19:15: commit `7a607a4` deploys `crons: []` and removes `scheduled()`. The schedules API returns `[]`.
+  - 19:16 onwards: every minute ends in `scriptThrewException`, always on the newest deployed version.
+- **Attempts that did not stop it:** two redeploys with `crons: []`, `wrangler triggers deploy`, `PUT schedules []`, a dashboard add/save/delete/save, a `PUT` of a different (yearly) cron (still per-minute 16+ min later, beyond the documented 15-minute propagation), and further full deploys.
+- **Root cause (evidence-based, Cloudflare-side).** Cloudflare's control plane holds the correct, empty schedule, but its cron dispatcher keeps the per-minute schedule created at 19:07. Schedule changes are not reaching the dispatcher. This matches the open Cloudflare status incident "Cloudflare Workers - Cron Trigger Activation Issues" ([npjny9agana8](https://www.cloudflarestatus.com/incidents/npjny9agana8), opened 2026-10-14 05:36 UTC, still "monitoring"): "Customers who have recently created or modified a Cron Trigger schedule may find that the schedule is not executing as expected". It is the third such incident in three days. Our cron was created and removed inside that window.
+- **Not the cause:**
+  - no other environment or script has a cron (all 5 scripts in the account return `[]`; the legacy `services/.../environments/production/schedules` is `[]` too);
+  - no gradual deployment (100% on one version);
+  - not a Durable Object alarm: events carry `event.cron` and `executionModel: "stateless"`, while DO alarms have no `cron` and run in the DO.
+- **Prevention.**
+  - Don't add a cron just to try something. Treat cron changes as infrastructure changes and check [cloudflarestatus.com](https://www.cloudflarestatus.com) for open Workers incidents first.
+  - Keep `"triggers": { "crons": [] }` in the config permanently (wrangler only removes crons when the list is explicitly empty), and keep at least one deploy between removing `scheduled()` and removing the cron.
+  - Verify a cron change with the GraphQL `workersInvocationsScheduled` dataset, not `wrangler tail` alone: tail is sampled and missed 2 of 3 cron events in one window.
