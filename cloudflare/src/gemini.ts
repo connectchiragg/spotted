@@ -14,11 +14,50 @@ export class TaggerError extends Error {
   }
 }
 
+/**
+ * Frame sampling. Gemini samples a video part at `videoMetadata.fps` frames per
+ * second (default 1.0; allowed range (0.0, 24.0], see
+ * https://ai.google.dev/api/generate-content#VideoMetadata). We ask for about
+ * `maxFrames` frames across the whole video instead of 1 fps, never more than
+ * 1 fps (the default), and never below MIN_FPS. The value is rounded DOWN so
+ * duration * fps never exceeds maxFrames.
+ * Measured with countTokens on gemini-3.5-flash, 60 s clip, 16 frames:
+ * video 4,080 -> 1,088 tokens (68 per frame at low resolution); audio is 32/s either way.
+ */
+export const MIN_FPS = 0.001;
+export const MAX_FPS = 1;
+export function samplingFps(maxFrames: number, durationSeconds: number): number {
+  if (!(durationSeconds > 0)) return MAX_FPS;
+  const fps = Math.floor((maxFrames / durationSeconds) * 1e4) / 1e4;
+  return Math.min(MAX_FPS, Math.max(MIN_FPS, fps));
+}
+
+/**
+ * Deterministic Gemini file id for a video, so a reclaimed upload step can find
+ * a file whose record was lost (Gemini rejects a second upload under the same
+ * name with 409 ALREADY_EXISTS). Ids are at most 40 chars of [a-z0-9-]
+ * (https://ai.google.dev/api/files#File): 'framer-' + the UUID without dashes = 39.
+ */
+export function geminiFileName(videoId: string): string {
+  const id = `framer-${videoId.toLowerCase().replace(/[^a-z0-9]/g, '')}`.slice(0, 40).replace(/-+$/, '');
+  return `files/${id}`;
+}
+export const geminiDisplayName = (videoId: string) => `framer-${videoId}`;
+
+export interface TokenUsage {
+  promptTokenCount?: number;
+  candidatesTokenCount?: number;
+  thoughtsTokenCount?: number;
+  totalTokenCount?: number;
+  promptTokensDetails?: { modality: string; tokenCount: number }[];
+}
+
 export interface GeminiFile {
   name: string;
   uri: string;
   mimeType: string;
   state: 'PROCESSING' | 'ACTIVE' | 'FAILED' | string;
+  displayName?: string;
   videoMetadata?: { videoDuration?: string };
 }
 
@@ -139,13 +178,15 @@ function classify(status: number): TaggerError {
 export class Gemini {
   constructor(private apiKey: string, private model: string, private fetcher: typeof fetch = fetch) {}
 
-  private async call(url: string, init: RequestInit): Promise<Response> {
+  private async call(url: string, init: RequestInit, signal?: AbortSignal, passStatuses: number[] = []): Promise<Response> {
     let response: Response;
     try {
-      response = await this.fetcher(url, { ...init, headers: { 'x-goog-api-key': this.apiKey, ...(init.headers as Record<string, string>) } });
-    } catch {
+      response = await this.fetcher(url, { ...init, signal, headers: { 'x-goog-api-key': this.apiKey, ...(init.headers as Record<string, string>) } });
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
       throw new TaggerError('Could not connect to Gemini', 502, true);
     }
+    if (passStatuses.includes(response.status)) return response;
     if (!response.ok) {
       await response.body?.cancel();
       throw classify(response.status);
@@ -153,8 +194,12 @@ export class Gemini {
     return response;
   }
 
-  /** Resumable upload; the R2 body is streamed through without buffering. */
-  async uploadFile(body: ReadableStream, size: number, mimeType: string, displayName: string): Promise<GeminiFile> {
+  /**
+   * Resumable upload; the R2 body is streamed through without buffering. With
+   * `name`, the file gets that deterministic id; if it already exists (409
+   * ALREADY_EXISTS) the existing file is returned instead of a second copy.
+   */
+  async uploadFile(body: ReadableStream, size: number, mimeType: string, displayName: string, name?: string, signal?: AbortSignal): Promise<GeminiFile> {
     const start = await this.call(`${API}/upload/v1beta/files`, {
       method: 'POST',
       headers: {
@@ -162,8 +207,13 @@ export class Gemini {
         'X-Goog-Upload-Header-Content-Length': String(size), 'X-Goog-Upload-Header-Content-Type': mimeType,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ file: { display_name: displayName } }),
-    });
+      body: JSON.stringify({ file: { display_name: displayName, ...(name ? { name } : {}) } }),
+    }, signal, [409]);
+    if (start.status === 409 && name) {
+      await start.body?.cancel();
+      await body.cancel();
+      return this.getFile(name, signal);
+    }
     const uploadUrl = start.headers.get('x-goog-upload-url');
     await start.body?.cancel();
     if (!uploadUrl) throw new TaggerError('Gemini did not return an upload URL', 502, true);
@@ -176,14 +226,43 @@ export class Gemini {
       body: streamed,
       // @ts-expect-error duplex is required by Node's fetch for streaming bodies (tests); ignored by workerd.
       duplex: 'half',
-    });
+    }, signal, [409]);
+    if (done.status === 409 && name) {
+      // Another holder finalised the same deterministic name first: reuse that file.
+      await done.body?.cancel();
+      return this.getFile(name, signal);
+    }
     const json: any = await done.json();
     if (!json?.file?.name || !json?.file?.uri) throw new TaggerError('Gemini returned an invalid file record', 502, true);
     return json.file;
   }
 
-  async getFile(name: string): Promise<GeminiFile> {
-    return (await this.call(`${API}/v1beta/${name}`, { method: 'GET' })).json();
+  async getFile(name: string, signal?: AbortSignal): Promise<GeminiFile> {
+    return (await this.call(`${API}/v1beta/${name}`, { method: 'GET' }, signal)).json();
+  }
+
+  /** The file, or null if Gemini no longer has it (deleted or expired after 48 h). */
+  async findFile(name: string, signal?: AbortSignal): Promise<GeminiFile | null> {
+    const response = await this.call(`${API}/v1beta/${name}`, { method: 'GET' }, signal, [403, 404]);
+    if (response.status === 403 || response.status === 404) {
+      await response.body?.cancel();
+      return null;
+    }
+    return response.json();
+  }
+
+  /** Fallback lookup by display name (files.list, 100 per page, a few pages at most). */
+  async findByDisplayName(displayName: string, signal?: AbortSignal, maxPages = 5): Promise<GeminiFile | null> {
+    let pageToken = '';
+    for (let page = 0; page < maxPages; page++) {
+      const query = `pageSize=100${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
+      const json: any = await (await this.call(`${API}/v1beta/files?${query}`, { method: 'GET' }, signal)).json();
+      const found = (json?.files ?? []).find((f: GeminiFile) => f.displayName === displayName && f.state !== 'FAILED');
+      if (found) return found;
+      pageToken = json?.nextPageToken ?? '';
+      if (!pageToken) break;
+    }
+    return null;
   }
 
   async deleteFile(name: string): Promise<void> {
@@ -195,33 +274,46 @@ export class Gemini {
     }
   }
 
-  private async generate(body: unknown): Promise<string> {
+  private async generate(body: unknown, signal?: AbortSignal): Promise<{ text: string; usage: TokenUsage | null }> {
     const response = await this.call(`${API}/v1beta/models/${encodeURIComponent(this.model)}:generateContent`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
+    }, signal);
     const json: any = await response.json();
     const text = json?.candidates?.[0]?.content?.parts?.map((p: any) => p.text ?? '').join('') ?? '';
     if (!text) throw new TaggerError('Gemini returned no response; it may have blocked the request', 502, false);
-    return text;
+    return { text, usage: json?.usageMetadata ?? null };
   }
 
-  async tagVideo(file: GeminiFile, durationSeconds: number, maxMoments: number): Promise<TaggingResult> {
-    const text = await this.generate({
+  /**
+   * One generateContent call over the uploaded file. The video part samples
+   * about `maxMoments` frames (videoMetadata.fps) at low media resolution.
+   * Audio is kept: the Gemini API has no switch to drop a video's audio track,
+   * and stripping it needs re-encoding, which Workers cannot do (docs/cloudflare-port.md §3.1).
+   */
+  static tagRequest(file: GeminiFile, durationSeconds: number, maxMoments: number) {
+    return {
       systemInstruction: { parts: [{ text: videoPrompt(maxMoments) }] },
-      contents: [{ role: 'user', parts: [{ fileData: { mimeType: file.mimeType, fileUri: file.uri } }, { text: 'Analyze the video.' }] }],
+      contents: [{ role: 'user', parts: [
+        { fileData: { mimeType: file.mimeType, fileUri: file.uri }, videoMetadata: { fps: samplingFps(maxMoments, durationSeconds) } },
+        { text: 'Analyze the video.' },
+      ] }],
       generationConfig: { responseMimeType: 'application/json', mediaResolution: 'MEDIA_RESOLUTION_LOW' },
-    });
+    };
+  }
+
+  async tagVideo(file: GeminiFile, durationSeconds: number, maxMoments: number, signal?: AbortSignal): Promise<{ result: TaggingResult; usage: TokenUsage | null }> {
+    const { text, usage } = await this.generate(Gemini.tagRequest(file, durationSeconds, maxMoments), signal);
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
     } catch {
       throw new TaggerError('Gemini returned malformed tagging data', 502, false);
     }
-    return validateTagging(parsed, durationSeconds, maxMoments);
+    return { result: validateTagging(parsed, durationSeconds, maxMoments), usage };
   }
 
   async answer(query: string, candidates: unknown[]): Promise<unknown> {
-    const text = await this.generate({
+    const { text } = await this.generate({
       systemInstruction: { parts: [{ text: ANSWER_PROMPT }] },
       contents: [{ role: 'user', parts: [{ text: JSON.stringify({ query, candidates }) }] }],
       generationConfig: { responseMimeType: 'application/json' },

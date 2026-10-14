@@ -3,6 +3,7 @@ import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { handle, reserve } from '../../src/api';
 import { drain } from '../../src/ingest';
+import { geminiFileName } from '../../src/gemini';
 import * as queue from '../../src/queue';
 import * as store from '../../src/store';
 import { appDeps, fakeBucket, fakeEmbedder, fakeGemini, FakeGeminiOptions, fakeVectorize, settings } from '../helpers';
@@ -10,7 +11,7 @@ import { appDeps, fakeBucket, fakeEmbedder, fakeGemini, FakeGeminiOptions, fakeV
 const db: D1Database = env.DB;
 
 beforeEach(async () => {
-  await db.batch(['jobs', 'videos', 'usage_counters'].map((t) => db.prepare(`DELETE FROM ${t}`)));
+  await db.batch(['jobs', 'videos', 'usage_counters', 'step_results', 'usage_events'].map((t) => db.prepare(`DELETE FROM ${t}`)));
 });
 
 const enqueue = (kind = 'test', runAfter = 1000) => queue.enqueueStmt(db, kind, { n: 1 }, runAfter, runAfter).run();
@@ -120,7 +121,7 @@ describe('ingestion chain and API on D1', () => {
     const outcomes = await ticks(deps, 3);
     expect(outcomes).toEqual(['ingest.upload:uploaded', 'ingest.await_file:waiting', 'ingest.await_file:active',
       'ingest.tag:tagged', 'ingest.index:completed']);
-    expect(log.at(-1)).toBe('DELETE /v1beta/files/abc');
+    expect(log.at(-1)).toBe(`DELETE /v1beta/${geminiFileName(video.id)}`);
     const done = (await store.getVideo(db, video.id))!;
     expect(done.status).toBe('completed');
     expect(done.result).toMatchObject({ duration_seconds: 20, sampled_timestamps: [2, 12.5], frame_indices: [], model: 'gemini-test' });

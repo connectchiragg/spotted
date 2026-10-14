@@ -10,9 +10,25 @@
  *
  * A step finishes by enqueueing the next step and completing itself in ONE D1
  * batch, fenced by its lease_token: a consumer that lost its lease changes nothing.
+ *
+ * Idempotency and resume. Every external call with a cost or side effect has a
+ * durable record in `step_results`, keyed by (video_id, step):
+ *   upload  the Gemini file (name, uri). Uploads use a deterministic file name
+ *           (geminiFileName), so a lost record is recovered by a GET, then by
+ *           listing on the display name; a second upload is never started for a
+ *           file that is still PROCESSING or ACTIVE.
+ *   tag     the validated generateContent result and its token usage.
+ * The record is written as soon as the call returns, BEFORE the fenced commit,
+ * and it is NOT fenced: it states a fact about the outside world (this file
+ * exists, this analysis was paid for), which stays true whoever holds the lease.
+ * First writer wins (ON CONFLICT DO NOTHING). State transitions (next job,
+ * video row, job completion) stay fenced. A reclaimed job therefore reads its
+ * record and skips straight to the next transition.
+ * Long calls run under queue.withHeartbeat, which extends the lease and aborts
+ * the call if the lease is lost.
  */
 import { Settings } from './env';
-import { Gemini, geminiMimeType, parseDuration, PROMPT_VERSION, TaggerError } from './gemini';
+import { Gemini, geminiDisplayName, GeminiFile, geminiFileName, geminiMimeType, parseDuration, PROMPT_VERSION, TaggerError } from './gemini';
 import * as queue from './queue';
 import { QueueJob } from './queue';
 import { getVideo, nowIso, Video } from './store';
@@ -25,7 +41,34 @@ export interface IngestDeps {
   gemini: Gemini;
   embedder: Embedder;
   settings: Settings;
+  /** Lease heartbeat period during long calls (tests shorten it). */
+  heartbeatMs?: number;
 }
+
+// ---------------------------------------------------------------- step records
+
+export type Step = 'upload' | 'tag';
+
+export async function getStep<T = any>(db: D1Database, videoId: string, step: Step): Promise<T | null> {
+  const row = await db.prepare('SELECT result FROM step_results WHERE video_id=?1 AND step=?2').bind(videoId, step).first<{ result: string }>();
+  return row ? JSON.parse(row.result) : null;
+}
+
+/** Record an external call's outcome once (first writer wins). Returns the stored record. */
+export async function recordStep<T>(db: D1Database, job: QueueJob, videoId: string, step: Step, result: T): Promise<T> {
+  await db.prepare(
+    `INSERT INTO step_results (video_id, step, idempotency_key, result, job_id, created_at)
+     VALUES (?1, ?2, ?1 || ':' || ?2, ?3, ?4, ?5) ON CONFLICT DO NOTHING`,
+  ).bind(videoId, step, JSON.stringify(result), job.id, queue.nowSeconds()).run();
+  return (await getStep<T>(db, videoId, step))!;
+}
+
+/** Drop a record whose external object is gone, so the step can redo it. */
+async function forgetStep(db: D1Database, videoId: string, step: Step) {
+  await db.prepare('DELETE FROM step_results WHERE video_id=?1 AND step=?2').bind(videoId, step).run();
+}
+
+const live = (file: GeminiFile | null) => Boolean(file && (file.state === 'ACTIVE' || file.state === 'PROCESSING'));
 
 export class PermanentError extends Error {}
 const MAX_POLLS = 120; // 120 x 5 s: at most ~10 min waiting for Gemini to process a file.
@@ -71,6 +114,7 @@ export async function runJob(deps: IngestDeps, job: QueueJob): Promise<string> {
       default: throw new PermanentError(`Unknown job kind ${job.kind}`);
     }
   } catch (error) {
+    if (error instanceof queue.LeaseLostError) return 'lease-lost';
     let message = 'Unexpected processing failure';
     let permanent = false;
     if (error instanceof TaggerError) { message = error.message; permanent = !error.retryable; }
@@ -86,17 +130,37 @@ export async function runJob(deps: IngestDeps, job: QueueJob): Promise<string> {
   }
 }
 
+/** An existing Gemini file for this video (recorded, by deterministic name, or by display name), if still usable. */
+async function existingUpload(deps: IngestDeps, video: Video): Promise<GeminiFile | null> {
+  const recorded = await getStep<{ name: string }>(deps.db, video.id, 'upload');
+  if (recorded) {
+    const file = await deps.gemini.findFile(recorded.name);
+    if (live(file)) return file;
+    await forgetStep(deps.db, video.id, 'upload'); // expired, deleted or FAILED: upload again
+  }
+  const byName = await deps.gemini.findFile(geminiFileName(video.id));
+  if (live(byName)) return byName;
+  if (byName) await deps.gemini.deleteFile(byName.name); // FAILED copy would block the deterministic name
+  const byDisplay = await deps.gemini.findByDisplayName(geminiDisplayName(video.id));
+  return live(byDisplay) ? byDisplay : null;
+}
+
 async function upload(deps: IngestDeps, job: QueueJob, video: Video) {
   const mimeType = geminiMimeType(video.content_type, video.filename);
   if (!mimeType) throw new PermanentError('Unsupported video format for analysis; use MP4, MOV, WebM, AVI, MPEG, WMV, FLV or 3GP');
-  const object = await deps.bucket.get(video.object_key);
-  if (!object) throw new PermanentError('Uploaded video is missing from storage');
-  if (object.size > deps.settings.maxUploadBytes) {
-    await object.body.cancel();
-    throw new PermanentError('Stored video exceeds upload limit');
+  let file = await existingUpload(deps, video);
+  if (!file) {
+    const object = await deps.bucket.get(video.object_key);
+    if (!object) throw new PermanentError('Uploaded video is missing from storage');
+    if (object.size > deps.settings.maxUploadBytes) {
+      await object.body.cancel();
+      throw new PermanentError('Stored video exceeds upload limit');
+    }
+    file = await queue.withHeartbeat(deps.db, job, (signal) =>
+      deps.gemini.uploadFile(object.body, object.size, mimeType, geminiDisplayName(video.id), geminiFileName(video.id), signal), deps.heartbeatMs);
   }
-  const file = await deps.gemini.uploadFile(object.body, object.size, mimeType, `framer-${video.id}`);
-  const held = await next(deps, job, 'ingest.await_file', { video_id: video.id, file_name: file.name, polls: 0 },
+  const recorded = await recordStep(deps.db, job, video.id, 'upload', { name: file.name, uri: file.uri, mime_type: file.mimeType });
+  const held = await next(deps, job, 'ingest.await_file', { video_id: video.id, file_name: recorded.name, polls: 0 },
     { stage: 'Video sent for analysis', percent: 30, eta_seconds: 90 }, 5);
   return held ? 'uploaded' : 'lease-lost';
 }
@@ -122,22 +186,35 @@ async function awaitFile(deps: IngestDeps, job: QueueJob) {
 
 async function tag(deps: IngestDeps, job: QueueJob) {
   const p = job.payload;
-  const result = await deps.gemini.tagVideo({ name: p.file_name, uri: p.file_uri, mimeType: p.mime_type, state: 'ACTIVE' }, p.duration, deps.settings.maxFrames);
-  const held = await next(deps, job, 'ingest.index', { video_id: p.video_id, file_name: p.file_name, duration: p.duration, result },
+  // Resume: a previous holder already paid for this analysis.
+  if (!(await getStep(deps.db, p.video_id, 'tag'))) {
+    const file = { name: p.file_name, uri: p.file_uri, mimeType: p.mime_type, state: 'ACTIVE' };
+    const { result, usage } = await queue.withHeartbeat(deps.db, job, (signal) =>
+      deps.gemini.tagVideo(file, p.duration, deps.settings.maxFrames, signal), deps.heartbeatMs);
+    await recordStep(deps.db, job, p.video_id, 'tag', { ...result, usage });
+  }
+  const held = await next(deps, job, 'ingest.index', { video_id: p.video_id, file_name: p.file_name, duration: p.duration },
     { stage: 'Indexing for search', percent: 90, eta_seconds: 10 });
   return held ? 'tagged' : 'lease-lost';
 }
 
+/**
+ * Index. Idempotent by construction: Vectorize upserts use deterministic ids
+ * (v:/f:/d:<video id>), and the Gemini delete tolerates a missing file.
+ */
 async function indexStep(deps: IngestDeps, job: QueueJob, video: Video) {
   const p = job.payload;
+  const tagged = (await getStep<any>(deps.db, video.id, 'tag')) ?? p.result; // p.result: jobs queued before step_results
+  if (!tagged) throw new PermanentError('Analysis result is missing; upload the video again');
   const output: Record<string, any> = {
-    summary: p.result.summary,
-    tags: p.result.tags,
-    frame_descriptions: p.result.frame_descriptions,
+    summary: tagged.summary,
+    tags: tagged.tags,
+    frame_descriptions: tagged.frame_descriptions,
     duration_seconds: p.duration,
-    sampled_timestamps: p.result.sampled_timestamps,
+    sampled_timestamps: tagged.sampled_timestamps,
     model: deps.settings.geminiModel,
     prompt_version: PROMPT_VERSION,
+    ...(tagged.usage ? { usage: tagged.usage } : {}),
     frame_indices: [], // no JPEGs for Worker-ingested videos; citations seek the video instead
   };
   const vector = await indexResult(deps.index, deps.embedder, video.id, output);

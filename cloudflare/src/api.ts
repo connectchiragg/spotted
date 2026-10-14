@@ -109,14 +109,44 @@ async function readJson(request: Request): Promise<any> {
 
 // ---------------------------------------------------------------- usage guard
 
-export async function reserve(db: D1Database, operation: string, limit: number, day = new Date().toISOString().slice(0, 10)): Promise<boolean> {
-  if (limit <= 0) return false;
-  const row = await db.prepare(
-    `INSERT INTO usage_counters (day, operation, count) VALUES (?1, ?2, 1)
-     ON CONFLICT (day, operation) DO UPDATE SET count = count + 1 WHERE count < ?3
-     RETURNING count`,
-  ).bind(day, operation, limit).first();
-  return row !== null;
+/** Optional client `Idempotency-Key` header (printable ASCII, 8-128 chars). */
+export function idempotencyKey(request: Request): string | null {
+  const key = request.headers.get('idempotency-key');
+  if (key === null) return null;
+  if (!/^[\x21-\x7e]{8,128}$/.test(key)) throw new HttpError(422, 'Idempotency-Key must be 8-128 printable ASCII characters');
+  return key;
+}
+
+/**
+ * Reserve one unit of a daily budget. With `key`, the unit is counted at most
+ * once per key: a retry with the same key is allowed again without counting.
+ * One D1 transaction: count only if the key is new and under the limit, record
+ * the key only if that count happened, then report whether the key is recorded.
+ */
+export async function reserve(db: D1Database, operation: string, limit: number, day = new Date().toISOString().slice(0, 10), key: string | null = null): Promise<boolean> {
+  if (!key) {
+    if (limit <= 0) return false;
+    const row = await db.prepare(
+      `INSERT INTO usage_counters (day, operation, count) VALUES (?1, ?2, 1)
+       ON CONFLICT (day, operation) DO UPDATE SET count = count + 1 WHERE count < ?3
+       RETURNING count`,
+    ).bind(day, operation, limit).first();
+    return row !== null;
+  }
+  const eventKey = `${operation}:${key}`;
+  const results = await db.batch([
+    db.prepare(
+      `INSERT INTO usage_counters (day, operation, count)
+       SELECT ?1, ?2, 1 WHERE ?3 > 0 AND NOT EXISTS (SELECT 1 FROM usage_events WHERE idempotency_key=?4)
+       ON CONFLICT (day, operation) DO UPDATE SET count = count + 1 WHERE count < ?3`,
+    ).bind(day, operation, limit, eventKey),
+    db.prepare(
+      `INSERT INTO usage_events (idempotency_key, day, operation, created_at)
+       SELECT ?1, ?2, ?3, ?4 WHERE changes() = 1`,
+    ).bind(eventKey, day, operation, Math.floor(Date.now() / 1000)),
+    db.prepare('SELECT 1 AS counted FROM usage_events WHERE idempotency_key=?1').bind(eventKey),
+  ]);
+  return results[2].results.length === 1;
 }
 
 /** Port of app/limits.py public_budget. Returns a response to short-circuit, or null. */
@@ -137,8 +167,9 @@ export async function publicBudget(request: Request, path: string, deps: AppDeps
   if (length > 16384) return json({ detail: 'Request is too large' }, 413);
   const limit = operation === 'upload' ? deps.settings.dailyUploadLimit : deps.settings.dailyQueryLimit;
   let allowed: boolean;
+  const key = idempotencyKey(request);
   try {
-    allowed = await reserve(need(deps.db, 'Database is not configured'), operation, limit);
+    allowed = await reserve(need(deps.db, 'Database is not configured'), operation, limit, undefined, key);
   } catch {
     return json({ detail: 'Usage checks are temporarily unavailable. Please try again later.' }, 503);
   }
@@ -155,7 +186,11 @@ async function createUpload(request: Request, deps: AppDeps) {
   const presigner = need(deps.presigner, 'Storage is not configured; set the R2 API token secrets');
   const body = validateUploadIntent(await readJson(request));
   if (body.size_bytes > deps.settings.maxUploadBytes) throw new HttpError(413, 'Video exceeds upload size limit');
-  const job = await store.createVideo(db, { filename: body.filename, contentType: body.content_type, size: body.size_bytes, displayName: body.display_name });
+  const key = idempotencyKey(request);
+  // A retried request with the same Idempotency-Key gets the same upload request, not a second one.
+  const existing = key ? await store.getVideoByIdempotencyKey(db, key) : null;
+  if (existing && existing.status !== 'uploading') return json({ request: await present(existing, presigner), upload: null }, 200);
+  const job = existing ?? await store.createVideo(db, { filename: body.filename, contentType: body.content_type, size: body.size_bytes, displayName: body.display_name, idempotencyKey: key });
   let url: string;
   try {
     url = await presigner.putUrl(job.object_key, job.content_type, 600);

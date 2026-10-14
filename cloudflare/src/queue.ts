@@ -10,6 +10,21 @@
  */
 export const LEASE_SECONDS = 300;
 export const MAX_ATTEMPTS = 5;
+/**
+ * Heartbeat period while a long external call (Gemini upload or generateContent)
+ * runs: a fifth of the 300 s lease, so three consecutive failed beats (a D1
+ * blip) are tolerated before the lease could lapse. Each beat is one D1 query;
+ * a 5-minute call costs 5 of the 50 queries a Free invocation may make, and a
+ * cron invocation lasts at most 15 minutes of wall time (drain starts no step
+ * after 10). If the Worker is killed, beats stop and the lease lapses <= 300 s later.
+ */
+export const HEARTBEAT_MS = 60_000;
+
+export class LeaseLostError extends Error {
+  constructor() {
+    super('Lease lost to another consumer');
+  }
+}
 
 export interface QueueJob {
   id: number;
@@ -87,7 +102,68 @@ export async function commit(db: D1Database, statements: D1PreparedStatement[]):
   return (results.at(-1)?.meta.changes ?? 0) === 1;
 }
 
+/**
+ * Heartbeat: extend the lease while still holding it (fenced by lease_token).
+ * Returns false once another consumer has reclaimed the job; never shortens a lease.
+ */
+export async function heartbeat(db: D1Database, job: QueueJob, now = nowSeconds()): Promise<boolean> {
+  const row = await db.prepare(
+    `UPDATE jobs SET locked_until=MAX(COALESCE(locked_until, 0), ?1+${LEASE_SECONDS}), updated_at=?1
+     WHERE id=?2 AND lease_token=?3 AND status='running' RETURNING locked_until`,
+  ).bind(now, job.id, job.lease_token).first<{ locked_until: number }>();
+  if (!row) return false;
+  job.locked_until = row.locked_until;
+  return true;
+}
+
+/**
+ * Run a long external call while heartbeating the lease every `intervalMs`.
+ * If a heartbeat finds the lease lost, the call is aborted through `signal` and
+ * LeaseLostError is thrown. A call that already finished keeps its result: the
+ * caller records the external fact, and its fenced commit then decides whether
+ * this consumer may still move the job on. Transient heartbeat errors are
+ * ignored; the lease has room for several missed beats.
+ */
+export async function withHeartbeat<T>(db: D1Database, job: QueueJob, fn: (signal: AbortSignal) => Promise<T>,
+  intervalMs = HEARTBEAT_MS): Promise<T> {
+  const controller = new AbortController();
+  let lost = false;
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const schedule = () => {
+    if (!stopped) timer = setTimeout(beat, intervalMs);
+  };
+  const beat = async () => {
+    if (stopped) return;
+    try {
+      if (!(await heartbeat(db, job))) {
+        lost = true;
+        controller.abort(new LeaseLostError());
+        return;
+      }
+    } catch (error) {
+      console.warn('heartbeat failed; retrying', job.id, (error as Error)?.message);
+    }
+    schedule();
+  };
+  schedule();
+  try {
+    return await fn(controller.signal);
+  } catch (error) {
+    if (lost) throw new LeaseLostError();
+    throw error;
+  } finally {
+    stopped = true;
+    clearTimeout(timer);
+  }
+}
+
 /** Housekeeping: finished queue rows are kept a week for debugging, then deleted. */
 export async function purgeFinished(db: D1Database, now = nowSeconds()) {
-  await db.prepare(`DELETE FROM jobs WHERE status IN ('done','dead') AND updated_at < ?1`).bind(now - 7 * 86400).run();
+  await db.batch([
+    db.prepare(`DELETE FROM jobs WHERE status IN ('done','dead') AND updated_at < ?1`).bind(now - 7 * 86400),
+    // Step records outlive their Gemini files (48 h) and R2 objects (7 days) only briefly.
+    db.prepare(`DELETE FROM step_results WHERE created_at < ?1`).bind(now - 7 * 86400),
+    db.prepare(`DELETE FROM usage_events WHERE created_at < ?1`).bind(now - 2 * 86400),
+  ]);
 }

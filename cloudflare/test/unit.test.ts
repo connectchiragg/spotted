@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { handle, HttpError, validateUploadIntent } from '../src/api';
 import { settings as readSettings } from '../src/env';
-import { geminiMimeType, parseDuration, TaggerError, validateAnswer, validateTagging } from '../src/gemini';
+import { geminiFileName, geminiMimeType, parseDuration, samplingFps, TaggerError, validateAnswer, validateTagging } from '../src/gemini';
 import { normalizeQuery, rank, tokens } from '../src/retrieval';
 import { appDeps, defaultTagging, fakeGemini } from './helpers';
 
@@ -68,15 +68,54 @@ describe('Gemini helpers', () => {
 });
 
 describe('Gemini client', () => {
+  const body = () => new ReadableStream({ start(c) { c.enqueue(new Uint8Array(4)); c.close(); } });
+
   it('uploads with the resumable protocol and classifies errors', async () => {
     const { gemini, log } = fakeGemini();
-    const file = await gemini.uploadFile(new ReadableStream({ start(c) { c.enqueue(new Uint8Array(4)); c.close(); } }), 4, 'video/mp4', 'x');
-    expect(file.name).toBe('files/abc');
+    const file = await gemini.uploadFile(body(), 4, 'video/mp4', 'x');
+    expect(file.name).toBe('files/gen1');
     expect(log).toEqual(['POST /upload/v1beta/files', 'POST https://upload.test/session']);
     const quota = fakeGemini({ tagStatus: 429 }).gemini;
     await expect(quota.tagVideo(file, 20, 16)).rejects.toMatchObject({ retryable: false });
     const outage = fakeGemini({ tagStatus: 503 }).gemini;
     await expect(outage.tagVideo(file, 20, 16)).rejects.toMatchObject({ retryable: true });
+  });
+
+  it('a deterministic name is never uploaded twice: 409 returns the existing file', async () => {
+    const fake = fakeGemini();
+    const name = geminiFileName('0f8c2a9e-1b2c-4d5e-8f90-123456789abc');
+    expect(name).toBe('files/framer-0f8c2a9e1b2c4d5e8f90123456789abc');
+    expect(name.length - 'files/'.length).toBeLessThanOrEqual(40);
+    const first = await fake.gemini.uploadFile(body(), 4, 'video/mp4', 'framer-x', name);
+    const second = await fake.gemini.uploadFile(body(), 4, 'video/mp4', 'framer-x', name);
+    expect(second.name).toBe(first.name);
+    expect(fake.counts.uploads).toBe(1);
+    expect(await fake.gemini.findFile('files/missing')).toBeNull();
+    expect((await fake.gemini.findByDisplayName('framer-x'))?.name).toBe(name);
+  });
+
+  it('samples about maxFrames frames: fps = clamp(maxFrames / duration, 0.001, 1)', () => {
+    expect(samplingFps(16, 5)).toBe(1); // short clips keep Gemini's default 1 fps
+    expect(samplingFps(16, 16)).toBe(1);
+    expect(samplingFps(16, 60)).toBe(0.2666);
+    expect(samplingFps(16, 600)).toBe(0.0266);
+    expect(Math.floor(600 * samplingFps(16, 600))).toBeLessThanOrEqual(16);
+    expect(samplingFps(1, 100000)).toBe(0.001);
+    expect(samplingFps(16, 0)).toBe(1);
+  });
+
+  it('sends the sampled, low-resolution request shape', async () => {
+    const fake = fakeGemini();
+    const file = { name: 'files/f', uri: 'https://files.test/f', mimeType: 'video/mp4', state: 'ACTIVE' };
+    const { usage } = await fake.gemini.tagVideo(file, 120, 16);
+    expect(usage).toMatchObject({ promptTokenCount: 1500, totalTokenCount: 1700 });
+    const request = fake.requests[0];
+    expect(request.contents).toEqual([{ role: 'user', parts: [
+      { fileData: { mimeType: 'video/mp4', fileUri: 'https://files.test/f' }, videoMetadata: { fps: 0.1333 } },
+      { text: 'Analyze the video.' },
+    ] }]);
+    expect(request.generationConfig).toEqual({ responseMimeType: 'application/json', mediaResolution: 'MEDIA_RESOLUTION_LOW' });
+    expect(request.systemInstruction.parts[0].text).toContain('between 1 and 16 distinct key moments');
   });
 });
 

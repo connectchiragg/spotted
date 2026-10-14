@@ -7,7 +7,7 @@ import * as queue from '../../src/queue';
 
 it('imports EC2 rows into videos and queues re-embedding / re-ingestion', async () => {
   const db: D1Database = env.DB;
-  await db.batch(['jobs', 'videos'].map((t) => db.prepare(`DELETE FROM ${t}`)));
+  await db.batch(['jobs', 'videos', 'step_results'].map((t) => db.prepare(`DELETE FROM ${t}`)));
   const base = { object_key: 'videos/x/source', content_type: 'video/mp4', created_at: '2026-09-01T00:00:00+00:00', updated_at: '2026-09-01T00:00:00+00:00', uploaded: 1, attempts: 1 };
   const sql: string = toSql([
     { ...base, id: 'done', filename: "it's.mp4", status: 'completed', result: { summary: 's', tags: [] }, expected_size: '123' },

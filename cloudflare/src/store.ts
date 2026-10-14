@@ -30,14 +30,22 @@ export function decode(row: any): Video | null {
   return { ...row, result: row.result ? JSON.parse(row.result) : null, progress: row.progress ? JSON.parse(row.progress) : null };
 }
 
-export async function createVideo(db: D1Database, input: { filename: string; contentType: string; size: number; displayName?: string | null }): Promise<Video> {
+export async function createVideo(db: D1Database, input: { filename: string; contentType: string; size: number; displayName?: string | null; idempotencyKey?: string | null }): Promise<Video> {
   const id = crypto.randomUUID();
   const ts = nowIso();
+  const key = input.idempotencyKey ?? null;
+  // With a key, a concurrent duplicate request loses the unique index race and gets the winner's row.
   const row = await db.prepare(
-    `INSERT INTO videos (id, filename, display_name, object_key, content_type, expected_size, status, created_at, updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'uploading', ?7, ?7) RETURNING *`,
-  ).bind(id, input.filename, input.displayName ?? null, `videos/${id}/source`, input.contentType, input.size, ts).first();
+    `INSERT INTO videos (id, filename, display_name, object_key, content_type, expected_size, status, created_at, updated_at, idempotency_key)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'uploading', ?7, ?7, ?8)
+     ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING *`,
+  ).bind(id, input.filename, input.displayName ?? null, `videos/${id}/source`, input.contentType, input.size, ts, key).first();
+  if (!row && key) return (await getVideoByIdempotencyKey(db, key))!;
   return decode(row)!;
+}
+
+export async function getVideoByIdempotencyKey(db: D1Database, key: string): Promise<Video | null> {
+  return decode(await db.prepare('SELECT * FROM videos WHERE idempotency_key=?1').bind(key).first());
 }
 
 export async function getVideo(db: D1Database, id: string): Promise<Video | null> {
