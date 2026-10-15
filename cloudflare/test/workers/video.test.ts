@@ -87,9 +87,9 @@ describe('VideoDO: the frame + transcript pipeline', () => {
       transcript: [{ start: 1, end: 4, text: 'Fold the blue towel neatly.' }], duration_seconds: 30, usage: { gemini_calls: 3 } });
     expect(row.result.frame_descriptions).toHaveLength(3);
     expect(row.result.tags.map((x: any) => x.label)).toContain('towel');
-    expect(Object.keys(t.objects).filter((k) => k.includes('/frames/')).sort()).toEqual([0, 1, 2].map((i) => `videos/${t.video.id}/frames/${i}.jpg`));
+    expect(Object.keys(t.objects).filter((k) => k.startsWith('thumbs/')).sort()).toEqual([0, 1, 2].map((i) => `thumbs/${t.video.id}/${i}.jpg`));
     expect([...t.vectors.store.keys()].sort()).toEqual([`f:${t.video.id}:0`, `f:${t.video.id}:1`, `f:${t.video.id}:2`, `s:${t.video.id}`, `t:${t.video.id}:0`]);
-    expect(t.vectors.store.get(`f:${t.video.id}:1`)!.metadata).toMatchObject({ kind: 'frame', video_id: t.video.id, t_start: 10, thumb_key: `videos/${t.video.id}/frames/1.jpg`, source: 'upload' });
+    expect(t.vectors.store.get(`f:${t.video.id}:1`)!.metadata).toMatchObject({ kind: 'frame', video_id: t.video.id, t_start: 10, thumb_key: `thumbs/${t.video.id}/1.jpg`, source: 'upload' });
     expect(await t.alarmAt()).toBeNull();
   });
 

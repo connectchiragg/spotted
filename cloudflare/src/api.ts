@@ -10,7 +10,7 @@ import { normalizeQuery, Reranker, search as rankedSearch } from './retrieval';
 import { Presigner } from './storage';
 import * as store from './store';
 import { Video as Job } from './store';
-import { Embedder, vectorIdsOf } from './vectors';
+import { Embedder, thumbKey, vectorIdsOf } from './vectors';
 
 export interface AppDeps {
   db: D1Database | null;
@@ -365,7 +365,7 @@ async function thumb(id: string, index: number, deps: AppDeps) {
   const bucket = need(deps.bucket, 'Storage is not configured');
   const job = await store.getVideo(db, id);
   if (!job || job.archived_at || !(job.result?.thumbs ?? []).includes(index)) throw new HttpError(404, 'Frame not found');
-  const object = await bucket.get(`videos/${job.id}/frames/${index}.jpg`);
+  const object = await bucket.get(thumbKey(job.id, index));
   if (!object) throw new HttpError(404, 'Frame not found');
   return new Response(object.body, { headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=86400', 'X-Content-Type-Options': 'nosniff' } });
 }
@@ -556,7 +556,7 @@ function sameOrigin(request: Request, url: URL): boolean {
  * DELETE /admin/videos/:id (Authorization: Bearer ADMIN_TOKEN): remove a video completely.
  * Order: the D1 row first (so no reader or safety-net nudge can revive it), then the actor
  * (alarm, streams, Gemini file, all DO storage; a tombstone stops in-flight steps), then
- * Vectorize vectors and every R2 object under videos/<id>/. Idempotent: re-run after a failure.
+ * Vectorize vectors and every R2 object under videos/<id>/ and thumbs/<id>/. Idempotent: re-run after a failure.
  */
 async function purgeVideo(id: string, deps: AppDeps) {
   const db = need(deps.db, 'Database is not configured');
@@ -566,14 +566,16 @@ async function purgeVideo(id: string, deps: AppDeps) {
   if (deps.index) await deps.index.deleteByIds(vectorIds(id));
   const deletedObjects: string[] = [];
   if (deps.bucket) {
-    let cursor: string | undefined;
-    do {
-      const page = await deps.bucket.list({ prefix: `videos/${id}/`, cursor });
-      const keys = page.objects.map((o) => o.key);
-      if (keys.length) await deps.bucket.delete(keys);
-      deletedObjects.push(...keys);
-      cursor = page.truncated ? page.cursor : undefined;
-    } while (cursor);
+    for (const prefix of [`videos/${id}/`, `thumbs/${id}/`]) {
+      let cursor: string | undefined;
+      do {
+        const page = await deps.bucket.list({ prefix, cursor });
+        const keys = page.objects.map((o) => o.key);
+        if (keys.length) await deps.bucket.delete(keys);
+        deletedObjects.push(...keys);
+        cursor = page.truncated ? page.cursor : undefined;
+      } while (cursor);
+    }
   }
   return json({ id, d1_row_deleted: Boolean(row), r2_objects_deleted: deletedObjects, vectors_deleted: Boolean(deps.index),
     gemini_files_deleted: actor?.gemini_files_deleted ?? [], actor_purged: Boolean(actor) });

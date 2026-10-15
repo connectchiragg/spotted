@@ -61,8 +61,8 @@ export function summaryText(result: any): string {
   return `Summary: ${result.summary}\nTags: ${labels}${speech ? `\nSpeech: ${speech}` : ''}`;
 }
 
-/** R2 key of frame i's stored JPEG (also its thumbnail). */
-export const thumbKey = (videoId: string, i: number) => `videos/${videoId}/frames/${i}.jpg`;
+/** R2 key of frame i's stored JPEG (also its thumbnail). Outside videos/, so the 7-day lifecycle rule for originals keeps it. */
+export const thumbKey = (videoId: string, i: number) => `thumbs/${videoId}/${i}.jpg`;
 
 export function vectorIdsOf(videoId: string): string[] {
   return [`s:${videoId}`, ...Array.from({ length: MAX_TRANSCRIPT_WINDOWS }, (_, n) => `t:${videoId}:${n}`), ...Array.from({ length: 40 }, (_, i) => `f:${videoId}:${i}`)];
