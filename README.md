@@ -2,9 +2,15 @@
 
 **Find the moment.** Search your videos in plain language, such as "wildlife", "goal celebration" or "ambulance", and get the clip, the moment and the frame that proves it.
 
-Live at **https://framer.haciensus.com** (private, behind Cloudflare Access; the domain and the `framer-cf-*` resources keep the original name) · Portfolio: **https://haciensus.com**
+[![Spotted demo: searching "ambulance" finds a football clip and zooms into the ambulance at 0:10](docs/media/spotted-demo.gif)](docs/media/spotted-demo.mp4)
 
-Spotted is an independent project, formerly called Framer. It runs entirely on Cloudflare's free tier.
+▶ **[Watch the full demo with sound](docs/media/spotted-demo.mp4)** (27 s, 1080p).
+- **What happens:** the search for "ambulance" returns a football clip. The ambulance appears in only 1 of its 7 sampled frames, in the background at 0:10, and Spotted cites that exact frame.
+- **How it was made:** recorded from the real app and data in headless Chrome; the music is an original composition.
+
+**Live:** https://framer.haciensus.com (private, behind Cloudflare Access) · **Portfolio:** https://haciensus.com
+
+An independent project, formerly called Framer, running entirely on Cloudflare's free tier.
 
 ## What it does
 
