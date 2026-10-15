@@ -55,8 +55,20 @@ bold "1/4  Cloudflare Access: protect $NEW with the same rules as $OLD"
 if [[ -z "${CLOUDFLARE_ACCESS_TOKEN:-}" ]]; then
   read -r -s -p "  Cloudflare API token (Access: Apps and Policies - Edit), input hidden: " CLOUDFLARE_ACCESS_TOKEN; echo
 fi
+CLOUDFLARE_ACCESS_TOKEN=$(printf '%s' "$CLOUDFLARE_ACCESS_TOKEN" | tr -d '[:space:]')   # stray spaces/newlines from pasting
 [[ -n "$CLOUDFLARE_ACCESS_TOKEN" ]] || die "No token given."
-cf "$CLOUDFLARE_ACCESS_TOKEN" GET "/accounts/$ACCOUNT_ID/access/apps?per_page=100" > "$WORK/apps.json" || die "Could not list Access applications (check the token's permissions)."
+# Check the token itself first, so a wrong kind of key gets a clear message.
+verify=$(curl -sS "$API/user/tokens/verify" -H "Authorization: Bearer $CLOUDFLARE_ACCESS_TOKEN" || true)
+if ! python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d.get("success") and d["result"].get("status")=="active" else 1)' "$verify" 2>/dev/null; then
+  echo "  That is not a valid, active API token (${#CLOUDFLARE_ACCESS_TOKEN} characters were pasted; API tokens are about 40)."
+  echo "  - Not the Global API Key, and not the token's ID: copy the token value shown once after \"Create Token\"."
+  echo "  - Create: My Profile -> API Tokens -> Create Token -> Create Custom Token ->"
+  echo "    Permissions: Account | Access: Apps and Policies | Edit; Account Resources: Include | your account."
+  die "Run the script again with the new token."
+fi
+ok "Token is valid."
+cf "$CLOUDFLARE_ACCESS_TOKEN" GET "/accounts/$ACCOUNT_ID/access/apps?per_page=100" > "$WORK/apps.json" \
+  || die "The token is valid but cannot read Access applications: add the permission Account | Access: Apps and Policies | Edit, for this account."
 python3 - "$WORK/apps.json" "$OLD" "$NEW" "$WORK/create.json" > "$WORK/app.env" <<'PY' || die "No Access application protects $OLD in this account."
 import json, sys
 apps, old, new, out = json.load(open(sys.argv[1]))["result"], sys.argv[2], sys.argv[3], sys.argv[4]
