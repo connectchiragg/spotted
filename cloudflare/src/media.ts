@@ -93,7 +93,7 @@ export function workersAiWhisper(ai: Ai, model: string): Transcriber {
         out = await ai.run(model as any, { ...input, vad_filter: true, condition_on_previous_text: false } as any);
       } catch (error) {
         const message = String((error as Error)?.message ?? error);
-        // A video without an audio track, or pure silence, is not an error for Framer.
+        // A video without an audio track, or pure silence, is not an error for Spotted.
         if (/\b3030\b|decode audio|no audio|audio stream|empty/i.test(message)) return [];
         if (/429|capacity|rate|neuron/i.test(message)) throw Object.assign(new MediaError('Transcription quota or capacity reached; retrying later'), { quota: true });
         throw new MediaError(`Transcription failed: ${message.slice(0, 160)}`);

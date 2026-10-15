@@ -53,7 +53,7 @@ const cosine = (a: number[], b: number[]) => {
   return na && nb ? dot / Math.sqrt(na * nb) : 0;
 };
 
-/** In-memory Vectorize with the subset of filtering Framer uses ($eq on strings, $in). */
+/** In-memory Vectorize with the subset of filtering Spotted uses ($eq on strings, $in). */
 export function fakeVectorize() {
   const store = new Map<string, { values: number[]; metadata: Record<string, any> }>();
   const matches = (metadata: Record<string, any>, filter: Record<string, any> = {}) =>

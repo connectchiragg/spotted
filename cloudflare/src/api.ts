@@ -185,7 +185,7 @@ export async function reserve(db: D1Database, operation: string, limit: number, 
 export async function publicBudget(request: Request, path: string, deps: AppDeps): Promise<Response | null> {
   if (!deps.settings.publicLimits) return null;
   if (request.method === 'POST' && (path === '/videos' || path === '/videos/tag')) {
-    return json({ detail: 'Use the direct upload flow in the Framer interface.' }, 403);
+    return json({ detail: 'Use the direct upload flow in the Spotted interface.' }, 403);
   }
   if (request.method === 'POST' && path === '/videos/uploads' && !deps.geminiConfigured) {
     return json({ detail: 'Video analysis is being configured. Please try uploading later.' }, 503);

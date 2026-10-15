@@ -1,15 +1,15 @@
-# Framer
+# Spotted
 
 **Find the moment.** Search your videos in plain language, such as "wildlife", "goal celebration" or "ambulance", and get the clip, the moment and the frame that proves it.
 
-Live at **https://framer.haciensus.com** (private, behind Cloudflare Access) · Portfolio: **https://haciensus.com**
+Live at **https://framer.haciensus.com** (private, behind Cloudflare Access; the domain and the `framer-cf-*` resources keep the original name) · Portfolio: **https://haciensus.com**
 
-Framer is an independent project. It runs entirely on Cloudflare's free tier.
+Spotted is an independent project, formerly called Framer. It runs entirely on Cloudflare's free tier.
 
 ## What it does
 
 - **Bring videos in:**
-  - Pick videos in **Google Photos** (Google's own picker; Framer only sees what you pick);
+  - Pick videos in **Google Photos** (Google's own picker; Spotted only sees what you pick);
   - watch a **Google Drive** folder (checked hourly);
   - or **upload** a file.
   - Videos under 100 MB and 10 minutes are accepted; larger ones are skipped and say so.
@@ -98,8 +98,8 @@ npx wrangler dev  # local; AI, Vectorize and Media need a Cloudflare login
   - Labels and descriptions are generated and can be wrong.
   - Thresholds are tuned on a small library.
   - Broad queries are capped at 3 results.
-- **Drive:** checked hourly. Files removed from the folder are archived in Framer (hidden, not deleted), and changed files are analysed again.
+- **Drive:** checked hourly. Files removed from the folder are archived in Spotted (hidden, not deleted), and changed files are analysed again.
 
 ## History
 
-Framer started as a FastAPI + PostgreSQL/pgvector + FFmpeg app on AWS EC2. That version is still in `app/`, `scripts/` and `deploy/`, with its tests in `tests/`. Its instance is stopped. The move to Cloudflare, with its design decisions, is documented in [docs/cloudflare-port.md](docs/cloudflare-port.md).
+Spotted (originally named Framer) started as a FastAPI + PostgreSQL/pgvector + FFmpeg app on AWS EC2. That version is still in `app/`, `scripts/` and `deploy/`, with its tests in `tests/`. Its instance is stopped. The move to Cloudflare, with its design decisions, is documented in [docs/cloudflare-port.md](docs/cloudflare-port.md).

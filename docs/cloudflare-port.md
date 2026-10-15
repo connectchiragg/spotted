@@ -5,6 +5,7 @@ This branch (`cloudflare-port`) moves Framer off its AWS EC2 server. A Worker in
 in `app/` is unchanged and its tests still pass.
 
 Status on 2026-10-16:
+- **Renamed:** the product is now **Spotted** (formerly Framer). This document keeps the old name where it describes history; infrastructure names (`framer-cf-*`, `framer.haciensus.com`) are unchanged.
 - **Live:** https://framer.haciensus.com is served by the Worker `framer-cf-api`, behind Cloudflare Access (Google login). The custom domain is attached in the dashboard.
 - **Resources (free tier):**
   - D1 `framer-cf-db` (migrations 0001–0004);

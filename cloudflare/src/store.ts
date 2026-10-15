@@ -1,4 +1,4 @@
-/** Framer video requests in D1 (the EC2 Postgres "jobs" table, renamed "videos"). */
+/** Spotted video requests in D1 (the EC2 Postgres "jobs" table, renamed "videos"). */
 export const nowSeconds = () => Math.floor(Date.now() / 1000);
 
 export interface Video {
