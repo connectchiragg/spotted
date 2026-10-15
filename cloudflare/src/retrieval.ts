@@ -12,7 +12,10 @@
  * ("wildlife" vs a crocodile frame: 0.03; capitalised "Wildlife": 0.011), and sometimes scores
  * a wrong video high ("indian super league" vs another match: 0.33), so neither model's score
  * is a reliable cutoff on its own (docs/cloudflare-port.md §10.7).
- * Passage texts come from the D1 result JSON, so Vectorize stores no text.
+ * Passage texts come from the D1 result JSON, so Vectorize stores no text. Frame and transcript
+ * passages are reranked with the video's context in front (rerankText): alone, a frame such as
+ * "players … embracing in a joyous celebration" scored 0.21 for "birthday party"; with
+ * "Setting: soccer stadium. Video: … a soccer match …" in front it scores 0.0007.
  */
 import { getVideos, Video as Job } from './store';
 import { nearestFrame, parseVectorId } from './vectors';
@@ -21,6 +24,8 @@ export const CANDIDATE_VIDEOS = 10;
 export const PASSAGES_PER_VIDEO = 4;
 export const MAX_RESULTS = 3;
 export const RELATIVE_CUTOFF = 0.25;
+/** Cite the best frame or speech window over the summary when it scores at least this fraction of the best. */
+export const MOMENT_CITE_FRACTION = 0.5;
 
 export function normalizeQuery(text: string): string {
   text = text.replace(/^\s*(?:please\s+)?(?:i (?:want|would like) to (?:see|find)|(?:can|could) you (?:show|find)(?: me)?|show me|find me)\s+/i, '');
@@ -73,6 +78,22 @@ export function passageOf(job: Job, kind: Citation['kind'], n: number, vectorSco
   return f ? { kind, n, text: f.description, t: times[n] ?? 0, tEnd: null, frame: n, vectorScore } : null;
 }
 
+const firstSentence = (text: string) => (/^.*?[.!?](?:\s|$)/s.exec(text)?.[0] ?? text).trim().slice(0, 200);
+
+/** What the whole video is: its environment tags and the summary's first sentence. */
+export function videoContext(job: Job): string {
+  const r = job.result ?? {};
+  const setting = (r.tags ?? []).filter((t: any) => t.category === 'environment').map((t: any) => t.label).join(', ');
+  const video = r.summary ? `Video: ${firstSentence(r.summary)}` : '';
+  return [setting && `Setting: ${setting}.`, video].filter(Boolean).join(' ');
+}
+
+/** The text the reranker sees: a summary as is, other passages behind their video's context. */
+export function rerankText(job: Job, p: Passage): string {
+  const context = p.kind === 'summary' ? '' : videoContext(job);
+  return context ? `${context}\n${p.text}` : p.text;
+}
+
 export function imageUrl(job: Job, frame: number | null): string | null {
   return frame !== null && (job.result?.thumbs ?? []).includes(frame) ? `/videos/${job.id}/thumbs/${frame}` : null;
 }
@@ -102,12 +123,16 @@ export function rankVideos(groups: { job: Job; passages: (Passage & { rerank: nu
     && (x.best.rerank >= t.minScore || (x.best.rerank >= t.softMinScore && x.cosine >= t.minSimilarity)));
   kept.sort((a, b) => b.best.rerank - a.best.rerank || (a.g.job.id < b.g.job.id ? -1 : 1));
   const top = kept[0]?.best.rerank ?? 0;
-  return kept.filter((x) => x.best.rerank >= RELATIVE_CUTOFF * top).slice(0, MAX_RESULTS).map(({ g, best, cosine }) => ({
-    job: g.job,
-    retrieval: { score: round4(best.rerank), rerank_score: round4(best.rerank), semantic_score: round4(cosine),
-      matched_by: best.rerank >= t.minScore ? 'rerank' : 'rerank+semantic',
-      citation: citationOf(g.job, best), evidence_kinds: [...new Set(g.passages.filter((p) => p.rerank >= t.softMinScore).map((p) => p.kind))] },
-  }));
+  return kept.filter((x) => x.best.rerank >= RELATIVE_CUTOFF * top).slice(0, MAX_RESULTS).map(({ g, best, cosine }) => {
+    const moment = g.passages.filter((p) => p.kind !== 'summary').sort((a, b) => b.rerank - a.rerank)[0];
+    const cited = best.kind === 'summary' && moment && moment.rerank >= MOMENT_CITE_FRACTION * best.rerank ? moment : best;
+    return {
+      job: g.job,
+      retrieval: { score: round4(best.rerank), rerank_score: round4(best.rerank), semantic_score: round4(cosine),
+        matched_by: best.rerank >= t.minScore ? 'rerank' : 'rerank+semantic',
+        citation: citationOf(g.job, cited), evidence_kinds: [...new Set(g.passages.filter((p) => p.rerank >= t.softMinScore).map((p) => p.kind))] },
+    };
+  });
 }
 
 export interface SearchDeps { db: D1Database; index: VectorizeIndex; reranker: Reranker }
@@ -126,8 +151,7 @@ export async function search(deps: SearchDeps, queryVector: number[], query: str
   const videos = (await getVideos(deps.db, ids)).filter((v) => v.status === 'completed' && !v.archived_at && v.result);
   const groups = videos.map((job) => ({ job, passages: byVideo.get(job.id)!.map((h) => passageOf(job, h.kind, h.n, h.score)).filter((p): p is Passage => Boolean(p && p.text)) }))
     .filter((g) => g.passages.length);
-  const flat = groups.flatMap((g) => g.passages);
-  const scores = await deps.reranker.rerank(query, flat.map((p) => p.text));
+  const scores = await deps.reranker.rerank(query, groups.flatMap((g) => g.passages.map((p) => rerankText(g.job, p))));
   let k = 0;
   const reranked = groups.map((g) => ({ job: g.job, passages: g.passages.map((p) => ({ ...p, rerank: scores[k++] ?? 0 })) }));
   return rankVideos(reranked, thresholds);

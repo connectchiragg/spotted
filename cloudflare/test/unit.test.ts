@@ -4,7 +4,7 @@ import { settings as readSettings } from '../src/env';
 import { changeScores, mad, mp4Duration, selectFrames, spriteTiles, spriteWindows, tileTime } from '../src/frames';
 import { Gemini, validateAnswer, validateDescriptions, validateSummary } from '../src/gemini';
 import { authUrl, decryptSecret, encryptSecret, SCOPES } from '../src/google';
-import { normalizeQuery, passageOf, rankVideos } from '../src/retrieval';
+import { normalizeQuery, passageOf, rankVideos, rerankText } from '../src/retrieval';
 
 const T = { minScore: 0.02, softMinScore: 0.008, minSimilarity: 0.53, vectorMargin: 0.07 };
 import { parseVectorId, transcriptWindows } from '../src/vectors';
@@ -162,6 +162,26 @@ describe('index entries and ranking', () => {
   it('still returns nothing for unrelated one-word queries', () => {
     expect(rankVideos(groupsOf({ boar: [0.514, 0.0099], crocodile: [0.483, 0.0045], isl: [0.425, 3.7e-5] }), T)).toEqual([]); // "dog"
     expect(rankVideos(groupsOf({ isl: [0.425, 3.7e-5], aek: [0.408, 3.7e-5], blue: [0.4, 3.7e-5] }), T)).toEqual([]); // "car"
+  });
+
+  it('reranks frames and speech behind the video context, summaries as they are', () => {
+    // "birthday party" matched a goal-celebration frame that never said "soccer" (rerank 0.21 -> 0.0007 with context).
+    const job = { id: 'aek', result: { summary: 'The video captures a soccer match between AEK and LASK. A goal is scored.',
+      tags: [{ label: 'soccer stadium', category: 'environment' }, { label: 'celebrating', category: 'action' }],
+      sampled_timestamps: [0, 12], thumbs: [0, 1], frame_descriptions: [{ frame_index: 1, description: 'Players embrace in a joyous celebration.' }],
+      transcript_windows: [{ start: 0, end: 15, text: 'Goal!' }] } } as any;
+    expect(rerankText(job, passageOf(job, 'frame', 1, 0.5)!)).toBe(
+      'Setting: soccer stadium. Video: The video captures a soccer match between AEK and LASK.\nPlayers embrace in a joyous celebration.');
+    expect(rerankText(job, passageOf(job, 'transcript', 0, 0.5)!)).toMatch(/^Setting: soccer stadium\. Video: .*\nSpeech: Goal!$/);
+    expect(rerankText(job, passageOf(job, 'summary', 0, 0.5)!)).toBe(job.result.summary);
+  });
+
+  it('cites the best moment over the summary when it scores close', () => {
+    const job = { id: 'v', result: { summary: 's', sampled_timestamps: [0, 12], thumbs: [0, 1], frame_descriptions: [{ frame_index: 1, description: 'hug' }] } } as any;
+    const rank = (frame: number) => rankVideos([{ job, passages: [{ ...passageOf(job, 'summary', 0, 0.6)!, rerank: 0.86 }, { ...passageOf(job, 'frame', 1, 0.6)!, rerank: frame }] }], T)[0].retrieval;
+    expect(rank(0.8).citation).toMatchObject({ kind: 'frame', timestamp_seconds: 12 });
+    expect(rank(0.8).score).toBe(0.86); // the video still scores its best passage
+    expect(rank(0.1).citation).toMatchObject({ kind: 'summary', timestamp_seconds: 0 });
   });
 
   it('drops a high rerank score whose video is far from the best vector match', () => {

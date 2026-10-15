@@ -9,7 +9,7 @@
  *   answer          a grounded answer over retrieved evidence with [n] citations.
  */
 const API = 'https://generativelanguage.googleapis.com';
-export const PROMPT_VERSION = 'cf-frames-v2';
+export const PROMPT_VERSION = 'cf-frames-v3';
 
 export class TaggerError extends Error {
   /** A 429 rate/quota limit: waited out without using up the step's failure attempts. */
@@ -68,8 +68,9 @@ audible; when uncertain use appearance language ("wood-like", "appears to").`;
 
 export function describePrompt(): string {
   return `You describe still frames sampled from one video, in chronological order.
-For EVERY frame write one detailed factual paragraph (80-180 words) covering: the overall
-scene and setting; the main objects with color, shape, material and position; any people and
+For EVERY frame write one detailed factual paragraph (80-180 words). Each paragraph must stand
+on its own: open it with the setting and the activity (e.g. "At a soccer match, ..."), even when
+they are unchanged from the previous frame. Then cover: the overall scene and setting; the main objects with color, shape, material and position; any people and
 what they are doing; any legible on-screen text, quoted exactly; camera framing; and how the
 frame differs from the previous one (new objects, movement, scene change). The transcript
 excerpt near each frame is context only: mention speech only if it explains what is visible.

@@ -456,12 +456,12 @@ extracts frames itself, Workers AI transcribes the speech, and Gemini describes 
 
 1. Lowercase the query (after stripping "show me …"), embed it with bge-m3 and take the 100 nearest vectors of any kind.
 2. Group them by video (top 10 videos, 4 passages each) and load the passage texts from the D1 result.
-3. Rerank every passage with `@cf/baai/bge-reranker-base`. A video scores its best passage and is kept if
+3. Rerank every passage with `@cf/baai/bge-reranker-base`. Frame and speech passages go in behind their video's context, "Setting: <environment tags>. Video: <first summary sentence>", so a single frame is never judged without knowing what the video is. A video scores its best passage and is kept if
    - its best bge-m3 cosine is within `SEARCH_VECTOR_MARGIN` (0.07) of the best video's, **and**
    - its rerank score is ≥ `SEARCH_MIN_SCORE` (0.02), **or** ≥ `SEARCH_SOFT_MIN_SCORE` (0.008) with a cosine ≥ `SEARCH_MIN_SIMILARITY` (0.53);
 
    then ≥ 25% of the best video's score, at most 3 results. `retrieval.matched_by` says which rule accepted it (see §10.7).
-4. The citation is that passage's kind and time, with the nearest frame's thumbnail (`GET /videos/:id/thumbs/:i`, streamed from R2 behind Access).
+4. The citation is that passage's kind and time (a frame or speech window instead of the summary when it scores ≥ 50% of the best), with the nearest frame's thumbnail (`GET /videos/:id/thumbs/:i`, streamed from R2 behind Access).
 5. `/query` sends the cited passages (with `m:ss`) to Flash Lite, which must cite `[n]` inline. It reports `answer_model` and `answer_usage`.
 
 The thresholds were retuned on the owner's real library on 2026-10-15 (§10.7). Retune them again once the library is larger: the fit is on 5 videos.
@@ -557,4 +557,17 @@ The remaining errors are all confident reranker mistakes that no threshold separ
 - **No lexical fallback.** No failure was lexical: proper nouns and numbers ("Nivia", "van Mieghem", "AEK", "3-2") were found by the reranker once the query is lowercased, and "wildlife" never occurs literally, so keyword matching would not have helped.
 - **`DUPLICATE_SIMILARITY_THRESHOLD` stays 0.97.** Distinct real clips reach a summary cosine of 0.766 (two soccer clips), and a reworded summary of the same clip scores 0.774. Summary vectors cannot tell a re-import from a similar clip at any threshold, so 0.97 only flags near-identical text. The check is advisory, and exact re-imports are already blocked by `(source, source_id)`. A content hash or a frame hash would be the real fix.
 - Vectorize once returned 19 of 35 vectors for a query (approximate search); a rerun returned all 35. Both wildlife clips were in the 19.
+
+**Follow-up the same day: context in front of every passage.**
+- **The problem:** "birthday party" returned both goal clips, because the AEK frame says "players … embracing and shouting in celebration" without ever naming the sport (rerank 0.21).
+- **What Apple Photos does:** compared on the same clips (read with `osxphotos` from the owner's library), every stored segment caption restates the setting, e.g. "a group of men in soccer uniforms standing on a soccer field and hugging each other". The labels form a chain (Football → Team Sport → Ball Games → Sport), and the boar is "Pig" plus "Wildlife". Photos found "wildlife", ignored the football clips for "birthday party", and missed "ambulance".
+- **The fix:**
+  - the reranker now sees "Setting: … Video: …" in front of each frame and speech passage (`rerankText`; no re-index needed, since passages are read from D1);
+  - the describe prompt (`cf-frames-v3`) asks every new paragraph to open with the setting and activity.
+- **Result on the 48 queries,** same thresholds: misses 0 → 0, wrong videos 8 → 4.
+  - "birthday party" 0.21 → 0.0007 (no results);
+  - "basketball" 0.99 → 0.06 (still wrong: it passes 0.02);
+  - "ambulance" 0.085 → 0.181.
+- **Thresholds:** raising `SEARCH_MIN_SCORE` to 0.05 would leave 2 wrong but puts "animals" → crocodile (0.053) on the edge, so it stays 0.02.
+- **Citations:** the prefix made summaries win citations ("goal celebration" cited 0:00 instead of 0:12), so a frame or speech window is cited when it scores ≥ 50% of the best passage.
 
