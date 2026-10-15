@@ -362,6 +362,7 @@ Run without a browser against `framer-cf-api`, with a 5 s, 45 KB synthetic MP4 (
 ## 8. Operations: Access, admin purge and deleting videos
 
 - **Access.** `framer.haciensus.com` is behind Cloudflare Access (Google login), and `workers_dev` is `false`, so every route, including `/health`, needs an Access session. The custom domain is attached in the dashboard; `wrangler deploy` leaves it in place, because the config has no `routes`.
+- **Signed-in user.** `GET /me` returns `{email, signed_in, source, logout_url}` from the `Cf-Access-Authenticated-User-Email` header that Access adds to every request. The header is trusted without verifying `Cf-Access-Jwt-Assertion`: `workers_dev` and `preview_urls` are off and the custom domain is the only route, so every request comes through Access, and the identity is only displayed (no authorization depends on it). Verifying the JWT would need the Access team domain and application AUD pinned as vars; add that before the email is ever used for a decision. The browser asks `/cdn-cgi/access/get-identity` for a display name (best effort), shows initials, the email and a menu with Access, Google and live-update state and **Sign out** (`/cdn-cgi/access/logout`). Under `wrangler dev` (no Access) it shows "Local dev".
 - **Deleting a video completely:** `DELETE /admin/videos/:id` with `Authorization: Bearer $FRAMER_ADMIN_TOKEN` (Worker secret `ADMIN_TOKEN`; the value is in the ignored `instawork/.env`).
   - What it removes, in order:
     1. the D1 row;
@@ -416,8 +417,9 @@ extracts frames itself, Workers AI transcribes the speech, and Gemini describes 
 - **Google Photos** (primary). Since March 2025 the Library API cannot read a user's library, so Framer uses the [Picker API](https://developers.google.com/photos/picker):
   1. `POST /photos/sessions` creates a session; the UI opens `pickerUri + /autoclose`.
   2. The **LibraryDO** alarm polls `sessions.get` at Google's `pollInterval` until `mediaItemsSet`.
-  3. It runs `mediaItems.list` and creates one video per picked VIDEO, with `(source, source_id)` unique, so a re-pick is a no-op.
-  4. The VideoDO downloads `baseUrl + "=dv"` with the bearer token. baseUrls live 60 minutes; an expired one is refreshed from the session while it lasts, and otherwise the video fails with "pick the video again".
+  3. It marks the session `importing`, runs `mediaItems.list` and creates one video per picked VIDEO, with `(source, source_id)` unique, so a re-pick is a no-op.
+  4. The VideoDO downloads `baseUrl + "=dv"` with the bearer token, reporting byte progress (`progress.bytes_done` / `bytes_total`, at most one event per 4 MiB and second) while it streams into R2. baseUrls live 60 minutes; an expired one is refreshed from the session while it lasts, and otherwise the video fails with "pick the video again".
+  - **Import progress in the UI.** `GET /photos/sessions/:id` and `GET /photos/sessions/latest` (the newest session, or `null`) return the session's status (`waiting` → `importing` → `imported`, or `expired`/`failed`), its counts and `video_ids`, the videos it created. The sidebar shows an indeterminate bar while the picker is open, then one row per picked video with its own pipeline progress (copy with MB → probe → frames → transcribe → describe → summarize → index) from the per-video WebSockets, and an overall bar. A reload resumes the latest session if it is active or recent.
 - **Google Drive** (secondary).
   - `PUT /drive/folder {"folder": "<link or id>"}` sets the folder.
   - The first LibraryDO run takes `changes.getStartPageToken`, then lists the folder (videos modified in the last 24 months).

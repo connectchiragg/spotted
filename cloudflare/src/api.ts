@@ -521,11 +521,37 @@ async function createPickerSession(deps: AppDeps) {
   return json({ id: session.id, picker_uri: `${session.pickerUri.replace(/\/$/, '')}/autoclose`, status: 'waiting' }, 201);
 }
 
-async function pickerSession(id: string, deps: AppDeps) {
+/**
+ * GET /photos/sessions/:id, or /photos/sessions/latest (the newest session, or null): the
+ * session's status (waiting | importing | imported | expired | failed), its counts, and the
+ * ids of the videos it created, so the UI can follow each one's own pipeline progress.
+ */
+async function pickerSession(id: string | null, deps: AppDeps) {
   const db = need(deps.db, 'Database is not configured');
-  const row = await db.prepare('SELECT id, status, error, imported, skipped, created_at, updated_at FROM picker_sessions WHERE id=?1').bind(id).first();
-  if (!row) throw new HttpError(404, 'Picker session not found');
-  return json(row);
+  const columns = 'SELECT id, status, error, imported, skipped, created_at, updated_at FROM picker_sessions';
+  const row = await (id === null ? db.prepare(`${columns} ORDER BY created_at DESC LIMIT 1`) : db.prepare(`${columns} WHERE id=?1`).bind(id))
+    .first<Record<string, unknown>>();
+  if (!row) {
+    if (id === null) return json(null);
+    throw new HttpError(404, 'Picker session not found');
+  }
+  const { results } = await db.prepare(
+    "SELECT id FROM videos WHERE source='photos' AND json_extract(source_meta, '$.session_id')=?1 ORDER BY created_at, id",
+  ).bind(row.id).all<{ id: string }>();
+  return json({ ...row, video_ids: results.map((r) => r.id) });
+}
+
+/**
+ * GET /me: who is signed in, for the header. Cloudflare Access sets
+ * Cf-Access-Authenticated-User-Email on every request it lets through. The header is trusted
+ * without verifying Cf-Access-Jwt-Assertion: workers_dev and preview_urls are off and the
+ * Worker has no other route, so every request reaches it through Access, and the identity is
+ * only displayed (no decision depends on it). Without Access (wrangler dev) it answers
+ * {email: null}. The display name, if any, comes from /cdn-cgi/access/get-identity in the browser.
+ */
+function me(request: Request) {
+  const email = request.headers.get('cf-access-authenticated-user-email')?.trim() || null;
+  return json({ email, signed_in: email !== null, source: email ? 'access' : 'none', logout_url: email ? '/cdn-cgi/access/logout' : null });
 }
 
 /** PUT /drive/folder {"folder": "<id or URL>"}: sync this folder (replaces any previous one). */
@@ -609,12 +635,13 @@ export async function handle(request: Request, deps: AppDeps): Promise<Response>
       return await purgeVideo(decodeURIComponent(admin[1]), deps);
     }
     if (method !== 'GET' && method !== 'HEAD' && !sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request refused');
+    if (method === 'GET' && path === '/me') return me(request);
     if (method === 'GET' && path === '/oauth/google/start') return await googleStart(deps);
     if (method === 'GET' && path === '/oauth/google/callback') return await googleCallback(url, deps);
     if (method === 'GET' && path === '/google/status') return await googleStatus(deps);
     if (method === 'POST' && path === '/photos/sessions') return await createPickerSession(deps);
     const session = PICKER_SESSION.exec(path);
-    if (session && method === 'GET') return await pickerSession(decodeURIComponent(session[1]), deps);
+    if (session && method === 'GET') return await pickerSession(session[1] === 'latest' ? null : decodeURIComponent(session[1]), deps);
     if (method === 'PUT' && path === '/drive/folder') return await setDriveFolder(request, deps);
     if (method === 'POST' && path === '/drive/sync') {
       if (deps.library) await libraryStub(deps.library).poke();

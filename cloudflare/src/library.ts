@@ -62,7 +62,7 @@ export class LibraryDO extends DurableObject<Env> {
 
   /** Returns when to poll again (Infinity if no session is waiting). */
   private async pollPickerSessions(deps: LibraryDeps): Promise<number> {
-    const { results } = await deps.db.prepare("SELECT id, expire_time FROM picker_sessions WHERE status='waiting'").all<{ id: string; expire_time: string | null }>();
+    const { results } = await deps.db.prepare("SELECT id, expire_time FROM picker_sessions WHERE status IN ('waiting', 'importing')").all<{ id: string; expire_time: string | null }>();
     let next = Infinity;
     for (const row of results) {
       if (row.expire_time && Date.parse(row.expire_time) < Date.now()) {
@@ -80,6 +80,9 @@ export class LibraryDO extends DurableObject<Env> {
         next = Math.min(next, Date.now() + durationMs(session.pollingConfig?.pollInterval, DEFAULT_POLL_MS));
         continue;
       }
+      // 'importing' while the picked items are listed and their videos created (the UI shows it);
+      // a crash here leaves the session 'importing', which the next alarm resumes (upserts are idempotent).
+      await this.sessionStatus(deps, row.id, 'importing', null);
       const items = await deps.google.listPickedItems(row.id);
       const counts = await this.importPicked(deps, row.id, items);
       await deps.db.prepare("UPDATE picker_sessions SET status='imported', imported=?2, skipped=?3, updated_at=?4 WHERE id=?1")

@@ -196,6 +196,24 @@ describe('VideoDO: the frame + transcript pipeline', () => {
     expect(t.objects[t.video.object_key].size).toBe(bytes.length);
     expect((await store.getVideo(db, t.video.id))!).toMatchObject({ status: 'completed', uploaded: 1, expected_size: bytes.length, source: 'photos' });
     expect(t.vectors.store.get(`s:${t.video.id}`)!.metadata).toMatchObject({ source: 'photos', source_id: t.video.source_id });
+    // The copy reported byte progress as a visible 'progress' event (bytes_total from Content-Length).
+    const progress = await runInDurableObject<VideoDO, any[]>(t.stub, (_o, s) =>
+      s.storage.sql.exec("SELECT data FROM events WHERE type='progress'").toArray().map((r: any) => JSON.parse(r.data).progress));
+    expect(progress.length).toBeGreaterThan(0);
+    expect(progress[0]).toMatchObject({ stage: 'Copying from Google', bytes_total: null, percent: 10 }); // no Content-Length, no size known
+    expect(progress[0].bytes_done).toBeGreaterThanOrEqual(4 * 1024 * 1024);
+  });
+
+  it('copy progress is a fraction of the Content-Length', async () => {
+    const bytes = fakeMp4(30, 6 * 1024 * 1024);
+    const google = { downloadPhotoVideo: async () => new Response(bytes, { headers: { 'content-length': String(bytes.length) } }) } as Partial<Google>;
+    const t = await setup({ source: 'photos', google });
+    await t.stub.start(t.video.id);
+    expect((await t.drive())!.step).toBe('done');
+    const progress = await runInDurableObject<VideoDO, any[]>(t.stub, (_o, s) =>
+      s.storage.sql.exec("SELECT data FROM events WHERE type='progress'").toArray().map((r: any) => JSON.parse(r.data).progress));
+    expect(progress[0].bytes_total).toBe(bytes.length);
+    expect(progress[0].percent).toBe(10 + Math.round((9 * progress[0].bytes_done) / bytes.length));
   });
 
   it('a Photos download over 100 MB is skipped and nothing is stored', async () => {

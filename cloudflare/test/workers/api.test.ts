@@ -86,3 +86,25 @@ describe('budgets count once per idempotency key', () => {
     expect(bad.status).toBe(422);
   });
 });
+
+describe('identity and Photos import status', () => {
+  it('GET /me reads the Access email header, and answers signed_in:false without Access', async () => {
+    const app = appDeps(db);
+    const signed = await handle(new Request('https://x/me', { headers: { 'Cf-Access-Authenticated-User-Email': 'owner@example.com' } }), app);
+    expect(await signed.json()).toEqual({ email: 'owner@example.com', signed_in: true, source: 'access', logout_url: '/cdn-cgi/access/logout' });
+    expect(await (await handle(new Request('https://x/me'), app)).json()).toEqual({ email: null, signed_in: false, source: 'none', logout_url: null });
+  });
+
+  it('picker session status lists the videos it created; /latest is the newest session or null', async () => {
+    await db.prepare('DELETE FROM picker_sessions').run();
+    const app = appDeps(db);
+    expect(await (await handle(new Request('https://x/photos/sessions/latest'), app)).json()).toBeNull();
+    await db.prepare("INSERT INTO picker_sessions (id, picker_uri, status, imported, created_at, updated_at) VALUES ('old', 'u', 'imported', 0, '2026-10-01', '2026-10-01'), ('s9', 'u', 'importing', 0, '2026-10-02', '2026-10-02')").run();
+    const { video } = await store.upsertSourceVideo(db, { source: 'photos', sourceId: 'm1', filename: 'a.mp4', contentType: 'video/mp4', size: 10,
+      meta: { session_id: 's9' }, status: 'pending' });
+    await store.upsertSourceVideo(db, { source: 'photos', sourceId: 'm2', filename: 'b.mp4', contentType: 'video/mp4', size: 10, meta: { session_id: 'old' }, status: 'pending' });
+    expect(await (await handle(new Request('https://x/photos/sessions/latest'), app)).json()).toMatchObject({ id: 's9', status: 'importing', video_ids: [video.id] });
+    expect(await (await handle(new Request('https://x/photos/sessions/s9'), app)).json()).toMatchObject({ id: 's9', video_ids: [video.id] });
+    expect((await handle(new Request('https://x/photos/sessions/nope'), app)).status).toBe(404);
+  });
+});

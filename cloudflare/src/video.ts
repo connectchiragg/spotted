@@ -58,6 +58,7 @@ export const soundKey = (videoId: string) => `videos/${videoId}/sound.m4a`;
 const SPRITE_W = 64;
 const SPRITE_H = 36;
 const PART_BYTES = 10 * 1024 * 1024; // R2 multipart part size (min 5 MiB except the last)
+const PROGRESS_BYTES = 4 * 1024 * 1024; // copy progress is reported at most every 4 MiB
 
 export type Step = 'fetch' | 'probe' | 'select' | 'frames' | 'transcribe' | 'describe' | 'summarize' | 'index' | 'done' | 'failed' | 'skipped';
 export type EventType = 'status' | 'step' | 'progress' | 'done' | 'failed' | 'skipped';
@@ -96,7 +97,8 @@ export interface IngestState {
   sound?: 'stored' | 'none';
   usage: { gemini_calls: number; prompt_tokens: number; output_tokens: number };
   indexed: { possible_duplicate: unknown } | null;
-  progress: { stage: string; percent: number; eta_seconds: number | null } | null;
+  /** bytes_done/bytes_total only while copying a Google source into R2 (bytes_total null if unknown). */
+  progress: { stage: string; percent: number; eta_seconds: number | null; bytes_done?: number; bytes_total?: number | null } | null;
   started_at: string;
   updated_at: string;
 }
@@ -393,7 +395,20 @@ export class VideoDO extends DurableObject<Env> {
       await response.body?.cancel();
       throw new SkipError(overLimit(max));
     }
-    const size = await this.streamToR2(deps, state, video.object_key, response.body!, video.content_type || 'video/mp4', max);
+    // Byte progress while copying (the "upload" the owner sees): at most one visible event per
+    // PROGRESS_BYTES and second, i.e. a handful of D1 writes for a <100 MB video.
+    const expected = Number.isFinite(declared) && declared > 0 ? declared : Number(video.expected_size) || null;
+    let reported = 0;
+    let reportedAt = 0;
+    const onBytes = async (done: number) => {
+      if (done - reported < PROGRESS_BYTES || Date.now() - reportedAt < 1000) return;
+      reported = done;
+      reportedAt = Date.now();
+      const fraction = expected ? Math.min(1, done / expected) : null;
+      state = await this.commit({ ...state, progress: { stage: STAGE.fetch[0], percent: STAGE.fetch[1] + (fraction === null ? 0 : Math.round(9 * fraction)),
+        eta_seconds: null, bytes_done: done, bytes_total: expected } }, 'progress', {}, deps);
+    };
+    const size = await this.streamToR2(deps, state, video.object_key, response.body!, video.content_type || 'video/mp4', max, onBytes);
     this.hook(state, 'fetch:stored');
     return this.fetched(deps, state, video, size);
   }
@@ -404,7 +419,8 @@ export class VideoDO extends DurableObject<Env> {
   }
 
   /** Multipart upload in 10 MiB parts; aborts (and skips the video) past the size limit. */
-  private async streamToR2(deps: VideoDeps, state: IngestState, key: string, body: ReadableStream<Uint8Array>, contentType: string, max: number): Promise<number> {
+  private async streamToR2(deps: VideoDeps, state: IngestState, key: string, body: ReadableStream<Uint8Array>, contentType: string, max: number,
+    onBytes: (done: number) => Promise<void> = async () => {}): Promise<number> {
     const upload = await deps.bucket.createMultipartUpload(key, { httpMetadata: { contentType } });
     await this.ctx.storage.put('mpu', { key, uploadId: upload.uploadId });
     const parts: R2UploadedPart[] = [];
@@ -437,6 +453,7 @@ export class VideoDO extends DurableObject<Env> {
             buffer = new Uint8Array(PART_BYTES);
           }
         }
+        await onBytes(total);
       }
       await flush();
       if (!total) throw new PermanentError('The source file is empty');
