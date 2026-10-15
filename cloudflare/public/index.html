@@ -415,7 +415,7 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 
   <form class="search" id="search-form" role="search" aria-label="Search your footage">
     <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
     <label for="search-input" class="sr-only">Describe a scene, an object or something said</label>
-    <input id="search-input" type="search" placeholder="Describe a moment…" autocomplete="off" enterkeyhint="search" maxlength="500" aria-describedby="search-hint">
+    <input id="search-input" type="search" placeholder="Describe a moment, e.g. “crocodile entering the water”" autocomplete="off" enterkeyhint="search" maxlength="500" aria-describedby="search-hint">
     <span id="search-hint" class="sr-only">Press slash to focus search from anywhere.</span>
     <kbd aria-hidden="true">/</kbd>
     <button class="icon-btn clear" id="search-clear" type="button" aria-label="Clear search" hidden><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
@@ -1358,7 +1358,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 /* ------------------------------------------------------------------ start */
-{ const narrow = matchMedia('(max-width: 640px)'); const setPlaceholder = () => { $('search-input').placeholder = narrow.matches ? 'Search your footage' : 'Describe a moment, e.g. “crocodile entering the water”' }; setPlaceholder(); narrow.addEventListener('change', setPlaceholder) }
+{ const narrow = matchMedia('(max-width: 900px)'); const setPlaceholder = () => { $('search-input').placeholder = narrow.matches ? 'Search your footage' : 'Describe a moment, e.g. “crocodile entering the water”' }; setPlaceholder(); narrow.addEventListener('change', setPlaceholder) }
 renderHistory();
 loadMe();
 loadGoogle();
