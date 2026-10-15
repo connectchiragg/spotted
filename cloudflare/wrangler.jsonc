@@ -18,21 +18,31 @@
     "run_worker_first": true
   },
 
-  // No cron. An explicit empty list removes the old per-minute trigger on deploy;
-  // omitting "triggers" would leave it in place.
+
+  // No cron. An explicit empty list removes crons on deploy; omitting "triggers" would leave
+  // them in place (docs/cloudflare-port.md §9).
   "triggers": { "crons": [] },
 
-  // Actor per video: VideoDO (SQLite-backed, the only kind on Workers Free) runs one
-  // video's ingestion from its own alarm and serves that video's SSE (src/video.ts).
+  // Actor per video: VideoDO (SQLite-backed, the only kind on Workers Free) runs one video's
+  // ingestion from its own alarm and serves that video's hibernatable WebSocket (src/video.ts).
+  // LibraryDO (one object) polls Google Photos picker sessions and the Drive folder (src/library.ts).
   // v1/v2 created the earlier FramerScheduler/VideoEvents classes; v3 deletes them.
-  "durable_objects": { "bindings": [{ "name": "VIDEO", "class_name": "VideoDO" }] },
+  "durable_objects": { "bindings": [
+    { "name": "VIDEO", "class_name": "VideoDO" },
+    { "name": "LIBRARY", "class_name": "LibraryDO" }
+  ] },
   "migrations": [
-        { "tag": "v1-scheduler", "new_sqlite_classes": ["FramerScheduler"] },
-        { "tag": "v2-video-events", "new_sqlite_classes": ["VideoEvents"] },
-        { "tag": "v3-actor-per-video", "deleted_classes": ["FramerScheduler", "VideoEvents"], "new_sqlite_classes": ["VideoDO"] }
-      ],
+    { "tag": "v1-scheduler", "new_sqlite_classes": ["FramerScheduler"] },
+    { "tag": "v2-video-events", "new_sqlite_classes": ["VideoEvents"] },
+    { "tag": "v3-actor-per-video", "deleted_classes": ["FramerScheduler", "VideoEvents"], "new_sqlite_classes": ["VideoDO"] },
+    { "tag": "v4-library", "new_sqlite_classes": ["LibraryDO"] }
+  ],
 
   "ai": { "binding": "AI" },
+
+  // Media Transformations binding: frames, spritesheets and audio from an R2 stream
+  // (input < 100 MB and <= 10 min). No public origin needed, so Access is not in the way.
+  "media": { "binding": "MEDIA" },
 
   // Created (free tier): `wrangler d1 create framer-cf-db`.
   // Schema: `wrangler d1 migrations apply framer-cf-db --remote`.
@@ -40,80 +50,68 @@
     { "binding": "DB", "database_name": "framer-cf-db", "database_id": "88d79c4f-1ca9-42d7-9d26-9e7bea9ba2b7", "migrations_dir": "migrations" }
   ],
 
-  // Created (free tier): 384 dims, cosine, metadata indexes on "kind" and "video_id".
+  // Created (free tier): `wrangler vectorize create framer-cf-m3 --dimensions 1024 --metric cosine`
+  // plus metadata indexes on "kind" and "video_id" (string). Free tier stores 5M dimensions,
+  // i.e. ~4,880 vectors at 1024 d (~200 videos at MAX_FRAMES=16). The old 384-d index
+  // framer-cf-vectors is unused (empty).
   "vectorize": [
-    { "binding": "VECTORIZE", "index_name": "framer-cf-vectors" }
+    { "binding": "VECTORIZE", "index_name": "framer-cf-m3" }
   ],
 
-  // OWNER: R2 must be enabled in the dashboard first, then
-  // `wrangler r2 bucket create framer-cf-videos`. Until then a deploy of this
-  // top-level environment fails; the "smoke" environment below has no R2.
   "r2_buckets": [
     { "binding": "VIDEOS", "bucket_name": "framer-cf-videos" }
   ],
 
-  // Gemini 3.1 Flash Lite free tier on the key's project: 15 RPM, 500 RPD (shared by
-  // tagging and /query). 10 uploads (<= 5 tries each) + 100 queries/day stay well under it.
+  // Gemini 3.1 Flash Lite free tier on the key's project: 15 RPM, 500 RPD, shared by frame
+  // descriptions (2 calls per 16-frame video), summaries (1 per video) and /query (1 each).
+  // Imports start IMPORT_STAGGER_S apart to stay under 15 RPM; 429s wait without failing.
   "vars": {
+    "PUBLIC_ORIGIN": "https://framer.haciensus.com",
+    "GOOGLE_CLIENT_ID": "157133842980-16181ouhjshhpjcjgjpa3hf8nf1imik0.apps.googleusercontent.com",
     "R2_ACCOUNT_ID": "0187f7c38bf35a8abcc4e9f9abfa213e",
     "R2_BUCKET_NAME": "framer-cf-videos",
     "GEMINI_MODEL": "gemini-3.1-flash-lite",
-    "EMBEDDING_MODEL": "@cf/baai/bge-small-en-v1.5",
-    "MAX_UPLOAD_MB": "400",
+    "EMBEDDING_MODEL": "@cf/baai/bge-m3",
+    "RERANK_MODEL": "@cf/baai/bge-reranker-base",
+    "WHISPER_MODEL": "@cf/openai/whisper-large-v3-turbo",
+    "MAX_SOURCE_MB": "100",
     "MAX_VIDEO_SECONDS": "600",
     "MAX_FRAMES": "16",
-    "SEARCH_MIN_SIMILARITY": "0.60",
-    "DUPLICATE_SIMILARITY_THRESHOLD": "0.95",
+    "FRAME_MAX_SIDE": "1024",
+    "CANDIDATE_INTERVAL_S": "1",
+    "MIN_FRAME_GAP_S": "2",
+    "MAX_FRAME_GAP_S": "8",
+    "CHANGE_THRESHOLD": "12",
+    "DESCRIBE_BATCH": "8",
+    "WHISPER_DIRECT_MAX_MB": "10",
+    "SEARCH_MIN_SCORE": "0.02",
+    "DUPLICATE_SIMILARITY_THRESHOLD": "0.97",
     "PUBLIC_DEMO_LIMITS": "true",
     "DAILY_UPLOAD_LIMIT": "10",
     "DAILY_QUERY_LIMIT": "100",
-    "QUEUE_STEPS_PER_TICK": "6"
+    "IMPORT_STAGGER_S": "20",
+    "DRIVE_POLL_MINUTES": "15",
+    "DRIVE_LOOKBACK_MONTHS": "24"
   },
-  // Secrets (set with `wrangler secret put`, never committed):
-  //   GEMINI_API_KEY, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+  // Secrets (set with `wrangler secret put`, never committed): GEMINI_API_KEY, R2_ACCESS_KEY_ID,
+  // R2_SECRET_ACCESS_KEY, ADMIN_TOKEN, TOKEN_ENC_KEY, GOOGLE_CLIENT_SECRET (set by the owner).
 
   "observability": { "enabled": true },
 
   "env": {
-    // Pre-cutover deployment without R2 or a cron (framer-cf-smoke.<subdomain>.workers.dev):
-    // UI, history, search and query run against the real D1, Vectorize and Workers AI;
-    // uploads answer 503 until R2 exists. Shares the D1 database and Vectorize index.
-    "smoke": {
-      "name": "framer-cf-smoke",
-      "triggers": { "crons": [] },
-      "ai": { "binding": "AI" },
-      "d1_databases": [
-        { "binding": "DB", "database_name": "framer-cf-db", "database_id": "88d79c4f-1ca9-42d7-9d26-9e7bea9ba2b7", "migrations_dir": "migrations" }
-      ],
-      "vectorize": [
-        { "binding": "VECTORIZE", "index_name": "framer-cf-vectors" }
-      ],
-      "vars": {
-        "R2_ACCOUNT_ID": "0187f7c38bf35a8abcc4e9f9abfa213e",
-        "R2_BUCKET_NAME": "framer-cf-videos",
-        "GEMINI_MODEL": "gemini-3.1-flash-lite",
-        "EMBEDDING_MODEL": "@cf/baai/bge-small-en-v1.5",
-        "MAX_UPLOAD_MB": "400",
-        "MAX_VIDEO_SECONDS": "600",
-        "MAX_FRAMES": "16",
-        "SEARCH_MIN_SIMILARITY": "0.60",
-        "DUPLICATE_SIMILARITY_THRESHOLD": "0.95",
-        "PUBLIC_DEMO_LIMITS": "true",
-        "DAILY_UPLOAD_LIMIT": "10",
-        "DAILY_QUERY_LIMIT": "100",
-        "QUEUE_STEPS_PER_TICK": "6"
-      }
-    },
-    // Test-only (vitest.workers.config.ts): local Miniflare D1, never deployed.
+    // Test-only (vitest.workers.config.ts): local Miniflare D1 and Durable Objects, never deployed.
     "test": {
       "name": "framer-cf-test",
       "triggers": { "crons": [] },
-      "durable_objects": { "bindings": [{ "name": "VIDEO", "class_name": "VideoDO" }] },
-      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["VideoDO"] }],
+      "durable_objects": { "bindings": [
+        { "name": "VIDEO", "class_name": "VideoDO" },
+        { "name": "LIBRARY", "class_name": "LibraryDO" }
+      ] },
+      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["VideoDO", "LibraryDO"] }],
       "d1_databases": [
         { "binding": "DB", "database_name": "framer-cf-test", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
       ],
-      "vars": { "PUBLIC_DEMO_LIMITS": "false", "SSE_PING_MS": "100", "SSE_MAX_STREAM_MS": "4000" }
+      "vars": { "PUBLIC_DEMO_LIMITS": "false" }
     }
   }
 }

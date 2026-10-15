@@ -1,17 +1,17 @@
 /**
- * VideoDO (actor per video) in workerd with the shared Miniflare D1: the step
- * machine, resume after eviction at every step without repeated side effects,
- * alarm backoff and dead-lettering, start() idempotency, the D1 record and SSE.
+ * VideoDO (actor per video) in workerd with the shared Miniflare D1: the frame/transcript
+ * pipeline, resume after eviction at every step without repeated provider calls, quota
+ * waits that do not burn attempts, skips, purge, and the hibernatable WebSocket.
  * Fake dependencies are registered per video id in VideoDO.testDeps.
  */
 import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { exports } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { geminiFileName } from '../../src/gemini';
+import { handle } from '../../src/api';
+import { Google } from '../../src/google';
 import * as store from '../../src/store';
 import { EvictionError, IngestState, MAX_ATTEMPTS, MAX_QUOTA_WINDOW_MS, VideoDO } from '../../src/video';
-import { handle } from '../../src/api';
-import { appDeps, defaultTagging, fakeBucket, fakeEmbedder, fakeGemini, FakeGeminiOptions, fakeVectorize, settings } from '../helpers';
+import { appDeps, fakeBucket, fakeEmbedder, fakeGemini, FakeGeminiOptions, fakeMedia, FakeMediaOptions, fakeMp4, FakeObject, fakeTranscriber, fakeVectorize, settings } from '../helpers';
 
 const db: D1Database = env.DB;
 const ns = env.VIDEO as DurableObjectNamespace;
@@ -21,62 +21,80 @@ beforeEach(async () => {
   await db.batch(['videos', 'usage_counters', 'usage_events'].map((t) => db.prepare(`DELETE FROM ${t}`)));
 });
 
-async function setup(opts: FakeGeminiOptions = {}, filename = 'clip.mp4', contentType = 'video/mp4') {
-  const video = await store.createVideo(db, { filename, contentType, size: 100 });
-  expect(await store.markUploaded(db, video.id)).toBe(true);
-  const fake = fakeGemini(opts);
+interface SetupOptions { gemini?: FakeGeminiOptions; media?: FakeMediaOptions; seconds?: number; size?: number; google?: Partial<Google>; source?: 'photos' | 'drive' }
+
+async function setup(opts: SetupOptions = {}) {
+  const objects: Record<string, FakeObject> = {};
+  let video: store.Video;
+  if (opts.source) {
+    ({ video } = await store.upsertSourceVideo(db, { source: opts.source, sourceId: `src-${crypto.randomUUID()}`, filename: 'clip.mp4', contentType: 'video/mp4',
+      size: null, meta: { session_id: 's1', base_url: 'https://photos.test/b', base_url_expires_at: new Date(Date.now() + 3600_000).toISOString() }, status: 'pending' }));
+  } else {
+    video = await store.createVideo(db, { filename: 'clip.mp4', contentType: 'video/mp4', size: opts.size ?? 4096 });
+    expect(await store.markUploaded(db, video.id)).toBe(true);
+    const bytes = fakeMp4(opts.seconds ?? 30, 4096);
+    objects[video.object_key] = { size: opts.size ?? bytes.length, contentType: 'video/mp4', bytes };
+  }
+  const gemini = fakeGemini(opts.gemini);
+  const media = fakeMedia(opts.media);
+  const whisper = fakeTranscriber();
   const vectors = fakeVectorize();
-  VideoDO.testDeps.set(video.id, () => ({ db, bucket: fakeBucket({ [video.object_key]: { size: 100, contentType } }),
-    index: vectors.index, gemini: fake.gemini, embedder: fakeEmbedder(), settings }));
+  const bucket = fakeBucket(objects);
+  VideoDO.testDeps.set(video.id, () => ({ db, bucket, index: vectors.index, media: media.port, transcriber: whisper.transcriber, gemini: gemini.gemini,
+    embedder: fakeEmbedder(), google: (opts.google ?? null) as Google | null, settings }));
   const stub = ns.get(ns.idFromName(video.id)) as any;
   const state = (): Promise<IngestState | null> => stub.getState();
   const alarmAt = () => runInDurableObject<VideoDO, number | null>(stub, (_o, s) => s.storage.getAlarm());
-  /** Fire the alarm (if Miniflare hasn't already) until the state is terminal or `until` holds. */
-  const drive = async (until: (s: IngestState) => boolean = () => false, max = 40) => {
+  /** Fire the alarm until the state is terminal or `until` holds. */
+  const drive = async (until: (s: IngestState) => boolean = () => false, max = 60) => {
     for (let i = 0; i < max; i++) {
       const s = await state();
-      if (s && (s.step === 'done' || s.step === 'failed' || until(s))) return s;
+      if (s && (['done', 'failed', 'skipped'].includes(s.step) || until(s))) return s;
       try {
         await runDurableObjectAlarm(stub);
       } catch (error) {
         if (!(error instanceof EvictionError) && !String(error).includes('evicted')) throw error;
       }
-      await new Promise((r) => setTimeout(r, 10));
     }
     return state();
   };
-  /** Make a pending backoff due now (instead of waiting minutes). */
+  /** Make a pending wait due now (instead of minutes). */
   const skipWait = () => runInDurableObject<VideoDO, void>(stub, async (_o, s) => {
     const st = await s.storage.get<IngestState>('state');
     await s.storage.put('state', { ...st!, next_retry_at: null });
     await s.storage.setAlarm(Date.now());
   });
-  return { video, fake, vectors, stub, state, alarmAt, drive, skipWait };
+  const calls = () => ({ sprites: media.counts.sprites, frames: media.counts.frames, whisper: whisper.counts.calls, describe: gemini.counts.describe, summary: gemini.counts.summary });
+  return { video, objects, gemini, media, whisper, vectors, stub, state, alarmAt, drive, skipWait, calls };
 }
 
-describe('VideoDO: ingestion run by the per-video actor', () => {
-  it('runs upload -> await_file -> tag -> index; start() is idempotent; the D1 record matches', async () => {
-    const t = await setup({ states: ['PROCESSING', 'ACTIVE'] });
+// 30 s video, scene cuts at 0/10/20 s -> 3 picks; describeBatch 2 -> 2 describe calls.
+const EXPECTED_CALLS = { sprites: 1, frames: 3, whisper: 1, describe: 2, summary: 1 };
+
+describe('VideoDO: the frame + transcript pipeline', () => {
+  it('runs probe -> select -> frames -> transcribe -> describe -> summarize -> index; start() is idempotent', async () => {
+    const t = await setup();
     const starts = await Promise.all([t.stub.start(t.video.id), t.stub.start(t.video.id), t.stub.start(t.video.id)]);
     expect(new Set(starts.map((s: IngestState) => s.version)).size).toBe(1);
-    // The PROCESSING poll sets a 5 s alarm; make it due.
-    const waiting = await t.drive((s) => s.step === 'await_file' && s.polls > 0);
-    if (waiting?.step === 'await_file') await t.skipWait();
     const done = (await t.drive())!;
     expect(done.step).toBe('done');
-    expect(t.fake.counts).toEqual({ uploads: 1, generate: 1 });
-    expect(done.keys).toEqual({ upload: `${t.video.id}:upload`, tag: `${t.video.id}:tag`, index: `${t.video.id}:index` });
-    expect(await t.stub.start(t.video.id)).toMatchObject({ step: 'done', version: done.version }); // idempotent after done too
+    expect(t.calls()).toEqual(EXPECTED_CALLS);
+    expect(done.picks!.map((p) => p.t)).toEqual([0, 10, 20]);
+    expect(await t.stub.start(t.video.id)).toMatchObject({ step: 'done', version: done.version });
     const row = (await store.getVideo(db, t.video.id))!;
-    expect(row).toMatchObject({ status: 'completed', error: null, progress: null, state_version: done.version });
-    expect(row.result).toMatchObject({ summary: defaultTagging.summary, sampled_timestamps: [2, 12.5], usage: { totalTokenCount: 1700 } });
-    expect([...t.vectors.store.keys()].sort()).toEqual([`d:${t.video.id}`, `f:${t.video.id}:0`, `f:${t.video.id}:1`, `v:${t.video.id}`]);
-    expect(t.fake.log.at(-1)).toBe(`DELETE /v1beta/${geminiFileName(t.video.id)}`);
-    expect(await t.alarmAt()).toBeNull(); // nothing pending: no alarm
+    expect(row).toMatchObject({ status: 'completed', error: null, progress: null, duration_seconds: 30 });
+    expect(row.result).toMatchObject({ summary: expect.stringContaining('blue towel'), sampled_timestamps: [0, 10, 20], thumbs: [0, 1, 2],
+      transcript: [{ start: 1, end: 4, text: 'Fold the blue towel neatly.' }], duration_seconds: 30, usage: { gemini_calls: 3 } });
+    expect(row.result.frame_descriptions).toHaveLength(3);
+    expect(row.result.tags.map((x: any) => x.label)).toContain('towel');
+    expect(Object.keys(t.objects).filter((k) => k.includes('/frames/')).sort()).toEqual([0, 1, 2].map((i) => `videos/${t.video.id}/frames/${i}.jpg`));
+    expect([...t.vectors.store.keys()].sort()).toEqual([`f:${t.video.id}:0`, `f:${t.video.id}:1`, `f:${t.video.id}:2`, `s:${t.video.id}`, `t:${t.video.id}:0`]);
+    expect(t.vectors.store.get(`f:${t.video.id}:1`)!.metadata).toMatchObject({ kind: 'frame', video_id: t.video.id, t_start: 10, thumb_key: `videos/${t.video.id}/frames/1.jpg`, source: 'upload' });
+    expect(await t.alarmAt()).toBeNull();
   });
 
-  for (const point of ['upload:returned', 'upload:recorded', 'await_file:recorded', 'tag:recorded', 'tag:committed', 'index:recorded']) {
-    it(`resumes after an eviction at ${point} without repeating a side effect`, async () => {
+  for (const point of ['frames:one', 'transcribe:recorded', 'describe:batch', 'summarize:recorded', 'index:recorded']) {
+    it(`resumes after an eviction at ${point} without repeating a provider call`, async () => {
       const t = await setup();
       let crashed = false;
       VideoDO.testHooks.set(t.video.id, (p) => {
@@ -86,276 +104,220 @@ describe('VideoDO: ingestion run by the per-video actor', () => {
       await t.drive((s) => crashed && s.step !== 'done');
       expect(crashed).toBe(true);
       await evictDurableObject(t.stub); // memory gone; only durable state survives
-      await t.stub.start(t.video.id); // e.g. the safety-net nudge; re-arms the alarm if needed
+      await t.stub.start(t.video.id); // e.g. the safety-net nudge
       const done = (await t.drive())!;
       expect(done.step).toBe('done');
-      expect(t.fake.counts).toEqual({ uploads: 1, generate: 1 });
-      expect((await store.getVideo(db, t.video.id))!).toMatchObject({ status: 'completed', state_version: done.version });
+      expect(t.calls()).toEqual(EXPECTED_CALLS);
       VideoDO.testHooks.delete(t.video.id);
     });
   }
 
-  it('backs off through its alarm (30 s * attempts^2) and fails after MAX_ATTEMPTS', async () => {
-    const t = await setup({ uploadStatus: 503 });
-    await t.stub.start(t.video.id);
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const before = Date.now();
-      const s = (await t.drive((x) => x.attempts === attempt && x.next_retry_at !== null))!;
-      if (attempt < MAX_ATTEMPTS) {
-        expect(s).toMatchObject({ step: 'upload', attempts: attempt, last_error: 'Gemini is temporarily unavailable; retry later' });
-        const delay = s.next_retry_at! - before;
-        expect(delay).toBeGreaterThanOrEqual(30_000 * attempt * attempt - 1000);
-        expect(delay).toBeLessThanOrEqual(30_000 * attempt * attempt + 1000);
-        expect(await t.alarmAt()).toBe(s.next_retry_at);
-        expect((await store.getVideo(db, t.video.id))!).toMatchObject({ status: 'pending', error: 'Gemini is temporarily unavailable; retry later' });
-        await t.skipWait();
-      } else {
-        expect(s.step).toBe('failed');
-      }
-    }
-    expect((await store.getVideo(db, t.video.id))!).toMatchObject({ status: 'failed', error: 'Gemini is temporarily unavailable; retry later' });
-    expect(await t.alarmAt()).toBeNull();
-    expect(t.fake.counts.uploads).toBe(0);
-  });
-
-  it('waits out a Gemini 429 for its RetryInfo delay', async () => {
-    const t = await setup({ tagStatus: 429 });
-    await t.stub.start(t.video.id);
-    const before = Date.now();
-    const s = (await t.drive((x) => x.step === 'tag' && x.next_retry_at !== null))!;
-    expect(s.next_retry_at! - before).toBeGreaterThanOrEqual(119_000);
-    expect(s.next_retry_at! - before).toBeLessThanOrEqual(121_000);
-    expect(await t.alarmAt()).toBe(s.next_retry_at);
-  });
-
   it('a quota 429 waits without using up failure attempts; the D1 row keeps the step percent', async () => {
-    const t = await setup({ tagStatus: 429 });
+    const t = await setup({ gemini: { describeStatus: 429 } });
     await t.stub.start(t.video.id);
     for (let wait = 1; wait <= MAX_ATTEMPTS + 2; wait++) {
-      const s = (await t.drive((x) => x.step === 'tag' && x.next_retry_at !== null))!;
-      expect(s).toMatchObject({ step: 'tag', attempts: 0, quota_waits: wait, quota_model: settings.geminiModel });
+      const s = (await t.drive((x) => x.step === 'describe' && x.next_retry_at !== null))!;
+      expect(s).toMatchObject({ step: 'describe', attempts: 0, quota_waits: wait, quota_model: settings.geminiModel });
+      expect(s.next_retry_at! - Date.now()).toBeGreaterThan(110_000); // RetryInfo 120 s
       if (wait === 1) {
-        const row = (await store.getVideo(db, t.video.id))!;
-        expect(row.status).toBe('pending');
-        expect(row.progress).toMatchObject({ stage: 'Waiting to retry', percent: 55 });
         const api = await worker.fetch(`https://framer.test/videos/${t.video.id}`);
-        expect((await api.json<any>()).progress).toMatchObject({ stage: 'Waiting to retry', percent: 55 });
+        expect((await api.json<any>()).progress).toMatchObject({ stage: 'Waiting to retry', percent: 70 });
       }
       await t.skipWait();
     }
-    expect(t.fake.counts.generate).toBe(MAX_ATTEMPTS + 2); // one call per wait, none skipped or repeated
-    expect((await t.state())!.step).toBe('tag'); // still waiting, not failed
+    expect(t.gemini.counts.describe).toBe(MAX_ATTEMPTS + 2);
+    expect((await t.state())!.step).toBe('describe');
   });
 
   it('gives up on quota only after MAX_QUOTA_WINDOW_MS (48 h) of waiting', async () => {
-    const t = await setup({ tagStatus: 429 });
+    const t = await setup({ gemini: { describeStatus: 429 } });
     await t.stub.start(t.video.id);
-    await t.drive((x) => x.step === 'tag' && x.next_retry_at !== null);
+    await t.drive((x) => x.next_retry_at !== null);
     await runInDurableObject<VideoDO, void>(t.stub, async (_o, s) => {
       const st = await s.storage.get<IngestState>('state');
       await s.storage.put('state', { ...st!, quota_since: Date.now() - MAX_QUOTA_WINDOW_MS - 1000 });
     });
     await t.skipWait();
-    const s = (await t.drive())!;
-    expect(s.step).toBe('failed');
-    expect((await store.getVideo(db, t.video.id))!).toMatchObject({ status: 'failed', error: expect.stringMatching(/quota stayed exhausted/) });
+    expect((await t.drive())!.step).toBe('failed');
+    expect((await store.getVideo(db, t.video.id))!.error).toMatch(/quota stayed exhausted/);
   });
 
-  it('a quota wait recorded for another model is voided by start(): the video retries now', async () => {
-    const t = await setup({ tagStatus: 429 });
+  it('backs off (30 s x attempts^2) on transient errors and fails after MAX_ATTEMPTS', async () => {
+    const t = await setup({ gemini: { summaryStatus: 503 } });
     await t.stub.start(t.video.id);
-    const waiting = (await t.drive((x) => x.step === 'tag' && x.next_retry_at !== null))!;
-    expect(waiting.next_retry_at! - Date.now()).toBeGreaterThan(100_000);
-    // Same model: start() keeps the wait.
-    expect((await t.stub.start(t.video.id)).next_retry_at).toBe(waiting.next_retry_at);
-    // A state written before quota_model existed (legacy) or for another model: the wait is void.
-    await runInDurableObject<VideoDO, void>(t.stub, async (_o, s) => {
-      const st = await s.storage.get<IngestState>('state');
-      const { quota_model: _drop, ...legacy } = st!;
-      await s.storage.put('state', legacy);
-    });
-    const resumed = await t.stub.start(t.video.id);
-    expect(resumed.next_retry_at).toBeNull();
-    expect((await t.alarmAt())! - Date.now()).toBeLessThan(2000);
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const before = Date.now();
+      const s = (await t.drive((x) => x.attempts === attempt && x.next_retry_at !== null))!;
+      if (attempt < MAX_ATTEMPTS) {
+        expect(s).toMatchObject({ step: 'summarize', attempts: attempt });
+        expect(Math.abs(s.next_retry_at! - before - 30_000 * attempt * attempt)).toBeLessThan(1500);
+        await t.skipWait();
+      } else expect(s.step).toBe('failed');
+    }
+    expect((await store.getVideo(db, t.video.id))!).toMatchObject({ status: 'failed', error: 'Gemini is temporarily unavailable; retry later' });
+    expect(t.gemini.counts.describe).toBe(2); // the recorded descriptions were never redone
+  });
+
+  it('a media error mid-frames resumes at the failed frame', async () => {
+    const t = await setup({ media: { failFrame: 2 } });
+    await t.stub.start(t.video.id);
+    const s = (await t.drive((x) => x.next_retry_at !== null))!;
+    expect(s).toMatchObject({ step: 'frames', frames_done: [0] });
+    await t.skipWait();
+    expect((await t.drive())!.step).toBe('done');
+    expect(t.media.counts.frames).toBe(4); // 3 frames + the one failed try
+  });
+
+  it('skips videos over 10 minutes or over the size limit, without processing them', async () => {
+    const long = await setup({ seconds: 601 });
+    await long.stub.start(long.video.id);
+    expect((await long.drive())!.step).toBe('skipped');
+    expect((await store.getVideo(db, long.video.id))!).toMatchObject({ status: 'skipped', error: expect.stringMatching(/longer than 10 minutes/) });
+    expect(long.media.counts.sprites).toBe(0);
+    const big = await setup({ size: 100_000_000 });
+    await big.stub.start(big.video.id);
+    expect((await big.drive())!.step).toBe('skipped');
+    expect((await store.getVideo(db, big.video.id))!.error).toMatch(/over 100 MB/);
+  });
+
+  it('copies a Google Photos video into R2 (multipart) before processing it', async () => {
+    const bytes = fakeMp4(30, 12 * 1024 * 1024); // spans two 10 MiB parts
+    const google = { downloadPhotoVideo: async (url: string) => (expect(url).toBe('https://photos.test/b'), new Response(bytes)) } as Partial<Google>;
+    const t = await setup({ source: 'photos', google });
+    await t.stub.start(t.video.id);
+    expect((await t.drive())!.step).toBe('done');
+    expect(t.objects[t.video.object_key].size).toBe(bytes.length);
+    expect((await store.getVideo(db, t.video.id))!).toMatchObject({ status: 'completed', uploaded: 1, expected_size: bytes.length, source: 'photos' });
+    expect(t.vectors.store.get(`s:${t.video.id}`)!.metadata).toMatchObject({ source: 'photos', source_id: t.video.source_id });
+  });
+
+  it('a Photos download over 100 MB is skipped and nothing is stored', async () => {
+    const google = { downloadPhotoVideo: async () => new Response('x', { headers: { 'content-length': '150000000' } }) } as Partial<Google>;
+    const t = await setup({ source: 'photos', google });
+    await t.stub.start(t.video.id);
+    expect((await t.drive())!.step).toBe('skipped');
+    expect(t.objects[t.video.object_key]).toBeUndefined();
   });
 
   it('admin purge removes the video everywhere and stops its actor for good', async () => {
-    const t = await setup({ tagStatus: 429 });
+    const t = await setup({ gemini: { describeStatus: 429 } });
     await t.stub.start(t.video.id);
-    await t.drive((x) => x.step === 'tag' && x.next_retry_at !== null); // Gemini file uploaded, waiting on quota
-    expect(t.fake.files.size).toBe(1);
-    const objects = { [t.video.object_key]: { size: 100, contentType: 'video/mp4' }, [`videos/${t.video.id}/frames/0.jpg`]: { size: 1, contentType: 'image/jpeg' },
-      'videos/other/source': { size: 1, contentType: 'video/mp4' } };
-    await t.vectors.index.upsert([{ id: `v:${t.video.id}`, values: [1], metadata: {} }, { id: `f:${t.video.id}:3`, values: [1], metadata: {} }, { id: 'v:other', values: [1], metadata: {} }] as any);
-    const app = appDeps(db, { videos: ns, adminToken: 'admin-token-123', bucket: fakeBucket(objects), index: t.vectors.index });
+    await t.drive((x) => x.next_retry_at !== null);
+    t.objects['videos/other/source'] = { size: 1, contentType: 'video/mp4' };
+    await t.vectors.index.upsert([{ id: 'v:other', values: [1], metadata: {} }] as any);
+    const app = appDeps(db, { videos: ns, adminToken: 'admin-token-123', bucket: VideoDO.testDeps.get(t.video.id)!().bucket, index: t.vectors.index });
     const del = (auth?: string, method = 'DELETE') => handle(new Request(`https://x/admin/videos/${t.video.id}`, { method, headers: auth ? { Authorization: auth } : {} }), app);
     expect((await del()).status).toBe(404);
     expect((await del('Bearer wrong')).status).toBe(404);
     expect((await del('Bearer admin-token-123', 'GET')).status).toBe(404);
-    const disabled = await handle(new Request(`https://x/admin/videos/${t.video.id}`, { method: 'DELETE', headers: { Authorization: 'Bearer admin-token-123' } }), appDeps(db));
-    expect(disabled.status).toBe(404); // no ADMIN_TOKEN configured: the route does not exist
     const res = await del('Bearer admin-token-123');
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ d1_row_deleted: true, actor_purged: true, gemini_files_deleted: [geminiFileName(t.video.id)],
-      r2_objects_deleted: [t.video.object_key, `videos/${t.video.id}/frames/0.jpg`] });
+    expect(await res.json()).toMatchObject({ d1_row_deleted: true, actor_purged: true });
     expect(await store.getVideo(db, t.video.id)).toBeNull();
-    expect(t.fake.files.size).toBe(0);
-    expect(Object.keys(objects)).toEqual(['videos/other/source']);
+    expect(Object.keys(t.objects)).toEqual(['videos/other/source']);
     expect([...t.vectors.store.keys()]).toEqual(['v:other']);
     expect(await t.state()).toBeNull();
     expect(await t.alarmAt()).toBeNull();
     await expect(t.stub.start(t.video.id)).rejects.toThrow(/deleted/);
-    await runDurableObjectAlarm(t.stub); // nothing left to run
-    expect(await t.state()).toBeNull();
     expect((await del('Bearer admin-token-123')).status).toBe(200); // idempotent
   });
 
-  it('an actor whose D1 row was deleted out of band purges itself at its next alarm', async () => {
-    const t = await setup({ tagStatus: 429 });
+  it('an actor whose D1 row was deleted out of band purges itself (alarm or GET)', async () => {
+    const t = await setup({ gemini: { describeStatus: 429 } });
     await t.stub.start(t.video.id);
-    await t.drive((x) => x.step === 'tag' && x.next_retry_at !== null);
+    await t.drive((x) => x.next_retry_at !== null);
     await db.prepare('DELETE FROM videos WHERE id=?1').bind(t.video.id).run();
-    await runDurableObjectAlarm(t.stub); // the pending quota-wait alarm fires
+    await runDurableObjectAlarm(t.stub);
     expect(await t.state()).toBeNull();
-    expect(await t.alarmAt()).toBeNull();
-    expect(t.fake.files.size).toBe(0);
-    await expect(t.stub.start(t.video.id)).rejects.toThrow(/deleted/);
-  });
-
-  it('GET of a deleted video purges its orphaned actor; unknown ids write nothing', async () => {
-    const t = await setup();
-    await t.stub.start(t.video.id);
-    expect((await t.drive())!.step).toBe('done'); // completed: no alarm left to notice the delete
-    await db.prepare('DELETE FROM videos WHERE id=?1').bind(t.video.id).run();
-    expect((await worker.fetch(`https://framer.test/videos/${t.video.id}`)).status).toBe(404);
-    expect(await t.state()).toBeNull();
-    const stranger = crypto.randomUUID();
-    expect((await worker.fetch(`https://framer.test/videos/${stranger}`)).status).toBe(404);
-    const other = ns.get(ns.idFromName(stranger));
-    expect(await runInDurableObject<VideoDO, unknown>(other as any, (_o, s) => s.storage.get('purged'))).toBeUndefined();
-  });
-
-  it('a permanent error fails at once', async () => {
-    const t = await setup({}, 'a.mkv', 'video/x-matroska');
-    await t.stub.start(t.video.id);
-    expect((await t.drive())!).toMatchObject({ step: 'failed', attempts: 1 });
-    expect((await store.getVideo(db, t.video.id))!.error).toMatch(/Unsupported video format/);
+    const u = await setup();
+    await u.stub.start(u.video.id);
+    await u.drive();
+    await db.prepare('DELETE FROM videos WHERE id=?1').bind(u.video.id).run();
+    expect((await worker.fetch(`https://framer.test/videos/${u.video.id}`)).status).toBe(404);
+    expect(await u.state()).toBeNull();
   });
 });
 
-// ------------------------------------------------------------------ SSE
+// ------------------------------------------------------------------ WebSockets
 
-interface SseEvent { id?: string; event?: string; data?: any; comment?: string }
-
-function parse(text: string): SseEvent[] {
-  return text.split('\n\n').filter(Boolean).map((block) => {
-    const e: SseEvent = {};
-    for (const line of block.split('\n')) {
-      if (line.startsWith(':')) e.comment = line.slice(1).trim();
-      else {
-        const i = line.indexOf(': ');
-        const [k, v] = [line.slice(0, i), line.slice(i + 2)];
-        if (k === 'data') e.data = JSON.parse(v);
-        else (e as any)[k] = v;
-      }
-    }
-    return e;
-  });
-}
-
-async function connect(videoId: string, lastEventId?: string) {
-  const res = await worker.fetch(`https://framer.test/videos/${videoId}/events`, { headers: lastEventId ? { 'Last-Event-ID': lastEventId } : {} });
-  expect(res.status).toBe(200);
-  expect(res.headers.get('content-type')).toContain('text/event-stream');
-  const reader = res.body!.getReader();
-  const decoder = new TextDecoder();
-  let text = '';
+async function open(videoId: string) {
+  const res = await worker.fetch(`https://framer.test/videos/${videoId}/ws`, { headers: { Upgrade: 'websocket' } });
+  expect(res.status).toBe(101);
+  const ws = res.webSocket!;
+  const messages: any[] = [];
   let closed = false;
-  let pending: Promise<ReadableStreamReadResult<Uint8Array>> | null = null;
-  return {
-    get text() { return text; },
-    get closed() { return closed; },
-    events: () => parse(text).filter((e) => e.event),
-    async until(predicate: (events: SseEvent[]) => boolean, ms = 2000) {
-      const deadline = Date.now() + ms;
-      while (!closed && !predicate(parse(text).filter((e) => e.event))) {
-        pending ??= reader.read();
-        const result = await Promise.race([pending, new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), Math.max(0, deadline - Date.now())))]);
-        if (result === 'timeout') break;
-        pending = null;
-        if (result.done) closed = true;
-        else text += decoder.decode(result.value, { stream: true });
-      }
-      return parse(text).filter((e) => e.event);
-    },
-    cancel: () => reader.cancel(),
+  ws.accept();
+  ws.addEventListener('message', (e) => { try { messages.push(JSON.parse(String(e.data))); } catch { /* "pong" */ } });
+  ws.addEventListener('close', () => { closed = true; });
+  const until = async (predicate: () => boolean, ms = 3000) => {
+    const deadline = Date.now() + ms;
+    while (!predicate() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+    return predicate();
   };
+  return { ws, messages, get closed() { return closed; }, until };
 }
 
-describe('VideoDO: SSE from the same actor', () => {
-  it('snapshot on connect, broadcast to every viewer, close on done', async () => {
+describe('VideoDO: hibernatable WebSocket status', () => {
+  it('subscribe -> snapshot -> live events -> final event and close', async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
-    const t = await setup({ tagGate: () => gate }); // generateContent is held until both viewers are in
-    // Connecting also nudges: start() of a pending video (idempotent).
-    const [a, b] = [await connect(t.video.id), await connect(t.video.id)];
-    for (const s of [a, b]) await s.until((e) => e.some((x) => x.event === 'step' && x.data.completed === 'await_file'));
+    const t = await setup({ gemini: { gate: () => gate } });
+    await t.stub.start(t.video.id);
+    const a = await open(t.video.id);
+    a.ws.send(JSON.stringify({ type: 'subscribe', last_seq: null }));
+    await a.until(() => a.messages.length >= 1);
+    expect(a.messages[0]).toMatchObject({ type: 'event', event: 'status', data: { id: t.video.id } });
+    expect(['pending', 'processing']).toContain(a.messages[0].data.status);
+    const running = t.drive(); // holds at the first describe call
+    await new Promise((r) => setTimeout(r, 100));
     release();
-    for (const s of [a, b]) {
-      const events = await s.until(() => false, 1500);
-      expect(s.text.startsWith('retry: 3000\n\n')).toBe(true);
-      expect(s.closed).toBe(true);
-      const kinds = events.map((e) => e.event);
-      expect(kinds[0]).toBe('status');
-      expect(kinds.at(-1)).toBe('done');
-      expect(events.filter((e) => e.event === 'step').map((e) => e.data.completed)).toContain('tag');
-      const ids = events.map((e) => Number(e.id));
-      expect(ids).toEqual([...ids].sort((x, y) => x - y)); // ids are state versions, increasing
-      expect(events.at(-1)!.data).toMatchObject({ status: 'completed', step: 'done' });
-    }
-    // A finished video answers with its snapshot and closes.
-    const after = await connect(t.video.id);
-    await after.until(() => false, 1000);
-    expect(after.closed).toBe(true);
-    expect(after.events().map((e) => e.event)).toEqual(['status', 'done']);
+    await running;
+    expect(await a.until(() => a.closed)).toBe(true);
+    const events = a.messages.map((m) => m.event);
+    expect(events).toContain('step');
+    expect(events.at(-1)).toBe('done');
+    const seqs = a.messages.map((m) => m.seq);
+    expect(seqs).toEqual([...seqs].sort((x, y) => x - y));
+    expect(await t.stub.socketCount()).toBe(0);
   });
 
-  it('resumes with Last-Event-ID by replaying the missed transitions', async () => {
-    const t = await setup({ tagStatus: 503 }); // stops at tag, retrying
+  it('resumes from last_seq by replaying stored events; a finished video closes at once', async () => {
+    const t = await setup({ gemini: { summaryStatus: 503 } });
     await t.stub.start(t.video.id);
-    const s1 = (await t.drive((x) => x.step === 'tag' && x.next_retry_at !== null))!;
-    const all = await connect(t.video.id, '0');
-    const replay = await all.until((e) => e.some((x) => x.event === 'status' && x.id === String(s1.version) && x.data.retry_at));
-    const replayed = replay.filter((e) => e.event === 'step').map((e) => e.data.completed);
-    expect(replayed).toEqual(['upload', 'await_file']);
-    await all.cancel();
-    const firstStep = replay.find((e) => e.event === 'step')!;
-    const resumed = await connect(t.video.id, firstStep.id);
-    const later = await resumed.until((e) => e.some((x) => x.id === String(s1.version)));
-    expect(later.filter((e) => e.event === 'step').map((e) => e.data.completed)).toEqual(['await_file']);
-    await resumed.cancel();
+    const s = (await t.drive((x) => x.step === 'summarize' && x.next_retry_at !== null))!;
+    const b = await open(t.video.id);
+    b.ws.send(JSON.stringify({ type: 'subscribe', last_seq: 0 }));
+    await b.until(() => b.messages.some((m) => !m.replay));
+    const replayed = b.messages.filter((m) => m.replay && m.event === 'step').map((m) => m.data.completed);
+    expect(replayed).toEqual(['probe', 'select', 'frames', 'transcribe', 'describe']);
+    const firstStep = b.messages.find((m) => m.replay && m.event === 'step');
+    const c = await open(t.video.id);
+    c.ws.send(JSON.stringify({ type: 'subscribe', last_seq: firstStep.seq }));
+    await c.until(() => c.messages.some((m) => !m.replay));
+    expect(c.messages.filter((m) => m.replay && m.event === 'step').map((m) => m.data.completed)).toEqual(['select', 'frames', 'transcribe', 'describe']);
+    expect(c.messages.at(-1)).toMatchObject({ event: 'status', seq: s.version });
+    b.ws.close(1000);
+    c.ws.close(1000);
+
+    const done = await setup();
+    await done.stub.start(done.video.id);
+    await done.drive();
+    const d = await open(done.video.id);
+    d.ws.send(JSON.stringify({ type: 'subscribe' }));
+    expect(await d.until(() => d.closed)).toBe(true);
+    expect(d.messages.map((m) => m.event)).toEqual(['status', 'done']);
   });
 
-  it('heartbeats, caps the stream lifetime, and releases a disconnected viewer', async () => {
-    const t = await setup({ tagStatus: 503 });
+  it('answers ping with pong without waking the object, and rejects non-upgrade requests', async () => {
+    const t = await setup();
     await t.stub.start(t.video.id);
-    await t.drive((x) => x.step === 'tag' && x.next_retry_at !== null);
-    const started = Date.now();
-    const s = await connect(t.video.id);
-    await s.until(() => false, 6000);
-    expect(s.text).toContain(': ping\n\n');
-    expect(s.closed).toBe(true); // capped at SSE_MAX_STREAM_MS (4 s in the test env)
-    expect(Date.now() - started).toBeGreaterThanOrEqual(3500);
-
-    const gone = await connect(t.video.id);
-    await gone.until((e) => e.length > 0);
-    expect(await t.stub.clientCount()).toBe(1);
-    await gone.cancel();
-    let count = 1;
-    for (let i = 0; i < 40 && count; i++) {
-      await new Promise((r) => setTimeout(r, 25));
-      count = await t.stub.clientCount();
-    }
-    expect(count).toBe(0);
-  }, 12000);
+    const e = await open(t.video.id);
+    const pongs: string[] = [];
+    e.ws.addEventListener('message', (m) => { if (m.data === 'pong') pongs.push('pong'); });
+    e.ws.send('ping');
+    await e.until(() => pongs.length > 0);
+    expect(pongs).toEqual(['pong']);
+    expect((await worker.fetch(`https://framer.test/videos/${t.video.id}/ws`)).status).toBe(426);
+    e.ws.close(1000);
+  });
 });

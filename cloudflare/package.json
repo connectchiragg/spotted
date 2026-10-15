@@ -8,11 +8,11 @@
     "test:unit": "vitest run",
     "test:workers": "vitest run --config vitest.workers.config.ts",
     "db:migrate": "wrangler d1 migrations apply framer-cf-db --remote",
-    "deploy": "wrangler deploy --env=\"\"",
-    "deploy:smoke": "wrangler deploy --env smoke"
+    "deploy": "wrangler deploy --env=\"\""
   },
   "dependencies": {
-    "aws4fetch": "1.0.20"
+    "aws4fetch": "1.0.20",
+    "jpeg-js": "0.4.4"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.23.0",

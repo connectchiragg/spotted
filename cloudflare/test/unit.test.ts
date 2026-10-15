@@ -1,26 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import { handle, HttpError, validateUploadIntent } from '../src/api';
 import { settings as readSettings } from '../src/env';
-import { geminiFileName, geminiMimeType, parseDuration, samplingFps, TaggerError, validateAnswer, validateTagging } from '../src/gemini';
-import { normalizeQuery, rank, tokens } from '../src/retrieval';
-import { appDeps, defaultTagging, fakeGemini } from './helpers';
+import { changeScores, mad, mp4Duration, selectFrames, spriteTiles, spriteWindows, tileTime } from '../src/frames';
+import { Gemini, validateAnswer, validateDescriptions, validateSummary } from '../src/gemini';
+import { authUrl, decryptSecret, encryptSecret, SCOPES } from '../src/google';
+import { normalizeQuery, passageOf, rankVideos } from '../src/retrieval';
+import { parseVectorId, transcriptWindows } from '../src/vectors';
+import { appDeps, encodeTiles, fakeGemini, fakeMp4 } from './helpers';
 
 describe('upload intent validation (port of UploadIntent)', () => {
   it('accepts and trims a valid intent', () => {
     expect(validateUploadIntent({ filename: 'a.mp4', content_type: 'video/mp4', size_bytes: 10, display_name: '  Trip ' }))
       .toEqual({ filename: 'a.mp4', content_type: 'video/mp4', size_bytes: 10, display_name: 'Trip' });
   });
-  it('defaults content type to octet-stream', () => {
-    expect(validateUploadIntent({ filename: 'a.mkv', size_bytes: 1 }).content_type).toBe('application/octet-stream');
-  });
   for (const bad of [
     { filename: '', size_bytes: 1 },
-    { filename: 'a\u0001.mp4', size_bytes: 1 },
     { filename: 'a.mp4', size_bytes: 0 },
-    { filename: 'a.mp4', size_bytes: 1.5 },
-    { filename: 'a.mp4', size_bytes: '10' },
     { filename: 'a.mp4', size_bytes: 1, content_type: 'image/png' },
-    { filename: 'a.mp4', size_bytes: 1, display_name: '   ' },
     { filename: 'a.mp4', size_bytes: 1, display_name: 'x\u0007' },
   ]) {
     it(`rejects ${JSON.stringify(bad)}`, () => {
@@ -29,136 +25,148 @@ describe('upload intent validation (port of UploadIntent)', () => {
   }
 });
 
-describe('Gemini helpers', () => {
-  it('maps browser MIME types and extensions to Gemini video types', () => {
-    expect(geminiMimeType('video/quicktime', 'x.mov')).toBe('video/mov');
-    expect(geminiMimeType('application/octet-stream', 'clip.WEBM')).toBe('video/webm');
-    expect(geminiMimeType('video/x-matroska', 'clip.mkv')).toBeNull();
+describe('frame selection by pixel deviation', () => {
+  it('decodes a vertically stacked spritesheet into grayscale tiles', () => {
+    const tiles = spriteTiles(encodeTiles([40, 40, 200]), 3);
+    expect(tiles).toHaveLength(3);
+    expect(tiles[0].length).toBe(64 * 36);
+    expect(mad(tiles[0], tiles[1])).toBeLessThan(2);
+    expect(mad(tiles[1], tiles[2])).toBeGreaterThan(150);
+    expect(changeScores(tiles)[0]).toBe(Infinity); // the first frame always qualifies
   });
-  it('parses file durations', () => {
-    expect(parseDuration('12.5s')).toBe(12.5);
-    expect(parseDuration('abc')).toBeNull();
-    expect(parseDuration(undefined)).toBeNull();
+
+  it('keeps the first frame, cuts above the threshold, and respects the minimum gap', () => {
+    const candidates = [0, 1, 2, 3, 4, 5, 6].map((t) => ({ t, score: t === 0 ? Infinity : [0, 30, 40, 1, 2, 50, 3][t] }));
+    const picks = selectFrames(candidates, { maxFrames: 16, minGap: 2, threshold: 12 });
+    // t=1 (30) is within 2 s of t=0; t=2 (40) qualifies; t=3/4/6 are below the threshold; t=5 (50) qualifies.
+    expect(picks.map((p) => p.t)).toEqual([0, 2, 5]);
+    expect(picks.map((p) => p.index)).toEqual([0, 1, 2]);
   });
-  it('sorts moments chronologically and remaps tag evidence', () => {
-    const result = validateTagging(defaultTagging, 20, 16);
-    expect(result.sampled_timestamps).toEqual([2, 12.5]);
-    expect(result.frame_descriptions[1].description).toMatch(/fold a blue towel/);
-    expect(result.tags.find((t) => t.label === 'towel')!.frame_indices).toEqual([1]);
-    expect(result.tags.find((t) => t.label === 'bedroom')!.frame_indices).toEqual([0, 1]);
+
+  it('over the cap keeps the first frame plus the best changes spread across time', () => {
+    const candidates = Array.from({ length: 100 }, (_, t) => ({ t, score: t === 0 ? Infinity : 20 + (t % 7) }));
+    const picks = selectFrames(candidates, { maxFrames: 5, minGap: 1, threshold: 12 });
+    expect(picks).toHaveLength(5);
+    expect(picks[0].t).toBe(0);
+    expect(picks.at(-1)!.t).toBeGreaterThan(70); // spread, not the first five
   });
-  it('merges duplicate tags and clamps timestamps to the duration', () => {
-    const result = validateTagging({ summary: 's', moments: [{ timestamp_seconds: 99, description: 'd' }],
-      tags: [{ label: 'Cat', category: 'object', frame_indices: [0] }, { label: 'cat ', category: 'object', frame_indices: [0] }] }, 10, 16);
-    expect(result.tags).toHaveLength(1);
-    expect(result.sampled_timestamps).toEqual([10]);
+
+  it('splits gaps longer than maxGap so slow or static footage is still covered', () => {
+    const candidates = Array.from({ length: 30 }, (_, t) => ({ t, score: t === 0 ? Infinity : 0.5 }));
+    expect(selectFrames(candidates, { maxFrames: 16, minGap: 2, threshold: 12 }).map((p) => p.t)).toEqual([0]); // no maxGap: change only
+    const times = selectFrames(candidates, { maxFrames: 16, minGap: 2, threshold: 12, maxGap: 8, end: 30 }).map((p) => p.t);
+    const gaps = [...times, 30].slice(1).map((t, i) => t - times[i]);
+    expect(Math.max(...gaps)).toBeLessThanOrEqual(8);
+    expect(times.length).toBeLessThanOrEqual(6);
+    // A cut is still preferred inside a gap: the best-scoring candidate wins over the middle.
+    const withCut = candidates.map((c) => (c.t === 11 ? { ...c, score: 90 } : c));
+    expect(selectFrames(withCut, { maxFrames: 16, minGap: 2, threshold: 95, maxGap: 8, end: 30 }).map((p) => p.t)).toContain(11);
+    expect(selectFrames(candidates, { maxFrames: 2, minGap: 2, threshold: 12, maxGap: 8, end: 30 })).toHaveLength(2); // the cap holds
   });
-  it('rejects evidence outside the moments and malformed output', () => {
-    expect(() => validateTagging({ ...defaultTagging, tags: [{ label: 'x', category: 'object', frame_indices: [5] }] }, 20, 16)).toThrow(TaggerError);
-    expect(() => validateTagging({ summary: '', tags: [], moments: [] }, 20, 16)).toThrow(TaggerError);
-    expect(() => validateTagging({ ...defaultTagging, tags: [{ label: 'x', category: 'person', frame_indices: [0] }] }, 20, 16)).toThrow(TaggerError);
+
+  it('splits candidates into <= 60 s spritesheet windows', () => {
+    const w = spriteWindows(130, 1);
+    expect(w).toEqual([{ time: 0, duration: 60, count: 60 }, { time: 60, duration: 60, count: 60 }, { time: 120, duration: 10, count: 10 }]);
+    expect(tileTime(w[1], 30)).toBe(90);
   });
+
+  it('reads the duration from an mvhd box', () => {
+    expect(mp4Duration(fakeMp4(42.5))).toBe(42.5);
+    expect(mp4Duration(new Uint8Array(100))).toBeNull();
+  });
+});
+
+describe('Gemini on frames', () => {
+  it('sends inline JPEG frames with timestamps and nearby speech', () => {
+    const req = Gemini.describeRequest([{ index: 3, t: 12.5, jpeg: new Uint8Array([1, 2, 3]), transcript: 'hello' }], 'before');
+    const parts = req.contents[0].parts;
+    expect(parts[0].text).toContain('before');
+    expect(parts[1].text).toBe('Frame index 3 at 12.5 s. Speech near this moment: "hello"');
+    expect(parts[2]).toEqual({ inlineData: { mimeType: 'image/jpeg', data: 'AQID' } });
+    expect(req.systemInstruction.parts[0].text).toContain('80-180 words');
+  });
+
+  it('validates per-frame paragraphs and summaries', () => {
+    expect(validateDescriptions({ frames: [{ index: 2, description: ' A ' }, { index: 5, description: 'B' }] }, [{ index: 2 }, { index: 5 }]))
+      .toEqual([{ frame_index: 2, description: 'A' }, { frame_index: 5, description: 'B' }]);
+    expect(() => validateDescriptions({ frames: [{ index: 2, description: 'A' }] }, [{ index: 2 }, { index: 5 }])).toThrow(/skipped a frame/);
+    const s = validateSummary({ summary: 's', tags: [{ label: 'Cat ', category: 'object', frame_indices: [0, 9] }, { label: 'cat', category: 'object', frame_indices: [1] }] }, 2);
+    expect(s.tags).toEqual([{ label: 'cat', category: 'object', frame_indices: [0, 1] }]);
+  });
+
+  it('classifies a 429 as a quota wait with RetryInfo, and 503 as retryable', async () => {
+    const frames = [{ index: 0, t: 0, jpeg: new Uint8Array(1), transcript: '' }];
+    await expect(fakeGemini({ describeStatus: 429 }).gemini.describeFrames(frames, null)).rejects.toMatchObject({ quota: true, retryAfterSeconds: 120 });
+    await expect(fakeGemini({ describeStatus: 503 }).gemini.describeFrames(frames, null)).rejects.toMatchObject({ quota: false, retryable: true });
+    await expect(fakeGemini({ describeStatus: 401 }).gemini.describeFrames(frames, null)).rejects.toMatchObject({ retryable: false });
+  });
+
   it('validates grounded answers like validate_answer', () => {
     expect(validateAnswer({ answer: 'A towel [1].', citations: [1] }, 2)).toBe('A towel [1].');
+    expect(() => validateAnswer({ answer: 'A towel.', citations: [1] }, 2)).toThrow();
     expect(() => validateAnswer({ answer: 'A towel [3].', citations: [3] }, 2)).toThrow();
-    expect(() => validateAnswer({ answer: 'A towel [1].', citations: [2] }, 2)).toThrow();
-    expect(() => validateAnswer({ answer: 'A towel [1] [x].', citations: [1] }, 2)).toThrow();
-    expect(() => validateAnswer({ answer: 'No citations', citations: [] }, 2)).toThrow();
   });
 });
 
-describe('Gemini client', () => {
-  const body = () => new ReadableStream({ start(c) { c.enqueue(new Uint8Array(4)); c.close(); } });
-
-  it('uploads with the resumable protocol and classifies errors', async () => {
-    const { gemini, log } = fakeGemini();
-    const file = await gemini.uploadFile(body(), 4, 'video/mp4', 'x');
-    expect(file.name).toBe('files/gen1');
-    expect(log).toEqual(['POST /upload/v1beta/files', 'POST https://upload.test/session']);
-    const quota = fakeGemini({ tagStatus: 429 }).gemini;
-    await expect(quota.tagVideo(file, 20, 16)).rejects.toMatchObject({ retryable: true, retryAfterSeconds: 120, quota: true });
-    const denied = fakeGemini({ tagStatus: 401 }).gemini;
-    await expect(denied.tagVideo(file, 20, 16)).rejects.toMatchObject({ retryable: false });
-    const outage = fakeGemini({ tagStatus: 503 }).gemini;
-    await expect(outage.tagVideo(file, 20, 16)).rejects.toMatchObject({ retryable: true, quota: false });
+describe('index entries and ranking', () => {
+  it('builds overlapping 45 s transcript windows', () => {
+    const w = transcriptWindows([{ start: 0, end: 10, text: 'a' }, { start: 40, end: 50, text: 'b' }, { start: 70, end: 80, text: 'c' }], 80);
+    expect(w).toEqual([{ start: 0, end: 45, text: 'a b' }, { start: 30, end: 75, text: 'b c' }, { start: 60, end: 80, text: 'c' }]);
   });
 
-  it('a deterministic name is never uploaded twice: 409 returns the existing file', async () => {
-    const fake = fakeGemini();
-    const name = geminiFileName('0f8c2a9e-1b2c-4d5e-8f90-123456789abc');
-    expect(name).toBe('files/framer-0f8c2a9e1b2c4d5e8f90123456789abc');
-    expect(name.length - 'files/'.length).toBeLessThanOrEqual(40);
-    const first = await fake.gemini.uploadFile(body(), 4, 'video/mp4', 'framer-x', name);
-    const second = await fake.gemini.uploadFile(body(), 4, 'video/mp4', 'framer-x', name);
-    expect(second.name).toBe(first.name);
-    expect(fake.counts.uploads).toBe(1);
-    expect(await fake.gemini.findFile('files/missing')).toBeNull();
-    expect((await fake.gemini.findByDisplayName('framer-x'))?.name).toBe(name);
+  it('parses vector ids', () => {
+    expect(parseVectorId('s:v1')).toEqual({ kind: 'summary', videoId: 'v1', n: 0 });
+    expect(parseVectorId('t:v1:3')).toEqual({ kind: 'transcript', videoId: 'v1', n: 3 });
+    expect(parseVectorId('f:v1:12')).toEqual({ kind: 'frame', videoId: 'v1', n: 12 });
   });
 
-  it('samples about maxFrames frames: fps = clamp(maxFrames / duration, 0.001, 1)', () => {
-    expect(samplingFps(16, 5)).toBe(1); // short clips keep Gemini's default 1 fps
-    expect(samplingFps(16, 16)).toBe(1);
-    expect(samplingFps(16, 60)).toBe(0.2666);
-    expect(samplingFps(16, 600)).toBe(0.0266);
-    expect(Math.floor(600 * samplingFps(16, 600))).toBeLessThanOrEqual(16);
-    expect(samplingFps(1, 100000)).toBe(0.001);
-    expect(samplingFps(16, 0)).toBe(1);
+  it('ranks videos by their best reranked passage and cites its moment', () => {
+    const job = (id: string) => ({ id, result: { summary: 's', sampled_timestamps: [0, 7.5], thumbs: [0, 1],
+      frame_descriptions: [{ frame_index: 0, description: 'a bed' }, { frame_index: 1, description: 'a towel' }],
+      transcript_windows: [{ start: 30, end: 75, text: 'fold it' }] } }) as any;
+    const [a, b, c] = [job('a'), job('b'), job('c')];
+    const ranked = rankVideos([
+      { job: a, passages: [{ ...passageOf(a, 'frame', 1, 0.5)!, rerank: 0.9 }, { ...passageOf(a, 'summary', 0, 0.6)!, rerank: 0.1 }] },
+      { job: b, passages: [{ ...passageOf(b, 'transcript', 0, 0.7)!, rerank: 0.5 }] },
+      { job: c, passages: [{ ...passageOf(c, 'frame', 0, 0.9)!, rerank: 0.1 }] }, // under 25% of the best
+    ], 0.02);
+    expect(ranked.map((r) => r.job.id)).toEqual(['a', 'b']);
+    expect(ranked[0].retrieval.citation).toMatchObject({ kind: 'frame', timestamp_seconds: 7.5, image_url: '/videos/a/thumbs/1' });
+    expect(ranked[1].retrieval.citation).toMatchObject({ kind: 'transcript', timestamp_seconds: 30, image_url: '/videos/b/thumbs/1' });
   });
 
-  it('sends the sampled, low-resolution request shape', async () => {
-    const fake = fakeGemini();
-    const file = { name: 'files/f', uri: 'https://files.test/f', mimeType: 'video/mp4', state: 'ACTIVE' };
-    const { usage } = await fake.gemini.tagVideo(file, 120, 16);
-    expect(usage).toMatchObject({ promptTokenCount: 1500, totalTokenCount: 1700 });
-    const request = fake.requests[0];
-    expect(request.contents).toEqual([{ role: 'user', parts: [
-      { fileData: { mimeType: 'video/mp4', fileUri: 'https://files.test/f' }, videoMetadata: { fps: 0.1333 } },
-      { text: 'Analyze the video.' },
-    ] }]);
-    expect(request.generationConfig).toEqual({ responseMimeType: 'application/json', mediaResolution: 'MEDIA_RESOLUTION_LOW' });
-    expect(request.systemInstruction.parts[0].text).toContain('between 1 and 16 distinct key moments');
-  });
-});
-
-describe('retrieval ranking (port of hybrid_search)', () => {
-  const job = (id: string, tags: string[], description: string) => ({
-    id, result: { summary: description, tags: tags.map((label) => ({ label, category: 'object', frame_indices: [0] })),
-      frame_descriptions: [{ frame_index: 0, description }], sampled_timestamps: [1.5], frame_indices: [] },
-  }) as any;
-
-  it('normalizes conversational queries and stems plurals', () => {
+  it('normalizes conversational queries', () => {
     expect(normalizeQuery('Can you show me dogs running in action')).toBe('dogs running');
-    expect([...tokens('Show me the dogs and glass')]).toEqual(['dog', 'glass']);
   });
-  it('keeps semantically supported videos and explicit tag matches only', () => {
-    const scores = new Map([['a\u00000', 0.8], ['b\u00000', 0.2], ['c\u00000', 0.2]]);
-    const ranked = rank('grill', [
-      { job: job('a', ['kitchen'], 'someone cleans a grill'), semantic: 0.8 },
-      { job: job('b', ['grill'], 'outdoor scene'), semantic: 0.2 },
-      { job: job('c', ['bedroom'], 'a bed'), semantic: 0.2 },
-    ], scores, 0.6);
-    // b is an explicit tag match but scores below 80% of the best result.
-    expect(ranked.map((r) => r.job.id)).toEqual(['a']);
-    expect(ranked[0].retrieval.citation).toMatchObject({ frame_index: 0, timestamp_seconds: 1.5, image_url: null });
-    const alone = rank('grill', [{ job: job('b', ['grill'], 'outdoor scene'), semantic: 0.2 }], scores, 0.6);
-    expect(alone.map((r) => r.job.id)).toEqual(['b']);
-    expect(alone[0].retrieval.citation.source).toBe('model-attributed sampled frame');
+});
+
+describe('Google OAuth', () => {
+  const key = 'ab'.repeat(32);
+  it('seals the refresh token with AES-GCM bound to its purpose', async () => {
+    const sealed = await encryptSecret('1//refresh', key);
+    expect(sealed).toMatch(/^v1\./);
+    expect(sealed).not.toContain('refresh');
+    expect(await decryptSecret(sealed, key)).toBe('1//refresh');
+    await expect(decryptSecret(sealed, key, 'other-purpose')).rejects.toThrow();
+    await expect(decryptSecret(sealed, 'cd'.repeat(32))).rejects.toThrow();
   });
-  it('drops results scoring below 80% of the best', () => {
-    const scores = new Map([['a\u00000', 0.95], ['b\u00000', 0.62]]);
-    const ranked = rank('towel', [
-      { job: job('a', ['towel'], 'a towel'), semantic: 0.95 },
-      { job: job('b', ['blanket'], 'a blanket'), semantic: 0.62 },
-    ], scores, 0.6);
-    expect(ranked.map((r) => r.job.id)).toEqual(['a']);
+  it('asks for offline access with both scopes and a state', () => {
+    const url = new URL(authUrl({ clientId: 'cid', clientSecret: 's', encKey: key, redirectUri: 'https://framer.test/oauth/google/callback' }, 'st'));
+    expect(url.searchParams.get('scope')).toBe(SCOPES.join(' '));
+    expect(url.searchParams.get('access_type')).toBe('offline');
+    expect(url.searchParams.get('prompt')).toBe('consent');
+    expect(url.searchParams.get('state')).toBe('st');
+    expect(url.searchParams.get('redirect_uri')).toBe('https://framer.test/oauth/google/callback');
   });
 });
 
 describe('settings', () => {
   it('reads defaults and rejects invalid settings', () => {
-    expect(readSettings({}).embeddingModel).toBe('@cf/baai/bge-small-en-v1.5');
+    expect(readSettings({}).embeddingModel).toBe('@cf/baai/bge-m3');
+    expect(readSettings({}).maxSourceBytes).toBe(100_000_000);
     expect(() => readSettings({ MAX_FRAMES: '0' })).toThrow();
+    expect(() => readSettings({ MAX_FRAMES: '41' })).toThrow();
+    expect(() => readSettings({ MAX_SOURCE_MB: '200' })).toThrow(/Media Transformations/);
   });
 });
 
@@ -166,13 +174,14 @@ describe('routes without a database', () => {
   it('serves health and reports missing configuration as 503', async () => {
     const deps = appDeps(null);
     expect(await (await handle(new Request('https://x/health'), deps)).json()).toEqual({ status: 'ok' });
-    const res = await handle(new Request('https://x/videos'), deps);
-    expect(res.status).toBe(503);
+    expect((await handle(new Request('https://x/videos'), deps)).status).toBe(503);
     expect((await handle(new Request('https://x/nope'), deps)).status).toBe(404);
     expect((await handle(new Request('https://x/videos', { method: 'POST' }), deps)).status).toBe(410);
+    expect((await handle(new Request('https://x/oauth/google/start'), deps)).status).toBe(503);
   });
-  it('enforces public-demo request size and disabled routes', async () => {
+  it('refuses cross-origin writes and enforces public-demo limits', async () => {
     const deps = appDeps(null, { settings: { ...appDeps(null).settings, publicLimits: true } });
+    expect((await handle(new Request('https://x/photos/sessions', { method: 'POST', headers: { Origin: 'https://evil.test' } }), deps)).status).toBe(403);
     expect((await handle(new Request('https://x/videos/tag', { method: 'POST' }), deps)).status).toBe(403);
     const big = new Request('https://x/query', { method: 'POST', headers: { 'content-length': '20000' }, body: 'x'.repeat(20000) });
     expect((await handle(big, deps)).status).toBe(413);

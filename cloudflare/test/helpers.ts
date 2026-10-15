@@ -1,14 +1,18 @@
 /** Fakes shared by the Node unit tests and the workerd (Miniflare D1) tests. */
+import jpeg from 'jpeg-js';
 import { AppDeps } from '../src/api';
 import { Settings } from '../src/env';
-import { Gemini } from '../src/gemini';
+import { Gemini, Segment } from '../src/gemini';
+import { MediaPort, Transcriber } from '../src/media';
+import { Reranker } from '../src/retrieval';
 import { Presigner } from '../src/storage';
 import { Embedder } from '../src/vectors';
 
 export const settings: Settings = {
-  geminiModel: 'gemini-test', embeddingModel: '@cf/test-embed', maxUploadBytes: 400 * 1024 * 1024, maxVideoSeconds: 600,
-  maxFrames: 16, searchMinSimilarity: 0.6, duplicateThreshold: 0.95, publicLimits: false, dailyUploadLimit: 10,
-  dailyQueryLimit: 100, stepsPerTick: 6,
+  geminiModel: 'gemini-test', embeddingModel: '@cf/test-embed', rerankModel: '@cf/test-rerank', whisperModel: '@cf/test-whisper',
+  maxSourceBytes: 100 * 1000 * 1000, maxVideoSeconds: 600, maxFrames: 16, frameMaxSide: 1024, candidateInterval: 1, minFrameGap: 2, maxFrameGap: 30,
+  changeThreshold: 12, describeBatch: 2, whisperDirectMaxBytes: 20 * 1000 * 1000, searchMinScore: 0.02, duplicateThreshold: 0.97,
+  publicLimits: false, dailyUploadLimit: 10, dailyQueryLimit: 100, importStaggerSeconds: 0, drivePollMinutes: 15, driveLookbackMonths: 24,
 };
 
 /** Deterministic bag-of-words embedder: shared words -> high cosine. */
@@ -27,6 +31,18 @@ export function fakeEmbedder(): Embedder {
         v[0] += 0.01;
         return v;
       });
+    },
+  };
+}
+
+/** Word-overlap reranker: the share of query words found in the passage. */
+export function fakeReranker(): Reranker {
+  const words = (s: string) => new Set(s.toLowerCase().match(/[a-z]+/g) ?? []);
+  return {
+    model: '@cf/test-rerank',
+    async rerank(query, contexts) {
+      const q = words(query);
+      return contexts.map((c) => { const w = words(c); let n = 0; for (const x of q) if (w.has(x)) n++; return q.size ? n / q.size : 0; });
     },
   };
 }
@@ -66,15 +82,30 @@ export const fakePresigner: Presigner = {
   getUrl: async (key) => `https://r2.test/${key}?get`,
 };
 
-export function fakeBucket(objects: Record<string, { size: number; contentType: string }>) {
+export interface FakeObject { size: number; contentType: string; bytes?: Uint8Array }
+
+/** An in-memory R2 bucket: head/get (with ranges)/put/list/delete and multipart uploads. */
+export function fakeBucket(objects: Record<string, FakeObject>) {
+  const bytesOf = (o: FakeObject) => o.bytes ?? new Uint8Array(o.size);
+  const body = (b: Uint8Array) => ({ body: new ReadableStream({ start(c) { c.enqueue(b); c.close(); } }), arrayBuffer: async () => b.slice().buffer });
+  const toBytes = async (v: any): Promise<Uint8Array> => (v instanceof Uint8Array ? v : v instanceof ArrayBuffer ? new Uint8Array(v) : new Uint8Array(await new Response(v).arrayBuffer()));
   return {
     async head(key: string) {
       const o = objects[key];
       return o ? { size: o.size, httpMetadata: { contentType: o.contentType } } : null;
     },
-    async get(key: string) {
+    async get(key: string, opts?: { range?: { offset?: number; length?: number; suffix?: number } }) {
       const o = objects[key];
-      return o ? { size: o.size, body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array(o.size)); c.close(); } }) } : null;
+      if (!o) return null;
+      let b = bytesOf(o);
+      const r = opts?.range;
+      if (r?.suffix !== undefined) b = b.slice(Math.max(0, b.length - r.suffix));
+      else if (r) b = b.slice(r.offset ?? 0, (r.offset ?? 0) + (r.length ?? b.length));
+      return { size: o.size, httpMetadata: { contentType: o.contentType }, ...body(b) };
+    },
+    async put(key: string, value: any, opts?: { httpMetadata?: { contentType?: string } }) {
+      const b = await toBytes(value);
+      objects[key] = { size: b.length, contentType: opts?.httpMetadata?.contentType ?? 'application/octet-stream', bytes: b };
     },
     async list(opts: { prefix?: string } = {}) {
       return { objects: Object.keys(objects).filter((k) => k.startsWith(opts.prefix ?? '')).map((key) => ({ key })), truncated: false };
@@ -82,109 +113,127 @@ export function fakeBucket(objects: Record<string, { size: number; contentType: 
     async delete(keys: string | string[]) {
       for (const k of [keys].flat()) delete objects[k];
     },
+    async createMultipartUpload(key: string, opts?: { httpMetadata?: { contentType?: string } }) {
+      const parts: Uint8Array[] = [];
+      return {
+        uploadId: 'u1', key,
+        async uploadPart(n: number, value: any) { parts[n - 1] = await toBytes(value); return { partNumber: n, etag: `e${n}` }; },
+        async complete() {
+          const total = parts.reduce((s, p) => s + p.length, 0);
+          const all = new Uint8Array(total);
+          let off = 0;
+          for (const p of parts) { all.set(p, off); off += p.length; }
+          objects[key] = { size: total, contentType: opts?.httpMetadata?.contentType ?? 'video/mp4', bytes: all };
+        },
+        async abort() {},
+      };
+    },
+    resumeMultipartUpload() { return { abort: async () => {} }; },
   } as unknown as R2Bucket;
 }
 
-export interface FakeGeminiOptions {
-  states?: string[]; // successive getFile states of an existing file
-  duration?: string;
-  tagging?: unknown;
-  tagStatus?: number;
-  uploadStatus?: number; // status for the upload start request
-  answer?: unknown;
-  /** Awaited before generateContent for tagging answers (to hold a call open). */
-  tagGate?: (signal?: AbortSignal | null) => Promise<void>;
+/** Bytes that look like an MP4 with an `mvhd` box declaring `seconds`. */
+export function fakeMp4(seconds: number, size = 4096): Uint8Array {
+  const b = new Uint8Array(size);
+  const box = new DataView(b.buffer, 32, 40);
+  box.setUint32(0, 108);
+  b.set([0x6d, 0x76, 0x68, 0x64], 36); // 'mvhd'
+  box.setUint32(20, 1000); // timescale (offset 16 from 'mvhd')
+  box.setUint32(24, Math.round(seconds * 1000)); // duration
+  return b;
 }
 
-/**
- * A Gemini client whose fetch is a scripted, stateful fake of the REST API:
- * uploaded files persist (by client-chosen or generated name), duplicate names
- * answer 409 ALREADY_EXISTS like the real API, and every call is logged.
- */
-export function fakeGemini(opts: FakeGeminiOptions = {}) {
-  const states = [...(opts.states ?? ['ACTIVE'])];
-  const log: string[] = [];
-  const files = new Map<string, { name: string; uri: string; mimeType: string; displayName: string }>();
-  const requests: any[] = [];
-  const counts = { uploads: 0, generate: 0 };
-  let pending: { name: string; displayName: string } | null = null;
-  let generated = 0;
-  const record = (f: { name: string; uri: string; mimeType: string; displayName: string }, state: string) =>
-    ({ ...f, state, videoMetadata: { videoDuration: opts.duration ?? '20s' } });
-  const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input);
-    const method = init?.method ?? 'GET';
-    const path = url.replace('https://generativelanguage.googleapis.com', '');
-    log.push(`${method} ${path}`);
-    if (url.endsWith('/upload/v1beta/files')) {
-      if (opts.uploadStatus) return new Response('{}', { status: opts.uploadStatus });
-      const file = JSON.parse(String(init?.body)).file ?? {};
-      pending = { name: file.name ?? `files/gen${++generated}`, displayName: file.display_name ?? '' };
-      return new Response('{}', { headers: { 'x-goog-upload-url': 'https://upload.test/session' } });
+/** Grayscale level of the "scene" at time t: a cut at each boundary. */
+export const sceneAt = (cuts: number[]) => (t: number) => 40 + 50 * cuts.filter((c) => t >= c).length;
+
+export function encodeTiles(levels: number[], w = 64, h = 36): Uint8Array {
+  const data = new Uint8Array(w * h * levels.length * 4);
+  levels.forEach((level, k) => {
+    for (let i = 0; i < w * h; i++) {
+      const p = (k * w * h + i) * 4;
+      data[p] = data[p + 1] = data[p + 2] = level;
+      data[p + 3] = 255;
     }
-    if (url === 'https://upload.test/session') {
-      if (init?.body instanceof ReadableStream) await new Response(init.body).arrayBuffer();
-      const { name, displayName } = pending!;
-      if (files.has(name)) return Response.json({ error: { code: 409, status: 'ALREADY_EXISTS' } }, { status: 409 });
-      counts.uploads++;
-      const file = { name, uri: `https://files.test/${name}`, mimeType: 'video/mp4', displayName };
-      files.set(name, file);
-      return Response.json({ file: record(file, 'PROCESSING') });
-    }
-    if (path.startsWith('/v1beta/files?') && method === 'GET') {
-      return Response.json({ files: [...files.values()].map((f) => record(f, states[0])) });
-    }
-    const fileMatch = /^\/v1beta\/(files\/[a-z0-9-]+)$/.exec(path);
-    if (fileMatch && method === 'GET') {
-      const file = files.get(fileMatch[1]);
-      if (!file) return Response.json({ error: { code: 404 } }, { status: 404 });
-      const state = states.length > 1 ? states.shift()! : states[0];
-      return Response.json(record(file, state));
-    }
-    if (fileMatch && method === 'DELETE') {
-      files.delete(fileMatch[1]);
-      return new Response('{}');
-    }
-    if (url.includes(':generateContent')) {
-      const body = JSON.parse(String(init?.body));
-      requests.push(body);
-      const isAnswer = JSON.stringify(body.systemInstruction).includes('retrieved evidence');
-      if (!isAnswer) {
-        counts.generate++;
-        if (opts.tagGate) await opts.tagGate(init?.signal);
-        if (init?.signal?.aborted) throw init.signal.reason;
-      }
-      if (!isAnswer && opts.tagStatus === 429) {
-        return Response.json({ error: { code: 429, status: 'RESOURCE_EXHAUSTED',
-          details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '120s' }] } }, { status: 429 });
-      }
-      if (!isAnswer && opts.tagStatus) return new Response('{}', { status: opts.tagStatus });
-      const payload = isAnswer ? opts.answer : opts.tagging ?? defaultTagging;
-      if (payload === undefined) return new Response('{}', { status: 503 });
-      return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify(payload) }] } }],
-        usageMetadata: { promptTokenCount: 1500, candidatesTokenCount: 200, totalTokenCount: 1700 } });
-    }
-    return new Response('not found', { status: 404 });
+  });
+  return new Uint8Array(jpeg.encode({ data, width: w, height: h * levels.length }, 90).data);
+}
+
+export interface FakeMediaOptions { cuts?: number[]; failFrame?: number }
+
+/** Media Transformations fake: spritesheets follow `cuts`, frames are tiny JPEGs, audio is bytes. */
+export function fakeMedia(opts: FakeMediaOptions = {}) {
+  const scene = sceneAt(opts.cuts ?? [0, 10, 20]);
+  const counts = { sprites: 0, frames: 0, audio: 0 };
+  const port: MediaPort = {
+    async spritesheet(_key, o) {
+      counts.sprites++;
+      return encodeTiles(Array.from({ length: o.count }, (_, k) => scene(o.time + (k * o.duration) / o.count)), o.width, o.height);
+    },
+    async frame(_key, o) {
+      counts.frames++;
+      if (opts.failFrame !== undefined && counts.frames === opts.failFrame) throw Object.assign(new Error('MEDIA_TRANSFORMATION_ERROR 9500: busy'), {});
+      return encodeTiles([scene(o.time)], 16, 9);
+    },
+    async audio(_key, o) {
+      counts.audio++;
+      return new TextEncoder().encode(`audio ${o.time}-${o.time + o.duration}`);
+    },
   };
-  return { gemini: new Gemini('test-key', 'gemini-test', fetcher as typeof fetch), log, files, requests, counts };
+  return { port, counts };
 }
 
-export const defaultTagging = {
-  summary: 'A person folds a blue towel on a wooden bed.',
-  tags: [
-    { label: 'Bedroom', category: 'environment', frame_indices: [0, 1] },
-    { label: 'towel', category: 'object', frame_indices: [0] },
-    { label: 'folding towel', category: 'action', frame_indices: [0] },
-  ],
-  moments: [
-    { timestamp_seconds: 12.5, description: 'Hands fold a blue towel on the bed.' },
-    { timestamp_seconds: 2, description: 'A bedroom with a wooden bed and white pillows.' },
-  ],
-};
+export function fakeTranscriber(segments: Segment[] = [{ start: 1, end: 4, text: 'Fold the blue towel neatly.' }]) {
+  const counts = { calls: 0 };
+  const transcriber: Transcriber = { model: '@cf/test-whisper', async transcribe() { counts.calls++; return segments; } };
+  return { transcriber, counts };
+}
+
+export interface FakeGeminiOptions {
+  /** Status for describe calls (e.g. 429 with RetryInfo 120 s, or 503). */
+  describeStatus?: number;
+  summaryStatus?: number;
+  answer?: unknown;
+  /** Awaited before describe calls (to hold a call open). */
+  gate?: () => Promise<void>;
+}
+
+/** A Gemini client whose fetch is a scripted fake of generateContent; calls are counted. */
+export function fakeGemini(opts: FakeGeminiOptions = {}) {
+  const requests: any[] = [];
+  const counts = { describe: 0, summary: 0, answer: 0 };
+  const reply = (payload: unknown) => Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify(payload) }] } }],
+    usageMetadata: { promptTokenCount: 1500, candidatesTokenCount: 200, totalTokenCount: 1700 } });
+  const quota = () => Response.json({ error: { code: 429, status: 'RESOURCE_EXHAUSTED',
+    details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '120s' }] } }, { status: 429 });
+  const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    requests.push(body);
+    const system = JSON.stringify(body.systemInstruction);
+    if (system.includes('still frames')) {
+      counts.describe++;
+      if (opts.gate) await opts.gate();
+      if (opts.describeStatus === 429) return quota();
+      if (opts.describeStatus) return new Response('{}', { status: opts.describeStatus });
+      const indices = body.contents[0].parts.map((p: any) => /Frame index (\d+)/.exec(p.text ?? '')?.[1]).filter(Boolean).map(Number);
+      return reply({ frames: indices.map((index: number) => ({ index, description: `Frame ${index}: hands fold a blue towel on a wooden bed in a bright bedroom.` })) });
+    }
+    if (system.includes('summarise')) {
+      counts.summary++;
+      if (opts.summaryStatus === 429) return quota();
+      if (opts.summaryStatus) return new Response('{}', { status: opts.summaryStatus });
+      return reply({ summary: 'A person folds a blue towel on a wooden bed and says to fold it neatly.',
+        tags: [{ label: 'Bedroom', category: 'environment', frame_indices: [0, 1] }, { label: 'towel', category: 'object', frame_indices: [0] },
+          { label: 'folding', category: 'action', frame_indices: [1] }, { label: 'neat folding', category: 'speech', frame_indices: [] }] });
+    }
+    counts.answer++;
+    return opts.answer === undefined ? new Response('{}', { status: 503 }) : reply(opts.answer);
+  };
+  return { gemini: new Gemini('test-key', 'gemini-test', fetcher as typeof fetch), requests, counts };
+}
 
 export function appDeps(db: D1Database | null, overrides: Partial<AppDeps> = {}): AppDeps {
   return {
-    db, bucket: null, index: null, presigner: fakePresigner, gemini: null, embedder: fakeEmbedder(), settings,
+    db, bucket: null, index: null, presigner: fakePresigner, gemini: null, embedder: fakeEmbedder(), reranker: fakeReranker(), settings,
     geminiConfigured: true, waitUntil: () => {}, ...overrides,
   };
 }

@@ -27,7 +27,8 @@ export function nowIso(): string {
 
 export function decode(row: any): Video | null {
   if (!row) return null;
-  return { ...row, result: row.result ? JSON.parse(row.result) : null, progress: row.progress ? JSON.parse(row.progress) : null };
+  return { ...row, result: row.result ? JSON.parse(row.result) : null, progress: row.progress ? JSON.parse(row.progress) : null,
+    source_meta: row.source_meta ? JSON.parse(row.source_meta) : null };
 }
 
 export async function createVideo(db: D1Database, input: { filename: string; contentType: string; size: number; displayName?: string | null; idempotencyKey?: string | null }): Promise<Video> {
@@ -42,6 +43,42 @@ export async function createVideo(db: D1Database, input: { filename: string; con
   ).bind(id, input.filename, input.displayName ?? null, `videos/${id}/source`, input.contentType, input.size, ts, key).first();
   if (!row && key) return (await getVideoByIdempotencyKey(db, key))!;
   return decode(row)!;
+}
+
+export interface SourceVideoInput {
+  source: 'photos' | 'drive';
+  sourceId: string;
+  filename: string;
+  contentType: string;
+  size: number | null;
+  meta: Record<string, unknown>;
+  /** 'pending' (to process) or 'skipped' (over a limit; error says why, nothing is copied). */
+  status: 'pending' | 'skipped';
+  error?: string | null;
+}
+
+/**
+ * One row per (source, source_id): importing the same Photos item or Drive file again returns
+ * the existing row (created=false). A Drive file modified since gets `refresh` = true from the
+ * caller, which re-queues it (new source_meta, status pending) unless it is processing.
+ */
+export async function upsertSourceVideo(db: D1Database, input: SourceVideoInput, refresh = false): Promise<{ video: Video; created: boolean }> {
+  const id = crypto.randomUUID();
+  const ts = nowIso();
+  const row = await db.prepare(
+    `INSERT INTO videos (id, filename, object_key, content_type, expected_size, status, error, uploaded, created_at, updated_at, source, source_id, source_meta)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?8, ?9, ?10, ?11)
+     ON CONFLICT (source, source_id) WHERE source_id IS NOT NULL DO NOTHING RETURNING *`,
+  ).bind(id, input.filename, `videos/${id}/source`, input.contentType, input.size, input.status, input.error ?? null, ts,
+    input.source, input.sourceId, JSON.stringify(input.meta)).first();
+  if (row) return { video: decode(row)!, created: true };
+  const existing = decode(await db.prepare('SELECT * FROM videos WHERE source=?1 AND source_id=?2').bind(input.source, input.sourceId).first())!;
+  if (refresh && existing.status !== 'processing') {
+    await db.prepare(`UPDATE videos SET source_meta=?2, expected_size=?3, status=?4, error=?5, result=NULL, uploaded=0, updated_at=?6, archived_at=NULL WHERE id=?1`)
+      .bind(existing.id, JSON.stringify(input.meta), input.size, input.status, input.error ?? null, nowIso()).run();
+    return { video: (await getVideo(db, existing.id))!, created: false };
+  }
+  return { video: existing, created: false };
 }
 
 export async function getVideoByIdempotencyKey(db: D1Database, key: string): Promise<Video | null> {

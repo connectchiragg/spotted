@@ -1,15 +1,16 @@
 /**
- * HTTP API: the same routes and response shapes as the FastAPI app (app/*.py),
- * so the existing UI works unchanged apart from citation thumbnails.
+ * HTTP API: the FastAPI app's routes and response shapes (app/*.py), plus Google sources
+ * (OAuth, Photos picker, Drive folder), WebSocket status and thumbnails.
  */
+import { libraryStub, videoStub } from './actor';
 import { Settings } from './env';
 import { Gemini, validateAnswer } from './gemini';
-import { hybridSearch, normalizeQuery } from './retrieval';
+import { authUrl, encryptSecret, exchangeCode, Google, GoogleConfig, GoogleError } from './google';
+import { normalizeQuery, Reranker, search as rankedSearch } from './retrieval';
 import { Presigner } from './storage';
 import * as store from './store';
 import { Video as Job } from './store';
-import { Embedder } from './vectors';
-import { videoStub } from './actor';
+import { Embedder, vectorIdsOf } from './vectors';
 
 export interface AppDeps {
   db: D1Database | null;
@@ -18,11 +19,17 @@ export interface AppDeps {
   presigner: Presigner | null;
   gemini: Gemini | null;
   embedder: Embedder | null;
+  reranker?: Reranker | null;
   settings: Settings;
   geminiConfigured: boolean;
   assets?: Fetcher;
-  /** VideoDO namespace: one actor per video runs ingestion and serves its SSE. */
+  /** VideoDO namespace: one actor per video runs ingestion and serves its WebSocket. */
   videos?: DurableObjectNamespace | null;
+  /** LibraryDO namespace: Google Photos sessions and Drive sync. */
+  library?: DurableObjectNamespace | null;
+  /** Google OAuth config (client id/secret, encryption key) and client; null until configured. */
+  googleConfig?: GoogleConfig | null;
+  google?: Google | null;
   /** ADMIN_TOKEN secret; null disables the admin routes (they answer 404). */
   adminToken?: string | null;
   waitUntil(promise: Promise<unknown>): void;
@@ -51,6 +58,7 @@ export function progressOf(job: Job): Record<string, any> {
   let progress: Record<string, any> = { ...(job.progress ?? {}) };
   if (job.status === 'completed') progress = { ...progress, stage: 'Completed', percent: 100, eta_seconds: 0, updated_at: job.updated_at };
   else if (job.status === 'failed') progress = { ...progress, stage: 'Failed', percent: progress.percent ?? 0, eta_seconds: null, updated_at: job.updated_at };
+  else if (job.status === 'skipped') progress = { stage: 'Skipped', percent: 0, eta_seconds: null, updated_at: job.updated_at };
   else if (job.status === 'pending' || job.status === 'uploading') {
     const stage = job.status === 'uploading' ? 'Uploading' : job.error ? 'Waiting to retry' : 'Queued';
     // A pending video waiting to retry keeps the percent of the step it reached (e.g. 55 at tag).
@@ -63,7 +71,7 @@ export function progressOf(job: Job): Record<string, any> {
 /** The status fields of a video, as pushed in SSE events (no presigned URLs, no result body). */
 export function videoState(job: Job): Record<string, any> {
   return {
-    id: job.id, filename: job.filename, display_name: job.display_name ?? null, status: job.status, error: job.error,
+    id: job.id, filename: job.filename, display_name: job.display_name ?? null, status: job.status, error: job.error, source: job.source ?? 'upload',
     attempts: job.attempts, created_at: job.created_at, updated_at: job.updated_at, archived_at: job.archived_at ?? null,
     possible_duplicate: job.result?.possible_duplicate ?? null, progress: progressOf(job),
   };
@@ -72,6 +80,8 @@ export function videoState(job: Job): Record<string, any> {
 export async function present(job: Job, presigner: Presigner | null): Promise<Record<string, any>> {
   const result: Record<string, any> = {};
   for (const k of ['id', 'filename', 'status', 'created_at', 'updated_at', 'error', 'attempts', 'result']) result[k] = job[k];
+  result.source = job.source ?? 'upload';
+  result.duration_seconds = job.duration_seconds ?? null;
   result.display_name = job.display_name ?? null;
   result.archived_at = job.archived_at ?? null;
   result.possible_duplicate = job.result?.possible_duplicate ?? null;
@@ -207,7 +217,7 @@ async function createUpload(request: Request, deps: AppDeps) {
   const db = need(deps.db, 'Database is not configured');
   const presigner = need(deps.presigner, 'Storage is not configured; set the R2 API token secrets');
   const body = validateUploadIntent(await readJson(request));
-  if (body.size_bytes > deps.settings.maxUploadBytes) throw new HttpError(413, 'Video exceeds upload size limit');
+  if (body.size_bytes >= deps.settings.maxSourceBytes) throw new HttpError(413, `Videos over ${Math.round(deps.settings.maxSourceBytes / 1e6)} MB are skipped`);
   const key = idempotencyKey(request);
   // A retried request with the same Idempotency-Key gets the same upload request, not a second one.
   const existing = key ? await store.getVideoByIdempotencyKey(db, key) : null;
@@ -226,28 +236,25 @@ async function createUpload(request: Request, deps: AppDeps) {
   }, 201);
 }
 
-// ---------------------------------------------------------------- SSE and the per-video actor
+// ---------------------------------------------------------------- WebSocket status and the per-video actor
 
-const VIDEO_EVENTS = /^\/videos\/([^/]+)\/events$/;
+const VIDEO_WS = /^\/videos\/([^/]+)\/ws$/;
 
 /**
- * GET /videos/:id/events: text/event-stream of the video's ingestion progress,
- * served by the video's VideoDO (src/video.ts), which runs the ingestion and
- * pushes each committed transition. The D1 row is passed along as the snapshot
- * for videos the actor has not started (uploading, imported). Connecting also
- * runs the lost-alarm safety net.
+ * GET /videos/:id/ws (Upgrade: websocket): the video's status stream, served by its VideoDO
+ * with the hibernation API (src/video.ts). Same-origin, so the browser sends the Access
+ * cookie with the upgrade. Connecting also runs the lost-alarm safety net.
  */
-async function videoEvents(request: Request, id: string, deps: AppDeps) {
+async function videoSocket(request: Request, id: string, deps: AppDeps) {
+  if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') throw new HttpError(426, 'Expected a WebSocket upgrade');
   const db = need(deps.db, 'Database is not configured');
   const videos = need(deps.videos, 'Live updates are not configured');
-  let video = await store.getVideo(db, id);
+  const video = await store.getVideo(db, id);
   if (!video) throw new HttpError(404, 'Request not found');
-  if (await nudge(deps, video) === 'confirmed') video = (await store.getVideo(db, id))!;
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  const last = request.headers.get('last-event-id');
-  if (last) headers['Last-Event-ID'] = last;
-  // The actor's request is cancelled with the client's, which releases its writer.
-  return videoStub(videos, id).fetch('https://video/events', { method: 'POST', headers, body: JSON.stringify(videoState(video)), signal: request.signal });
+  await nudge(deps, video);
+  const forwarded = new Request(request, { headers: new Headers(request.headers) });
+  forwarded.headers.set('x-video-id', id);
+  return videoStub(videos, id).fetch(forwarded);
 }
 
 /** Start (or resume) the video's actor. start() is idempotent; failures are logged, the nudge retries. */
@@ -313,7 +320,7 @@ async function completeUpload(id: string, deps: AppDeps) {
     throw new HttpError(502, 'Could not verify the upload; retry confirmation');
   }
   if (!head) throw new HttpError(409, 'Video has not reached storage yet; retry confirmation');
-  if (head.size !== job.expected_size || head.size > deps.settings.maxUploadBytes) {
+  if (head.size !== job.expected_size || head.size >= deps.settings.maxSourceBytes) {
     await store.uploadFailed(db, job.id, 'Stored video size does not match upload request');
     throw new HttpError(422, 'Stored video size does not match upload request');
   }
@@ -352,20 +359,15 @@ async function history(url: URL, deps: AppDeps) {
   return json({ items: await Promise.all(jobs.map((j) => present(j, deps.presigner))), limit, offset });
 }
 
-async function frame(id: string, index: number, deps: AppDeps) {
+/** GET /videos/:id/thumbs/:i: a selected frame's JPEG, streamed from R2 (same-origin, behind Access). */
+async function thumb(id: string, index: number, deps: AppDeps) {
   const db = need(deps.db, 'Database is not configured');
+  const bucket = need(deps.bucket, 'Storage is not configured');
   const job = await store.getVideo(db, id);
-  if (!job || job.status !== 'completed' || job.archived_at) throw new HttpError(404, 'Completed video not found');
-  const timestamps: number[] = job.result?.sampled_timestamps ?? [];
-  if (!(index >= 0 && index < timestamps.length)) throw new HttpError(404, 'Sampled frame not found');
-  const stored: number[] = job.result.frame_indices ?? job.result.preview_indices ?? [];
-  if (!stored.includes(index)) {
-    // Worker-ingested videos keep no JPEGs (no FFmpeg on Workers); the UI seeks the video instead.
-    throw new HttpError(404, 'No stored image for this moment; open the video at the cited time');
-  }
-  const presigner = need(deps.presigner, 'Storage is not configured');
-  const url = await presigner.getUrl(`videos/${job.id}/frames/${index}.jpg`, DOWNLOAD_TTL);
-  return new Response(null, { status: 307, headers: { Location: url, 'Cache-Control': 'private, no-store' } });
+  if (!job || job.archived_at || !(job.result?.thumbs ?? []).includes(index)) throw new HttpError(404, 'Frame not found');
+  const object = await bucket.get(`videos/${job.id}/frames/${index}.jpg`);
+  if (!object) throw new HttpError(404, 'Frame not found');
+  return new Response(object.body, { headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=86400', 'X-Content-Type-Options': 'nosniff' } });
 }
 
 function readQuery(value: unknown): string {
@@ -379,10 +381,11 @@ async function retrieve(q: string, deps: AppDeps) {
   const db = need(deps.db, 'Database is not configured');
   const index = need(deps.index, 'Search index is not configured');
   const embedder = need(deps.embedder, 'Embedding model unavailable');
+  const reranker = need(deps.reranker, 'Reranking model unavailable');
   try {
     const normalized = normalizeQuery(q);
     const [vector] = await embedder.embed([normalized]);
-    return await hybridSearch({ db, index }, vector, normalized, deps.settings.searchMinSimilarity);
+    return await rankedSearch({ db, index, reranker }, vector, normalized, deps.settings.searchMinScore);
   } catch (error) {
     if (error instanceof HttpError) throw error;
     console.warn('search failed', (error as Error)?.message);
@@ -393,7 +396,7 @@ async function retrieve(q: string, deps: AppDeps) {
 async function search(url: URL, deps: AppDeps) {
   const q = readQuery(url.searchParams.get('q'));
   const ranked = await retrieve(q, deps);
-  return json({ query: q, embedding_model: deps.embedder!.model, min_similarity: deps.settings.searchMinSimilarity,
+  return json({ query: q, embedding_model: deps.embedder!.model, rerank_model: deps.reranker!.model, min_score: deps.settings.searchMinScore,
     items: await Promise.all(ranked.map(async (r) => ({ ...(await present(r.job, deps.presigner)), retrieval: r.retrieval }))) });
 }
 
@@ -402,15 +405,15 @@ async function queryVideos(request: Request, deps: AppDeps) {
   const q = readQuery(body?.q);
   const ranked = await retrieve(q, deps);
   const items = await Promise.all(ranked.map(async (r) => ({ ...(await present(r.job, deps.presigner)), retrieval: r.retrieval })));
-  const response: Record<string, any> = { query: q, embedding_model: deps.embedder!.model, min_similarity: deps.settings.searchMinSimilarity,
+  const response: Record<string, any> = { query: q, embedding_model: deps.embedder!.model, rerank_model: deps.reranker!.model, min_score: deps.settings.searchMinScore,
     items, answer: 'No matching videos were found in the indexed collection.', answer_source: 'retrieval', answer_warning: null };
   if (!items.length) return json(response);
   const candidates = ranked.map((r, i) => {
     const evidence = r.retrieval.citation ?? {};
-    return { number: i + 1, id: r.job.id, summary: r.job.result.summary, tags: r.job.result.tags.map((t: any) => t.label),
-      selected_frame: { description: evidence.description ?? evidence.label, timestamp_seconds: evidence.timestamp_seconds } };
+    return { number: i + 1, title: r.job.display_name ?? r.job.filename, summary: r.job.result.summary, tags: (r.job.result.tags ?? []).map((t: any) => t.label),
+      evidence: { kind: evidence.kind, at: clock(evidence.timestamp_seconds), text: String(evidence.description ?? '').slice(0, 1500) } };
   });
-  response.answer = `Found ${items.length} matching video(s). Review the tags and sampled-frame evidence below.`;
+  response.answer = `Found ${items.length} matching video(s). Review the evidence below.`;
   try {
     const gemini = need(deps.gemini, 'no model');
     const { value, usage } = await gemini.answer(q, candidates);
@@ -439,8 +442,115 @@ export async function tokenMatches(header: string | null, expected: string): Pro
   return diff === 0;
 }
 
-/** Vector ids a video can own (vectors.ts): document, description, and one per frame (MAX_FRAMES <= 32). */
-export const vectorIds = (id: string) => [`v:${id}`, `d:${id}`, ...Array.from({ length: 64 }, (_, i) => `f:${id}:${i}`)];
+/** Vector ids a video can own (vectors.ts): summary, transcript windows and frames. */
+export const vectorIds = (id: string) => vectorIdsOf(id);
+
+const clock = (t: unknown) => {
+  const s = Math.max(0, Math.round(Number(t) || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};
+
+// ---------------------------------------------------------------- Google sources
+
+/** One-time state for the consent redirect (CSRF), valid 10 minutes. */
+async function googleStart(deps: AppDeps) {
+  const db = need(deps.db, 'Database is not configured');
+  const cfg = need(deps.googleConfig, 'Google sign-in is not configured yet (GOOGLE_CLIENT_SECRET / TOKEN_ENC_KEY)');
+  const state = [...crypto.getRandomValues(new Uint8Array(24))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const now = Math.floor(Date.now() / 1000);
+  await db.batch([
+    db.prepare('DELETE FROM oauth_states WHERE created_at < ?1').bind(now - 600),
+    db.prepare('INSERT INTO oauth_states (state, created_at) VALUES (?1, ?2)').bind(state, now),
+  ]);
+  return new Response(null, { status: 302, headers: { Location: authUrl(cfg, state), 'Cache-Control': 'no-store' } });
+}
+
+async function googleCallback(url: URL, deps: AppDeps) {
+  const db = need(deps.db, 'Database is not configured');
+  const cfg = need(deps.googleConfig, 'Google sign-in is not configured yet');
+  const back = (status: string) => new Response(null, { status: 302, headers: { Location: `/?google=${status}`, 'Cache-Control': 'no-store' } });
+  const state = url.searchParams.get('state') ?? '';
+  const used = await db.prepare('DELETE FROM oauth_states WHERE state=?1 AND created_at >= ?2 RETURNING state')
+    .bind(state, Math.floor(Date.now() / 1000) - 600).first();
+  if (!used) return back('expired');
+  if (url.searchParams.get('error')) return back('denied');
+  const code = url.searchParams.get('code');
+  if (!code) return back('error');
+  try {
+    const { refreshToken, scope } = await exchangeCode(cfg, code);
+    const sealed = await encryptSecret(refreshToken, cfg.encKey);
+    const ts = store.nowIso();
+    await db.prepare(`INSERT INTO google_auth (id, refresh_token_enc, scopes, status, error, connected_at, updated_at) VALUES (1, ?1, ?2, 'connected', NULL, ?3, ?3)
+      ON CONFLICT (id) DO UPDATE SET refresh_token_enc=excluded.refresh_token_enc, scopes=excluded.scopes, status='connected', error=NULL, updated_at=excluded.updated_at`)
+      .bind(sealed, scope, ts).run();
+    if (deps.library) await libraryStub(deps.library).poke(); // resume a Drive sync stopped by an expired token
+    return back('connected');
+  } catch (error) {
+    console.warn('google connect failed', (error as Error)?.message);
+    return back('error');
+  }
+}
+
+async function googleStatus(deps: AppDeps) {
+  const db = need(deps.db, 'Database is not configured');
+  const auth = await db.prepare('SELECT status, error, scopes, connected_at, updated_at FROM google_auth WHERE id=1').first<any>();
+  const drive = await db.prepare('SELECT folder_id, folder_name, initial_done, last_sync_at, error FROM drive_sync WHERE id=1').first<any>();
+  const { results: sessions } = await db.prepare('SELECT id, status, error, imported, skipped, created_at, updated_at FROM picker_sessions ORDER BY created_at DESC LIMIT 5').all();
+  return json({
+    configured: Boolean(deps.googleConfig), connection: auth ? auth.status : 'disconnected', error: auth?.error ?? null,
+    scopes: auth?.scopes ? String(auth.scopes).split(' ') : [], connected_at: auth?.connected_at ?? null,
+    drive: drive ?? null, picker_sessions: sessions, max_source_mb: Math.round(deps.settings.maxSourceBytes / 1e6),
+    drive_poll_minutes: deps.settings.drivePollMinutes,
+  });
+}
+
+function googleError(error: unknown): never {
+  if (error instanceof GoogleError) throw new HttpError(error.status === 401 || error.status === 409 ? 409 : 502, error.message);
+  throw error;
+}
+
+/** POST /photos/sessions: a Google Photos picker session; the LibraryDO polls it until items are picked. */
+async function createPickerSession(deps: AppDeps) {
+  const db = need(deps.db, 'Database is not configured');
+  const google = need(deps.google, 'Google is not configured');
+  const session = await google.createPickerSession().catch(googleError);
+  const ts = store.nowIso();
+  await db.prepare(`INSERT INTO picker_sessions (id, picker_uri, status, expire_time, created_at, updated_at) VALUES (?1, ?2, 'waiting', ?3, ?4, ?4)`)
+    .bind(session.id, session.pickerUri, session.expireTime ?? null, ts).run();
+  if (deps.library) await libraryStub(deps.library).poke();
+  return json({ id: session.id, picker_uri: `${session.pickerUri.replace(/\/$/, '')}/autoclose`, status: 'waiting' }, 201);
+}
+
+async function pickerSession(id: string, deps: AppDeps) {
+  const db = need(deps.db, 'Database is not configured');
+  const row = await db.prepare('SELECT id, status, error, imported, skipped, created_at, updated_at FROM picker_sessions WHERE id=?1').bind(id).first();
+  if (!row) throw new HttpError(404, 'Picker session not found');
+  return json(row);
+}
+
+/** PUT /drive/folder {"folder": "<id or URL>"}: sync this folder (replaces any previous one). */
+async function setDriveFolder(request: Request, deps: AppDeps) {
+  const db = need(deps.db, 'Database is not configured');
+  const google = need(deps.google, 'Google is not configured');
+  const body = await readJson(request);
+  const raw = typeof body?.folder === 'string' ? body.folder.trim() : '';
+  const id = /\/folders\/([A-Za-z0-9_-]{10,})/.exec(raw)?.[1] ?? (/^[A-Za-z0-9_-]{10,}$/.test(raw) ? raw : null);
+  if (!id) throw new HttpError(422, 'Paste a Drive folder link or folder id');
+  const folder = await google.driveFolder(id).catch(googleError);
+  if (folder.mimeType !== 'application/vnd.google-apps.folder') throw new HttpError(422, 'That Drive item is not a folder');
+  const ts = store.nowIso();
+  await db.prepare(`INSERT INTO drive_sync (id, folder_id, folder_name, page_token, initial_done, last_sync_at, error, updated_at) VALUES (1, ?1, ?2, NULL, 0, NULL, NULL, ?3)
+    ON CONFLICT (id) DO UPDATE SET folder_id=excluded.folder_id, folder_name=excluded.folder_name, page_token=NULL, initial_done=0, error=NULL, updated_at=excluded.updated_at`)
+    .bind(folder.id, folder.name, ts).run();
+  if (deps.library) await libraryStub(deps.library).poke();
+  return json({ folder_id: folder.id, folder_name: folder.name, status: 'syncing' });
+}
+
+/** Non-GET requests must come from this origin (no cross-site form posts riding the Access cookie). */
+function sameOrigin(request: Request, url: URL): boolean {
+  const origin = request.headers.get('origin');
+  return origin === null || origin === url.origin;
+}
 
 /**
  * DELETE /admin/videos/:id (Authorization: Bearer ADMIN_TOKEN): remove a video completely.
@@ -474,7 +584,8 @@ async function purgeVideo(id: string, deps: AppDeps) {
 const VIDEO = /^\/videos\/([^/]+)$/;
 const ADMIN_VIDEO = /^\/admin\/videos\/([^/]+)$/;
 const VIDEO_ACTION = /^\/videos\/([^/]+)\/(complete|archive|restore)$/;
-const FRAME = /^\/videos\/([^/]+)\/frames\/(\d+)$/;
+const THUMB = /^\/videos\/([^/]+)\/(?:thumbs|frames)\/(\d+)$/;
+const PICKER_SESSION = /^\/photos\/sessions\/([^/]+)$/;
 
 export async function handle(request: Request, deps: AppDeps): Promise<Response> {
   const url = new URL(request.url);
@@ -495,6 +606,18 @@ export async function handle(request: Request, deps: AppDeps): Promise<Response>
       }
       return await purgeVideo(decodeURIComponent(admin[1]), deps);
     }
+    if (method !== 'GET' && method !== 'HEAD' && !sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request refused');
+    if (method === 'GET' && path === '/oauth/google/start') return await googleStart(deps);
+    if (method === 'GET' && path === '/oauth/google/callback') return await googleCallback(url, deps);
+    if (method === 'GET' && path === '/google/status') return await googleStatus(deps);
+    if (method === 'POST' && path === '/photos/sessions') return await createPickerSession(deps);
+    const session = PICKER_SESSION.exec(path);
+    if (session && method === 'GET') return await pickerSession(decodeURIComponent(session[1]), deps);
+    if (method === 'PUT' && path === '/drive/folder') return await setDriveFolder(request, deps);
+    if (method === 'POST' && path === '/drive/sync') {
+      if (deps.library) await libraryStub(deps.library).poke();
+      return json({ status: 'syncing' }, 202);
+    }
     const limited = await publicBudget(request, path, deps);
     if (limited) return limited;
 
@@ -505,8 +628,8 @@ export async function handle(request: Request, deps: AppDeps): Promise<Response>
     if (method === 'GET' && path === '/videos') return await history(url, deps);
     if (method === 'GET' && path === '/search') return await search(url, deps);
     if (method === 'POST' && path === '/query') return await queryVideos(request, deps);
-    let m = FRAME.exec(path);
-    if (m && method === 'GET') return await frame(decodeURIComponent(m[1]), Number(m[2]), deps);
+    let m = THUMB.exec(path);
+    if (m && method === 'GET') return await thumb(decodeURIComponent(m[1]), Number(m[2]), deps);
     m = VIDEO_ACTION.exec(path);
     if (m && method === 'POST') {
       const id = decodeURIComponent(m[1]);
@@ -516,8 +639,8 @@ export async function handle(request: Request, deps: AppDeps): Promise<Response>
       if (!ok) throw new HttpError(404, 'Request not found');
       return json(await present((await store.getVideo(db, id))!, deps.presigner));
     }
-    m = VIDEO_EVENTS.exec(path);
-    if (m && method === 'GET') return await videoEvents(request, decodeURIComponent(m[1]), deps);
+    m = VIDEO_WS.exec(path);
+    if (m && method === 'GET') return await videoSocket(request, decodeURIComponent(m[1]), deps);
     m = VIDEO.exec(path);
     if (m && method === 'GET' && m[1] !== 'uploads') {
       const db = need(deps.db, 'Database is not configured');
