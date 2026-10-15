@@ -4,7 +4,8 @@ import { settings as readSettings } from '../src/env';
 import { changeScores, mad, mp4Duration, selectFrames, spriteTiles, spriteWindows, tileTime } from '../src/frames';
 import { Gemini, validateAnswer, validateDescriptions, validateSummary } from '../src/gemini';
 import { authUrl, decryptSecret, encryptSecret, SCOPES } from '../src/google';
-import { normalizeQuery, passageOf, rankVideos, rerankText } from '../src/retrieval';
+import { canonicalLabel, expandLabels, LABELS, LABEL_BY_NAME, queryLabels, validateLabels } from '../src/labels';
+import { labelVerdict, normalizeQuery, passageOf, rankVideos, rerankText, videoLabels } from '../src/retrieval';
 
 const T = { minScore: 0.02, softMinScore: 0.008, minSimilarity: 0.53, vectorMargin: 0.07 };
 import { parseVectorId, transcriptWindows } from '../src/vectors';
@@ -94,6 +95,22 @@ describe('Gemini on frames', () => {
     expect(() => validateDescriptions({ frames: [{ index: 2, description: 'A' }] }, [{ index: 2 }, { index: 5 }])).toThrow(/skipped a frame/);
     const s = validateSummary({ summary: 's', tags: [{ label: 'Cat ', category: 'object', frame_indices: [0, 9] }, { label: 'cat', category: 'object', frame_indices: [1] }] }, 2);
     expect(s.tags).toEqual([{ label: 'cat', category: 'object', frame_indices: [0, 1] }]);
+     expect(s.labels).toEqual([]);
+    const l = validateSummary({ summary: 's', tags: [], labels: [{ label: 'Wild boar', frame_indices: [0] }, 'pig', 'dragon'], sounds: ['birds chirping', 'soccer'] }, 2);
+    expect([l.labels, l.sounds]).toEqual([['wild boar', 'pig'], ['birdsong']]);
+  });
+
+  it('folds labels and sound tags into the summary call, with the soundtrack inline', () => {
+    const frames = [{ frame_index: 0, description: 'A boar.', t: 0 }];
+    const req = Gemini.summaryRequest(frames, [], 5, new Uint8Array([1, 2, 3]));
+    const prompt = req.systemInstruction.parts[0].text;
+    expect(prompt).toContain('wild boar');
+    expect(prompt).toContain('cheering');
+    expect(prompt).toContain('soundtrack');
+    expect(req.contents[0].parts.at(-1)).toEqual({ inlineData: { mimeType: 'audio/mp4', data: 'AQID' } });
+    const silent = Gemini.summaryRequest(frames, [], 5, null);
+    expect(silent.contents[0].parts).toHaveLength(1);
+    expect(silent.systemInstruction.parts[0].text).not.toContain('soundtrack');
   });
 
   it('classifies a 429 as a quota wait with RetryInfo, and 503 as retryable', async () => {
@@ -187,6 +204,98 @@ describe('index entries and ranking', () => {
   it('drops a high rerank score whose video is far from the best vector match', () => {
     // "indian super league": only one clip is the ISL match; the reranker also liked another match.
     expect(ids(rankVideos(groupsOf({ isl: [0.568, 0.97], aek: [0.449, 0.07], blue: [0.418, 0.13] }), T))).toEqual(['isl']);
+  });
+  // Labels (2026-10-15, after the relabel backfill). Measured best bge-m3 cosine and bge-reranker-base score per video,
+  // with each video's stored labels as Gemini picked them.
+  const labelled = (scores: Record<string, [number, number]>, labels: Record<string, string[]>, sounds: Record<string, string[]> = {}) =>
+    groupsOf(scores).map((g) => ({ ...g, job: { ...g.job, result: { ...g.job.result, labels: labels[g.job.id] ?? [], sounds: sounds[g.job.id] ?? [] } } }));
+  const LIVE = { aek: ['soccer', 'stadium', 'crowd', 'goal', 'scoreboard', 'people'], crocodile: ['nature', 'lake', 'forest', 'tree', 'crocodile'],
+    boar: ['wild boar', 'nature', 'meadow', 'forest', 'water'], blue: ['soccer', 'stadium', 'crowd', 'goal celebration', 'ambulance', 'sky', 'sunset'],
+    isl: ['stadium', 'soccer', 'scoreboard'] };
+
+  it('vetoes a reranker-only match whose labels contradict the query ("basketball" vs soccer)', () => {
+    const scores = { aek: [0.488, 0.0522], blue: [0.45, 0.0521], isl: [0.443, 0.0438], crocodile: [0.352, 3.7e-5], boar: [0.348, 3.7e-5] } as Record<string, [number, number]>;
+    expect(ids(rankVideos(labelled(scores, LIVE), T))).toEqual(['aek', 'blue', 'isl']); // without query labels: all three soccer clips pass 0.02
+    expect(rankVideos(labelled(scores, LIVE), T, queryLabels('basketball'))).toEqual([]);
+    expect(labelVerdict(['basketball'], videoLabels(labelled(scores, LIVE)[0].job))).toBe('conflict');
+  });
+
+  it('vetoes "bird" on the crocodile (reptile) and the boar (mammal)', () => {
+    const scores = { crocodile: [0.531, 0.0187], boar: [0.574, 0.00285], isl: [0.472, 8.7e-5] } as Record<string, [number, number]>;
+    expect(ids(rankVideos(labelled(scores, LIVE), T))).toEqual(['crocodile']); // soft rule: 0.0187 >= 0.008 with cosine 0.531 >= 0.53
+    expect(rankVideos(labelled(scores, LIVE), T, ['bird'])).toEqual([]);
+  });
+
+  it('rescues a clear label hit below the rerank thresholds ("wildlife": the boar at 0.0052)', () => {
+    const scores = { boar: [0.597, 0.00522], crocodile: [0.54, 0.0217], isl: [0.422, 3.7e-5], blue: [0.401, 3.7e-5], aek: [0.375, 3.7e-5] } as Record<string, [number, number]>;
+    expect(ids(rankVideos(labelled(scores, LIVE), T))).toEqual(['crocodile']);
+    const ranked = rankVideos(labelled(scores, LIVE), T, queryLabels('wildlife'));
+    expect(ids(ranked)).toEqual(['crocodile', 'boar']);
+    expect(ranked.map((r) => r.retrieval.matched_by)).toEqual(['label', 'label']);
+    expect(ranked[0].retrieval.query_labels).toEqual(['wildlife']);
+  });
+
+  it('ranks label hits before reranker-only videos and keeps every hit ("sport")', () => {
+    const scores = { isl: [0.539, 0.0952], blue: [0.53, 0.047], aek: [0.524, 0.0446], boar: [0.371, 3.7e-5] } as Record<string, [number, number]>;
+    expect(ids(rankVideos(labelled(scores, LIVE), T, ['sport']))).toEqual(['isl', 'blue', 'aek']);
+  });
+
+  it('matches sound tags ("cheering crowd" needs both the sound and the crowd)', () => {
+    const scores = { aek: [0.5, 0.005], isl: [0.5, 0.005] } as Record<string, [number, number]>;
+    const ranked = rankVideos(labelled(scores, LIVE, { aek: ['cheering', 'commentary'], isl: ['cheering'] }), T, queryLabels('cheering crowd'));
+    expect(ids(ranked)).toEqual(['aek']); // isl has no crowd label: left to the reranker, which is below the floor here
+  });
+
+  it('leaves queries that name no label to the rerank rule', () => {
+    expect(queryLabels('van Mieghem')).toEqual([]);
+    expect(labelVerdict([], new Set(['soccer']))).toBe('none');
+    expect(labelVerdict(['pig'], videoLabels({ id: 'c', result: { labels: ['crocodile'] } } as any))).toBe('none'); // no pig, no other mammal
+  });
+
+  it('puts sounds into the reranker context and next to the summary', () => {
+    const job = { id: 'v', result: { summary: 'A match.', tags: [], sounds: ['cheering', 'applause'], sampled_timestamps: [0], thumbs: [0],
+      frame_descriptions: [{ frame_index: 0, description: 'Players.' }] } } as any;
+    expect(rerankText(job, passageOf(job, 'summary', 0, 0.5)!)).toBe('A match.\nSounds: cheering, applause.');
+    expect(rerankText(job, passageOf(job, 'frame', 0, 0.5)!)).toBe('Video: A match. Sounds: cheering, applause.\nPlayers.');
+  });
+});
+
+describe('label hierarchy', () => {
+  it('is a small, consistent vocabulary: unique names, known parents, no cycles', () => {
+    expect(LABELS.length).toBeGreaterThanOrEqual(100);
+    expect(LABELS.length).toBeLessThanOrEqual(200);
+    expect(new Set(LABELS.map((d) => d.name)).size).toBe(LABELS.length);
+    for (const d of LABELS) {
+      for (const p of d.parents) expect(LABEL_BY_NAME.get(p)?.kind, `${d.name} -> ${p}`).toBe(d.kind);
+      expect(expandLabels([d.name]).length).toBeLessThan(15); // terminates (a cycle would recurse forever)
+    }
+  });
+
+  it('adds every ancestor in our code', () => {
+    expect(expandLabels(['soccer'])).toEqual(['ball game', 'soccer', 'sport', 'team sport']);
+    expect(expandLabels(['wild boar'])).toEqual(['animal', 'mammal', 'nature', 'pig', 'wild boar', 'wildlife']);
+    expect(expandLabels(['crocodile'])).toEqual(['animal', 'crocodile', 'nature', 'reptile', 'wildlife']);
+    expect(expandLabels(['ambulance', 'cheering'])).toEqual(['ambulance', 'cheering', 'crowd sounds', 'emergency vehicle', 'vehicle']);
+    expect(expandLabels(['sunset'])).not.toContain('nature'); // a stadium at sunset is not a nature video
+    expect(expandLabels(['unicorn'])).toEqual([]);
+  });
+
+  it('validates the model output against the vocabulary', () => {
+    expect(validateLabels(['Soccer', 'football', 'unicorn', { label: 'ambulance', frame_indices: [3] }, 'Crocodiles', 'cheering', 42], 'visual'))
+      .toEqual(['soccer', 'ambulance', 'crocodile']); // synonyms folded, duplicates merged, unknown and sound names dropped
+    expect(validateLabels(['Cheering', 'clapping', 'soccer'], 'sound')).toEqual(['cheering', 'applause']);
+    expect(validateLabels('soccer', 'visual')).toEqual([]);
+    expect(validateLabels(Array.from({ length: 50 }, (_, i) => LABELS[i].name), 'visual', 25)).toHaveLength(25);
+    expect(canonicalLabel('Alligator')).toBe('crocodile');
+  });
+
+  it('maps queries to labels, longest phrase first', () => {
+    expect(queryLabels('Wildlife')).toEqual(['wildlife']);
+    expect(queryLabels('american football game')).toEqual(['american football', 'sports match']);
+    expect(queryLabels('football')).toEqual(['soccer']);
+    expect(queryLabels('a pig eating grass')).toEqual(['pig', 'eating']);
+    expect(queryLabels('cheering crowd')).toEqual(['cheering', 'crowd']);
+    expect(queryLabels('office meeting')).toEqual(['meeting']);
   });
 });
 

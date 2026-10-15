@@ -8,6 +8,7 @@ import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } fr
 import { exports } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { handle } from '../../src/api';
+import { PROMPT_VERSION } from '../../src/gemini';
 import { Google } from '../../src/google';
 import * as store from '../../src/store';
 import { EvictionError, IngestState, MAX_ATTEMPTS, MAX_QUOTA_WINDOW_MS, VideoDO } from '../../src/video';
@@ -87,6 +88,12 @@ describe('VideoDO: the frame + transcript pipeline', () => {
       transcript: [{ start: 1, end: 4, text: 'Fold the blue towel neatly.' }], duration_seconds: 30, usage: { gemini_calls: 3 } });
     expect(row.result.frame_descriptions).toHaveLength(3);
     expect(row.result.tags.map((x: any) => x.label)).toContain('towel');
+    // Sound tags: the first SOUND_MAX_S of audio is kept in R2 and heard by the summarize call; labels are validated.
+    expect(t.media.counts.audio).toBe(1);
+    expect(t.objects[`videos/${t.video.id}/sound.m4a`]).toMatchObject({ contentType: 'audio/mp4' });
+    const summaryRequest = t.gemini.requests.find((r) => JSON.stringify(r.systemInstruction).includes('summarise'));
+    expect(summaryRequest.contents[0].parts.at(-1).inlineData.mimeType).toBe('audio/mp4');
+    expect(row.result).toMatchObject({ labels: ['bedroom', 'cleaning'], sounds: ['speech'], prompt_version: PROMPT_VERSION });
     expect(Object.keys(t.objects).filter((k) => k.startsWith('thumbs/')).sort()).toEqual([0, 1, 2].map((i) => `thumbs/${t.video.id}/${i}.jpg`));
     expect([...t.vectors.store.keys()].sort()).toEqual([`f:${t.video.id}:0`, `f:${t.video.id}:1`, `f:${t.video.id}:2`, `s:${t.video.id}`, `t:${t.video.id}:0`]);
     expect(t.vectors.store.get(`f:${t.video.id}:1`)!.metadata).toMatchObject({ kind: 'frame', video_id: t.video.id, t_start: 10, thumb_key: `thumbs/${t.video.id}/1.jpg`, source: 'upload' });

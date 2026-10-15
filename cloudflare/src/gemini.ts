@@ -5,11 +5,14 @@
  *   describeFrames  a batch of up to DESCRIBE_BATCH JPEGs -> one detailed paragraph per frame
  *                   (scene, objects, people and actions, visible text, setting, and what
  *                   changed since the previous frame), with the nearby transcript as context;
- *   summarize       the frame paragraphs + the transcript -> a narrative summary and tags;
+ *   summarize       the frame paragraphs + the transcript + the first minute of audio -> a narrative
+ *                   summary, tags, vocabulary labels and sound tags (src/labels.ts);
  *   answer          a grounded answer over retrieved evidence with [n] citations.
  */
+import { validateLabels, vocabularyPrompt } from './labels';
+
 const API = 'https://generativelanguage.googleapis.com';
-export const PROMPT_VERSION = 'cf-frames-v3';
+export const PROMPT_VERSION = 'cf-frames-v4-labels';
 
 export class TaggerError extends Error {
   /** A 429 rate/quota limit: waited out without using up the step's failure attempts. */
@@ -79,14 +82,24 @@ Return JSON only: {"frames":[{"index":<the given frame index>,"description":"...
 frame given, in the same order.`;
 }
 
-export function summaryPrompt(): string {
+export function summaryPrompt(withAudio = false): string {
   return `You summarise one video from its per-frame descriptions (with timestamps) and its speech
-transcript. Write "summary": one narrative paragraph (4-8 sentences) of what happens, in order,
-including what is said when it matters. Then "tags": up to 20 concise lowercase labels for
-visible environments, objects and actions, and notable spoken topics (category "speech"), each
-with the frame indices that support it (use [] only for speech tags).
+transcript${withAudio ? ', and you also hear its soundtrack (the attached audio, from the start of the video)' : ''}. Write "summary": one narrative paragraph (4-8 sentences) of what happens, in order,
+including what is said when it matters${withAudio ? ' and notable sounds (cheering, applause, music, engines...)' : ''}. Then "tags": 8-20 concise lowercase free-form labels for
+visible environments (always at least one), objects and actions, and notable spoken topics
+(category "speech"), each with the frame indices that support it (use [] only for speech tags).
+Then "labels": labels from the fixed vocabulary below for what is SEEN. Go through the frame
+descriptions and, for every animal, sport, vehicle, place, landscape, event and activity they name,
+add the MOST SPECIFIC vocabulary label that fits, with the frames that show it (e.g. a crocodile ->
+"crocodile", not "reptile"; players on a pitch -> "soccer"; an ambulance -> "ambulance", not "car").
+Use the exact names; skip anything not in the vocabulary, anything only mentioned in speech, and
+anything you are unsure of. Sports labels only for people playing that sport. Vocabulary:
+${vocabularyPrompt('visual')}.
+Then "sounds": the non-speech sounds clearly HEARD${withAudio ? ' in the audio' : ''}, from this fixed list (exact names;
+"commentary" for a commentator or announcer, "speech" for other talking; [] if there is no audio or nothing is clearly audible):
+${vocabularyPrompt('sound')}.
 ${RULES}
-Return JSON only: {"summary":"...","tags":[{"label":"...","category":"environment|object|action|speech","frame_indices":[0]}]}`;
+Return JSON only: {"summary":"...","tags":[{"label":"...","category":"environment|object|action|speech","frame_indices":[0]}],"labels":[{"label":"...","frame_indices":[0]}],"sounds":["..."]}`;
 }
 
 export function validateDescriptions(raw: any, frames: { index: number }[]): FrameDescription[] {
@@ -103,7 +116,10 @@ export function validateDescriptions(raw: any, frames: { index: number }[]): Fra
   });
 }
 
-export function validateSummary(raw: any, frameCount: number): { summary: string; tags: Tag[] } {
+export interface SummaryResult { summary: string; tags: Tag[]; labels: string[]; sounds: string[] }
+
+/** Summary + free-form tags, plus labels and sounds validated against the fixed vocabulary (src/labels.ts). */
+export function validateSummary(raw: any, frameCount: number): SummaryResult {
   const summary = typeof raw?.summary === 'string' ? raw.summary.trim() : '';
   if (!summary || summary.length > 4000) fail('Gemini returned a malformed summary');
   if (!Array.isArray(raw.tags) || raw.tags.length > 40) fail('Gemini returned malformed tags');
@@ -117,7 +133,7 @@ export function validateSummary(raw: any, frameCount: number): { summary: string
     const all = new Set([...(merged.get(key)?.frame_indices ?? []), ...indices]);
     merged.set(key, { label, category, frame_indices: [...all].sort((a, b) => a - b) });
   }
-  return { summary, tags: [...merged.values()] };
+  return { summary, tags: [...merged.values()], labels: validateLabels(raw.labels, 'visual'), sounds: validateLabels(raw.sounds, 'sound', 12) };
 }
 
 export class Gemini {
@@ -173,14 +189,18 @@ export class Gemini {
     return { descriptions: validateDescriptions(Gemini.parse(text), frames), usage };
   }
 
-  async summarize(frames: (FrameDescription & { t: number })[], transcript: Segment[], duration: number): Promise<{ summary: string; tags: Tag[]; usage: TokenUsage | null }> {
+  /** One call: the paragraphs + transcript (+ up to SOUND_MAX_S of the soundtrack as M4A) -> summary, tags, labels, sounds. */
+  static summaryRequest(frames: (FrameDescription & { t: number })[], transcript: Segment[], duration: number, audio: Uint8Array | null = null) {
     const speech = transcript.map((s) => `[${s.start.toFixed(0)}s] ${s.text.trim()}`).join('\n').slice(0, 20000);
     const visual = frames.map((f) => `Frame ${f.frame_index} at ${f.t.toFixed(1)} s: ${f.description}`).join('\n\n');
-    const { text, usage } = await this.generate({
-      systemInstruction: { parts: [{ text: summaryPrompt() }] },
-      contents: [{ role: 'user', parts: [{ text: `Video duration: ${duration.toFixed(1)} s.\n\nFRAMES:\n${visual}\n\nTRANSCRIPT:\n${speech || '(no speech detected)'}` }] }],
-      generationConfig: { responseMimeType: 'application/json' },
-    });
+    const parts: any[] = [{ text: `Video duration: ${duration.toFixed(1)} s.\n\nFRAMES:\n${visual}\n\nTRANSCRIPT:\n${speech || '(no speech detected)'}` }];
+    if (audio?.length) parts.push({ text: 'SOUNDTRACK (audio from the start of the video):' }, { inlineData: { mimeType: 'audio/mp4', data: base64(audio) } });
+    return { systemInstruction: { parts: [{ text: summaryPrompt(Boolean(audio?.length)) }] }, contents: [{ role: 'user', parts }],
+      generationConfig: { responseMimeType: 'application/json' } };
+  }
+
+  async summarize(frames: (FrameDescription & { t: number })[], transcript: Segment[], duration: number, audio: Uint8Array | null = null): Promise<SummaryResult & { usage: TokenUsage | null }> {
+    const { text, usage } = await this.generate(Gemini.summaryRequest(frames, transcript, duration, audio));
     return { ...validateSummary(Gemini.parse(text), frames.length), usage };
   }
 

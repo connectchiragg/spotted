@@ -16,7 +16,18 @@
  * passages are reranked with the video's context in front (rerankText): alone, a frame such as
  * "players … embracing in a joyous celebration" scored 0.21 for "birthday party"; with
  * "Setting: soccer stadium. Video: … a soccer match …" in front it scores 0.0007.
+ *
+ * Labels (src/labels.ts): the query is mapped to vocabulary labels (names and synonyms), and each
+ * video carries Gemini's picks plus the ancestors our code adds. labelVerdict():
+ *   - hit:      the video carries every label the query names -> accepted even below the rerank
+ *               thresholds ("wildlife" -> crocodile and boar), and ranked before reranker-only videos;
+ *   - conflict: the video lacks a query label but carries a mutually exclusive sibling of it
+ *               (query "basketball", video "soccer"; "bird" vs "reptile") -> never accepted on the
+ *               reranker score alone;
+ *   - none:     the query names no label, or the video neither has nor contradicts it -> the
+ *               rerank + cosine rule above decides.
  */
+import { exclusiveSiblings, expandLabels, queryLabels } from './labels';
 import { getVideos, Video as Job } from './store';
 import { nearestFrame, parseVectorId } from './vectors';
 
@@ -80,18 +91,38 @@ export function passageOf(job: Job, kind: Citation['kind'], n: number, vectorSco
 
 const firstSentence = (text: string) => (/^.*?[.!?](?:\s|$)/s.exec(text)?.[0] ?? text).trim().slice(0, 200);
 
-/** What the whole video is: its environment tags and the summary's first sentence. */
+const soundsLine = (job: Job) => {
+  const sounds: string[] = job.result?.sounds ?? [];
+  return sounds.length ? `Sounds: ${sounds.join(', ')}.` : '';
+};
+
+/** What the whole video is: its environment tags, the summary's first sentence and what is heard. */
 export function videoContext(job: Job): string {
   const r = job.result ?? {};
   const setting = (r.tags ?? []).filter((t: any) => t.category === 'environment').map((t: any) => t.label).join(', ');
   const video = r.summary ? `Video: ${firstSentence(r.summary)}` : '';
-  return [setting && `Setting: ${setting}.`, video].filter(Boolean).join(' ');
+  return [setting && `Setting: ${setting}.`, video, soundsLine(job)].filter(Boolean).join(' ');
 }
 
-/** The text the reranker sees: a summary as is, other passages behind their video's context. */
+/** The text the reranker sees: a summary (with its sounds), other passages behind their video's context. */
 export function rerankText(job: Job, p: Passage): string {
-  const context = p.kind === 'summary' ? '' : videoContext(job);
+  if (p.kind === 'summary') return [p.text, soundsLine(job)].filter(Boolean).join('\n');
+  const context = videoContext(job);
   return context ? `${context}\n${p.text}` : p.text;
+}
+
+/** A video's labels and sound tags with every ancestor (stored picks are expanded here, by our code). */
+export function videoLabels(job: Job): Set<string> {
+  return new Set(expandLabels([...(job.result?.labels ?? []), ...(job.result?.sounds ?? [])]));
+}
+
+export type LabelVerdict = 'hit' | 'conflict' | 'none';
+
+/** How a video's labels relate to the labels a query names (see the header comment). */
+export function labelVerdict(queryLabelNames: string[], labels: Set<string>): LabelVerdict {
+  if (!queryLabelNames.length || !labels.size) return 'none';
+  if (queryLabelNames.some((q) => !labels.has(q) && exclusiveSiblings(q).some((x) => labels.has(x)))) return 'conflict';
+  return queryLabelNames.every((q) => labels.has(q)) ? 'hit' : 'none';
 }
 
 export function imageUrl(job: Job, frame: number | null): string | null {
@@ -112,24 +143,28 @@ export interface Thresholds { minScore: number; softMinScore: number; minSimilar
 export const thresholdsOf = (s: { searchMinScore: number; searchSoftMinScore: number; searchMinSimilarity: number; searchVectorMargin: number }): Thresholds =>
   ({ minScore: s.searchMinScore, softMinScore: s.searchSoftMinScore, minSimilarity: s.searchMinSimilarity, vectorMargin: s.searchVectorMargin });
 
-/** Pure ranking (unit-tested): passages already reranked, grouped per video. */
-export function rankVideos(groups: { job: Job; passages: (Passage & { rerank: number })[] }[], t: Thresholds): Ranked[] {
+/** Pure ranking (unit-tested): passages already reranked, grouped per video; `queryLabelNames` from queryLabels(). */
+export function rankVideos(groups: { job: Job; passages: (Passage & { rerank: number })[] }[], t: Thresholds, queryLabelNames: string[] = []): Ranked[] {
   const scored = groups.filter((g) => g.passages.length).map((g) => {
     const best = [...g.passages].sort((a, b) => b.rerank - a.rerank || b.vectorScore - a.vectorScore)[0];
-    return { g, best, cosine: Math.max(...g.passages.map((p) => p.vectorScore)) };
+    return { g, best, cosine: Math.max(...g.passages.map((p) => p.vectorScore)), label: labelVerdict(queryLabelNames, videoLabels(g.job)) };
   });
   const topCosine = Math.max(0, ...scored.map((x) => x.cosine));
-  const kept = scored.filter((x) => x.cosine >= topCosine - t.vectorMargin
-    && (x.best.rerank >= t.minScore || (x.best.rerank >= t.softMinScore && x.cosine >= t.minSimilarity)));
-  kept.sort((a, b) => b.best.rerank - a.best.rerank || (a.g.job.id < b.g.job.id ? -1 : 1));
-  const top = kept[0]?.best.rerank ?? 0;
-  return kept.filter((x) => x.best.rerank >= RELATIVE_CUTOFF * top).slice(0, MAX_RESULTS).map(({ g, best, cosine }) => {
+  const byScores = (x: (typeof scored)[number]) => x.cosine >= topCosine - t.vectorMargin
+    && (x.best.rerank >= t.minScore || (x.best.rerank >= t.softMinScore && x.cosine >= t.minSimilarity));
+  const kept = scored.filter((x) => x.label === 'hit' || (x.label === 'none' && byScores(x)));
+  const hit = (x: (typeof scored)[number]) => (x.label === 'hit' ? 1 : 0);
+  kept.sort((a, b) => hit(b) - hit(a) || b.best.rerank - a.best.rerank || (a.g.job.id < b.g.job.id ? -1 : 1));
+  // The relative cutoff compares reranker-only videos with the best reranker-only video; label hits are kept.
+  const top = kept.find((x) => !hit(x))?.best.rerank ?? 0;
+  return kept.filter((x) => hit(x) || x.best.rerank >= RELATIVE_CUTOFF * top).slice(0, MAX_RESULTS).map(({ g, best, cosine, label }) => {
     const moment = g.passages.filter((p) => p.kind !== 'summary').sort((a, b) => b.rerank - a.rerank)[0];
     const cited = best.kind === 'summary' && moment && moment.rerank >= MOMENT_CITE_FRACTION * best.rerank ? moment : best;
     return {
       job: g.job,
       retrieval: { score: round4(best.rerank), rerank_score: round4(best.rerank), semantic_score: round4(cosine),
-        matched_by: best.rerank >= t.minScore ? 'rerank' : 'rerank+semantic',
+        matched_by: label === 'hit' ? 'label' : best.rerank >= t.minScore ? 'rerank' : 'rerank+semantic',
+        ...(queryLabelNames.length ? { query_labels: queryLabelNames } : {}),
         citation: citationOf(g.job, cited), evidence_kinds: [...new Set(g.passages.filter((p) => p.rerank >= t.softMinScore).map((p) => p.kind))] },
     };
   });
@@ -154,5 +189,5 @@ export async function search(deps: SearchDeps, queryVector: number[], query: str
   const scores = await deps.reranker.rerank(query, groups.flatMap((g) => g.passages.map((p) => rerankText(g.job, p))));
   let k = 0;
   const reranked = groups.map((g) => ({ job: g.job, passages: g.passages.map((p) => ({ ...p, rerank: scores[k++] ?? 0 })) }));
-  return rankVideos(reranked, thresholds);
+  return rankVideos(reranked, thresholds, queryLabels(query));
 }

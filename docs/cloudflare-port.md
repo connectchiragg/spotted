@@ -435,10 +435,10 @@ extracts frames itself, Workers AI transcribes the speech, and Gemini describes 
 | `probe` | duration from the MP4/MOV `mvhd` box (first 512 KB, else last 2 MB), else the source metadata | R2 range reads | `duration` |
 | `select` | spritesheets of 64×36 tiles, 1 per second, ≤ 60 s each; grayscale mean absolute difference between consecutive tiles; keep the first frame, changes ≥ `CHANGE_THRESHOLD` (12) at least 2 s apart, top changes spread across time over the cap; then split gaps > 8 s for coverage; cap `MAX_FRAMES` = 16 | Media binding + `jpeg-js` in the DO | `picks` (t, score) |
 | `frames` | each pick at ≤ 1024 px into R2 `thumbs/<id>/<i>.jpg` (outside the 7-day `videos/` lifecycle) | Media binding | per frame |
-| `transcribe` | ≤ 10 MB: the whole video to Whisper as base64; otherwise 60 s M4A chunks from the Media binding; no audio track gives an empty transcript | Workers AI `whisper-large-v3-turbo` | per chunk |
+| `transcribe` | ≤ 10 MB: the whole video to Whisper as base64; otherwise 60 s M4A chunks from the Media binding; no audio track gives an empty transcript. Then the first `SOUND_MAX_S` (60 s) of audio as M4A is kept in R2 `videos/<id>/sound.m4a` for sound tags (the > 10 MB path reuses chunk 0; ≤ 10 MB makes one Media audio call; `9412` = no audio track → `sound: none`) | Workers AI `whisper-large-v3-turbo`, Media binding | per chunk; `sound` after the R2 put |
 | `describe` | 8 frames per call, inline JPEG + timestamp + nearby speech, giving one 80-180-word paragraph per frame (scene, objects, people and actions, quoted on-screen text, framing, change since the previous frame) | Gemini 3.1 Flash Lite | per batch |
-| `summarize` | narrative paragraph + tags (environment, object, action, speech) from the paragraphs and transcript | Gemini 3.1 Flash Lite | summary |
-| `index` | bge-m3 vectors: `s:<id>` summary + tags + transcript head, `t:<id>:<n>` 45 s transcript windows every 30 s, `f:<id>:<i>` frame paragraphs, each with `{video_id, kind, t_start, t_end, source, source_id, thumb_key}` | Workers AI `bge-m3`, Vectorize `framer-cf-m3` | upsert (idempotent) |
+| `summarize` | one call: narrative paragraph + tags (environment, object, action, speech) + `labels` picked from the fixed vocabulary in `src/labels.ts` + `sounds` heard in the inline M4A (prompt `cf-frames-v4-labels`). Labels and sounds are validated against the vocabulary (synonyms folded, unknown names dropped); ancestors are added by our code (`expandLabels`), never by the model | Gemini 3.1 Flash Lite | summary, tags, labels, sounds |
+| `index` | bge-m3 vectors: `s:<id>` summary + tags + labels and sounds with ancestors + transcript head, `t:<id>:<n>` 45 s transcript windows every 30 s, `f:<id>:<i>` frame paragraphs, each with `{video_id, kind, t_start, t_end, source, source_id, thumb_key}` | Workers AI `bge-m3`, Vectorize `framer-cf-m3` | upsert (idempotent) |
 
 **Verified live on this account (2026-10-15).**
 - Spritesheets stack tiles vertically (15 × 64×36 → 64×540 JPEG).
@@ -461,6 +461,13 @@ extracts frames itself, Workers AI transcribes the speech, and Gemini describes 
    - its rerank score is ≥ `SEARCH_MIN_SCORE` (0.02), **or** ≥ `SEARCH_SOFT_MIN_SCORE` (0.008) with a cosine ≥ `SEARCH_MIN_SIMILARITY` (0.53);
 
    then ≥ 25% of the best video's score, at most 3 results. `retrieval.matched_by` says which rule accepted it (see §10.7).
+
+   **Labels** (`src/labels.ts`, `labelVerdict` in `src/retrieval.ts`) come first. The query is mapped to vocabulary labels by exact name or synonym after lowercasing (longest phrase first, plural "s" folded: "football" → soccer, "animals" → animal, "cheering crowd" → cheering + crowd). Each video's stored labels and sounds are expanded with their ancestors. Then:
+   - **hit**: the video carries every query label → kept even below the rerank floors and ranked before reranker-only videos (`matched_by: label`). "wildlife" keeps the boar at rerank 0.0052.
+   - **conflict**: the video lacks a query label but carries a mutually exclusive sibling of it (same `group`: specific sports, animal classes, mammal/bird/reptile kinds, occasions) → never accepted on the reranker alone. "basketball" vs soccer (rerank 0.052), "bird" vs reptile/mammal (0.019).
+   - **none**: the query names no label, or the video neither has nor contradicts it → the rerank + cosine rule above.
+
+   The vocabulary is 154 visual labels + 30 sound tags, hand-written for home and phone footage (animals, sports, events, places, vehicles, nature, people activities, abstract roots such as wildlife, nature, celebration, sport). No embedding of the query against label names: every label query in the measured set matched lexically, and a fuzzy match would turn near-misses into vetoes.
 4. The citation is that passage's kind and time (a frame or speech window instead of the summary when it scores ≥ 50% of the best), with the nearest frame's thumbnail (`GET /videos/:id/thumbs/:i`, streamed from R2 behind Access).
 5. `/query` sends the cited passages (with `m:ss`) to Flash Lite, which must cite `[n]` inline. It reports `answer_model` and `answer_usage`.
 
@@ -470,10 +477,10 @@ The thresholds were retuned on the owner's real library on 2026-10-15 (§10.7). 
 
 | Resource | Free limit | Per video | 200 videos |
 |---|---|---|---|
-| Gemini 3.1 Flash Lite | 15 RPM, 500 RPD | 1–2 describe calls + 1 summary (measured on a 30 s clip with 6 frames: 2 calls, ~8k prompt + ~1.2k output tokens) | 400–600 requests → **1–2 days** of RPD; quota waits absorb the overflow |
+| Gemini 3.1 Flash Lite | 15 RPM, 500 RPD | 1–2 describe calls + 1 summary (measured on a 30 s clip with 6 frames: 2 calls, ~8k prompt + ~1.2k output tokens). Labels and sound tags add **no call**: the summary call carries the vocabulary (~1,800 characters, ~0.5k tokens) and ≤ 60 s of audio (32 tokens/s, ≤ 1,920); measured summary calls on the 5 owner clips: 1.5–2.4k prompt + 0.3–0.6k output tokens | 400–600 requests → **1–2 days** of RPD; quota waits absorb the overflow |
 | Workers AI neurons | 10,000/day | Whisper 46.6/audio-min ≈ 47; bge-m3 1,075/M tokens ≈ 5; reranker ≈ 0 | ≈ 10.4k → **~2 days** (Whisper dominates) |
 | Vectorize | 5M stored dims (≈4,880 vectors at 1024 d); 30M queried dims/month | ~1 + 2 + ≤16 ≈ 19 vectors | ≈ 3,800 vectors = 3.9M dims (fits; MAX_FRAMES=40 would not) |
-| Media binding | open beta, "not billed for now" | 1 spritesheet/min + ≤16 frames (+ 1 audio op/second only for > 10 MB) | if billed like URL MT (5,000 free ops/month; audio 1 op per output second) → ~3,400–15,000 ops: would exceed the free 5,000 |
+| Media binding | open beta, "not billed for now" | 1 spritesheet/min + ≤16 frames + 1 audio call of ≤ 60 s for sound tags (≤ 10 MB videos; > 10 MB reuse their first Whisper chunk) (+ 1 audio op/second for > 10 MB) | if billed like URL MT (5,000 free ops/month; audio 1 op per output second) → ~3,400–15,000 ops: would exceed the free 5,000 |
 | R2 | 10 GB-month | original (deleted after 7 days) + ~16 × 60 KB thumbnails | well under 10 GB |
 | DO / D1 | 100k requests/day, 13,000 GB-s/day; 100k rows written/day | ~40 storage writes, ~60 D1 writes | small |
 
@@ -570,4 +577,31 @@ The remaining errors are all confident reranker mistakes that no threshold separ
   - "ambulance" 0.085 → 0.181.
 - **Thresholds:** raising `SEARCH_MIN_SCORE` to 0.05 would leave 2 wrong but puts "animals" → crocodile (0.053) on the edge, so it stays 0.02.
 - **Citations:** the prefix made summaries win citations ("goal celebration" cited 0:00 instead of 0:12), so a frame or speech window is cited when it scores ≥ 50% of the best passage.
+
+**Follow-up: label hierarchy and sound tags (2026-10-15, prompt `cf-frames-v4-labels`).**
+- **Why:** Apple Photos stores fixed labels as chains (Football → Team Sport → Ball Games → Sport; Pig → Mammal → Animal + Wildlife) and non-speech sound tags (Cheering, Applause). Broad words then match stored labels, and a "Football" item cannot match "basketball". Here, 4 of the 5 clips had no speech, so audio contributed nothing.
+- **Sound tags, options checked:** the Workers AI catalog (`wrangler ai models`) has ASR (Whisper, Deepgram nova-3/flux), TTS and a turn detector, but no audio classifier. `@cf/cloudflare/clef-omni` takes audio, but it would be a second model call per video with unknown quality. Gemini Flash Lite hears audio natively, so the first 60 s of audio go inline into the existing summarize call: no new call, ≤ 1,920 audio tokens.
+- **Labels:** Gemini picks from the vocabulary in the same call; `validateLabels` keeps only vocabulary names, and `expandLabels` adds the ancestors at index and search time.
+- **Backfill of the 5 owner videos (no deletes):** one scratch script re-ran only the summarize call (5 Gemini calls; tuning the prompt took 10 more), using each video's stored frame paragraphs and transcript and its audio track. The Media binding cannot be chained through `getPlatformProxy`, so the 60 s M4A was a stream copy (`ffmpeg -c:a copy`) of the R2 original. The script recorded each result locally before the next call, then wrote `summary`, `tags`, `labels`, `sounds` and a `relabel` note into the D1 result, and re-embedded with the repo's `indexResult` (upsert only). The pre-backfill rows were kept locally.
+- **Result:** the 48 queries plus 18 new ones were run through `search()` on live data, before (old code, old data) and after (new code, backfilled data), with the same thresholds.
+
+  | query | before | after |
+  |---|---|---|
+  | wildlife | crocodile, boar | crocodile, boar (both `label`; boar rerank 0.0052) |
+  | basketball | AEK, blue, ISL (wrong) | — |
+  | bird | crocodile (wrong) | — |
+  | birthday party | — | — |
+  | ambulance | blue @ frame 0:10 | blue @ frame 0:10 |
+  | sunset / goal celebration | blue @ 0:16 / AEK @ 0:12, blue @ 0:02 | same moments |
+  | cheering crowd / cheering | AEK only (blue missed) | AEK, blue, ISL |
+  | reptile / pig / mammal / commentator | — (missed) | crocodile / boar / boar / AEK |
+  | sport | 3 soccer clips | 3 soccer clips (`label`) |
+  | tennis | AEK, blue (wrong) | — |
+  | van Mieghem | AEK | — (see below) |
+  | Razvan Marin | AEK | AEK |
+  | **48 original: missed / wrong** | **0 / 4** | **1 / 0** |
+  | **18 new: missed / wrong** | **6 / 2** | **0 / 0** |
+
+- **The one miss is a mislabelled query.** "van Mieghem" never occurs in the AEK clip: the shirt reads "R. MARIN" (frame at 20:43 match time) and Whisper heard "Raz van Marijn". The old summary had hallucinated "van Mieghem". With the audio, the new summary says "Razvan Marin", and that query finds the clip.
+- **Model variance.** Labels differ between runs (an earlier prompt gave the blue-team clip "car" instead of "ambulance" and no "soccer"). The prompt now asks for the most specific label per named thing, with its frames. The stored labels are from a single run, so recheck as the library grows.
 

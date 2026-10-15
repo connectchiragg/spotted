@@ -3,12 +3,13 @@
  * the Vectorize index `framer-cf-m3` (cosine; metadata indexes on `kind` and `video_id`).
  * Three kinds of entry per video; the vector id encodes what it points at, so search needs
  * no metadata round trip (topK can stay at 100):
- *   s:<video>          kind=summary     summary + tags + the start of the transcript
+ *   s:<video>          kind=summary     summary + tags + labels and sounds (with ancestors) + the start of the transcript
  *   t:<video>:<n>      kind=transcript  a 45 s transcript window (15 s overlap)
  *   f:<video>:<i>      kind=frame       one selected frame's description
  * Every vector also carries {video_id, kind, t_start, t_end, source, source_id, thumb_key}.
  */
 import { Segment } from './gemini';
+import { expandLabels } from './labels';
 
 export interface Embedder {
   model: string;
@@ -56,9 +57,11 @@ export function transcriptWindows(segments: Segment[], duration: number): Transc
 }
 
 export function summaryText(result: any): string {
-  const labels = (result.tags ?? []).map((t: any) => t.label).join(', ');
+  const tags = (result.tags ?? []).map((t: any) => t.label).join(', ');
+  const labels = expandLabels(result.labels ?? []).join(', ');
+  const sounds = expandLabels(result.sounds ?? []).join(', ');
   const speech = (result.transcript ?? []).map((s: Segment) => s.text).join(' ').slice(0, 1200);
-  return `Summary: ${result.summary}\nTags: ${labels}${speech ? `\nSpeech: ${speech}` : ''}`;
+  return `Summary: ${result.summary}\nTags: ${tags}${labels ? `\nLabels: ${labels}` : ''}${sounds ? `\nSounds: ${sounds}` : ''}${speech ? `\nSpeech: ${speech}` : ''}`;
 }
 
 /** R2 key of frame i's stored JPEG (also its thumbnail). Outside videos/, so the 7-day lifecycle rule for originals keeps it. */

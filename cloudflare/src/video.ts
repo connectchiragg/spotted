@@ -8,9 +8,11 @@
  *       probe      duration from the MP4/MOV header (skipped if > 10 min)
  *       select     Media Transformations spritesheets -> pixel-deviation frame choice
  *       frames     the chosen frames at up to 1024 px -> R2 (also the thumbnails)
- *       transcribe Workers AI Whisper (the video directly, or 60 s M4A chunks)
+ *       transcribe Workers AI Whisper (the video directly, or 60 s M4A chunks); the first
+ *                  SOUND_MAX_S of audio is kept in R2 for the summarize call's sound tags
  *       describe   Gemini on batches of frames -> one paragraph per frame
- *       summarize  Gemini on the paragraphs + transcript -> summary and tags
+ *       summarize  Gemini on the paragraphs + transcript + that audio -> summary, tags, vocabulary
+ *                  labels and sound tags (src/labels.ts)
  *       index      bge-m3 vectors (summary, transcript windows, frames) -> Vectorize
  *   - it PUSHES status to the video's viewers over hibernatable WebSockets
  *     (GET /videos/:id/ws), so an idle viewer costs no DO duration.
@@ -49,6 +51,10 @@ const QUOTA_FALLBACK_S = 15 * 60; // a 429 without RetryInfo: 15 min x waits, ca
 export const MAX_QUOTA_WINDOW_MS = 48 * 3600_000;
 const KEEP_EVENTS = 200;
 const AUDIO_CHUNK_S = 60;
+/** Seconds of soundtrack (from the start) Gemini hears for sound tags: one M4A, ~1,920 audio tokens. */
+export const SOUND_MAX_S = 60;
+/** Where that M4A is kept until summarize (under videos/, so the 7-day lifecycle removes it). */
+export const soundKey = (videoId: string) => `videos/${videoId}/sound.m4a`;
 const SPRITE_W = 64;
 const SPRITE_H = 36;
 const PART_BYTES = 10 * 1024 * 1024; // R2 multipart part size (min 5 MiB except the last)
@@ -86,6 +92,8 @@ export interface IngestState {
   transcribed: boolean;
   described: number; // frames described so far
   summarized: boolean;
+  /** The SOUND_MAX_S M4A for sound tags: stored in R2, or none (no audio track). Absent on older states. */
+  sound?: 'stored' | 'none';
   usage: { gemini_calls: number; prompt_tokens: number; output_tokens: number };
   indexed: { possible_duplicate: unknown } | null;
   progress: { stage: string; percent: number; eta_seconds: number | null } | null;
@@ -522,6 +530,7 @@ export class VideoDO extends DurableObject<Env> {
             if (error instanceof MediaError && /9412/.test(error.message)) break;
             throw error;
           }
+          if (c === 0 && !state.sound) state = await this.keepSound(deps, state, audio);
           const part = (await deps.transcriber.transcribe(audio, 'audio/mp4')).map((s) => ({ ...s, start: s.start + start, end: s.end + start }));
           segments = [...segments, ...part];
           await this.ctx.storage.put('transcript', segments);
@@ -531,7 +540,23 @@ export class VideoDO extends DurableObject<Env> {
       state = await this.save({ ...state, transcribed: true });
       this.hook(state, 'transcribe:recorded');
     }
+    if (!state.sound) {
+      // Small videos went to Whisper whole: cut the sound-tag audio now (one Media call).
+      state = await this.key(state, 'sound');
+      try {
+        state = await this.keepSound(deps, state, await deps.media.audio(video.object_key, { time: 0, duration: Math.min(SOUND_MAX_S, state.duration!) }));
+      } catch (error) {
+        if (!(error instanceof MediaError && /9412/.test(error.message))) throw error;
+        state = await this.save({ ...state, sound: 'none' }); // no audio track
+      }
+    }
     return this.advance(deps, state, 'transcribe', 'describe');
+  }
+
+  /** Record the sound-tag audio in R2 before anything else uses it. */
+  private async keepSound(deps: VideoDeps, state: IngestState, audio: Uint8Array): Promise<IngestState> {
+    await deps.bucket.put(soundKey(state.video_id), audio, { httpMetadata: { contentType: 'audio/mp4' } });
+    return this.save({ ...state, sound: 'stored' });
   }
 
   /** Gemini on batches of frames; each batch's paragraphs are recorded before the next call. */
@@ -564,8 +589,11 @@ export class VideoDO extends DurableObject<Env> {
       const descriptions = (await this.ctx.storage.get<FrameDescription[]>('descriptions')) ?? [];
       const transcript = (await this.ctx.storage.get<Segment[]>('transcript')) ?? [];
       const times = new Map(state.picks!.map((p) => [p.index, p.t]));
-      const out = await deps.gemini.summarize(descriptions.map((d) => ({ ...d, t: times.get(d.frame_index) ?? 0 })), transcript, state.duration!);
-      await this.ctx.storage.put('summary', { summary: out.summary, tags: out.tags });
+      // The soundtrack is optional: a state from before sound tags, or an expired object, sends none.
+      const sound = state.sound === 'stored' ? await deps.bucket.get(soundKey(state.video_id)) : null;
+      const audio = sound ? new Uint8Array(await sound.arrayBuffer()) : null;
+      const out = await deps.gemini.summarize(descriptions.map((d) => ({ ...d, t: times.get(d.frame_index) ?? 0 })), transcript, state.duration!, audio);
+      await this.ctx.storage.put('summary', { summary: out.summary, tags: out.tags, labels: out.labels, sounds: out.sounds });
       state = await this.save({ ...state, summarized: true, usage: addUsage(state.usage, out.usage) });
       this.hook(state, 'summarize:recorded');
     }
@@ -590,10 +618,10 @@ export class VideoDO extends DurableObject<Env> {
   private async resultOf(deps: VideoDeps, state: IngestState): Promise<Record<string, any>> {
     const descriptions = (await this.ctx.storage.get<FrameDescription[]>('descriptions')) ?? [];
     const transcript = (await this.ctx.storage.get<Segment[]>('transcript')) ?? [];
-    const summary = (await this.ctx.storage.get<{ summary: string; tags: Tag[] }>('summary')) ?? { summary: '', tags: [] };
+    const summary = (await this.ctx.storage.get<{ summary: string; tags: Tag[]; labels?: string[]; sounds?: string[] }>('summary')) ?? { summary: '', tags: [] };
     const picks = state.picks ?? [];
     return {
-      summary: summary.summary, tags: summary.tags, frame_descriptions: descriptions,
+      summary: summary.summary, tags: summary.tags, labels: summary.labels ?? [], sounds: summary.sounds ?? [], frame_descriptions: descriptions,
       sampled_timestamps: picks.map((p) => p.t), frame_scores: picks.map((p) => p.score), thumbs: state.frames_done.slice().sort((a, b) => a - b),
       transcript: transcript.slice(0, 2000), transcript_windows: transcriptWindows(transcript, state.duration ?? 0),
       duration_seconds: state.duration, candidates_scanned: state.candidates,

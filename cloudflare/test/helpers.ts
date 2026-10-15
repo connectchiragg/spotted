@@ -223,7 +223,8 @@ export function fakeGemini(opts: FakeGeminiOptions = {}) {
       if (opts.summaryStatus) return new Response('{}', { status: opts.summaryStatus });
       return reply({ summary: 'A person folds a blue towel on a wooden bed and says to fold it neatly.',
         tags: [{ label: 'Bedroom', category: 'environment', frame_indices: [0, 1] }, { label: 'towel', category: 'object', frame_indices: [0] },
-          { label: 'folding', category: 'action', frame_indices: [1] }, { label: 'neat folding', category: 'speech', frame_indices: [] }] });
+          { label: 'folding', category: 'action', frame_indices: [1] }, { label: 'neat folding', category: 'speech', frame_indices: [] }],
+        labels: [{ label: 'bedroom', frame_indices: [0] }, 'tidying', 'towel rack'], sounds: ['talking'] });
     }
     counts.answer++;
     return opts.answer === undefined ? new Response('{}', { status: 503 }) : reply(opts.answer);
