@@ -1,10 +1,10 @@
--- Framer on Cloudflare D1 (SQLite). Apply with:
---   wrangler d1 migrations apply framer-cf-db --remote
+-- Spotted on Cloudflare D1 (SQLite). Apply with:
+--   wrangler d1 migrations apply spotted-db --remote
 --
--- videos         Framer upload requests and their analysis (was "jobs" on EC2 Postgres)
+-- videos         Upload requests and their analysis (was "jobs" on EC2 Postgres)
 -- jobs           the work queue, leased with locked_until/lease_token (owner-approved design)
 -- usage_counters shared public-demo daily budgets (was a local SQLite file on EC2)
--- Vectors live in Vectorize (index framer-cf-vectors), not in D1.
+-- Vectors live in Vectorize (index spotted-vectors), not in D1.
 
 CREATE TABLE videos (
     id TEXT PRIMARY KEY,

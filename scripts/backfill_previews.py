@@ -18,7 +18,7 @@ def main():
         if result.get('preview_indices')==list(range(len(timestamps))):
             continue
         print('Preparing previews',job['id'],flush=True)
-        with tempfile.TemporaryDirectory(prefix='framer-backfill-') as folder:
+        with tempfile.TemporaryDirectory(prefix='spotted-backfill-') as folder:
             source=Path(folder)/'source.video';cloud.download(job,source)
             def upload(index,data):
                 cloud.upload_preview(job,index,data)

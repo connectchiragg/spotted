@@ -1,7 +1,0 @@
-[Unit]
-Description=Stop Framer if free-plan coverage is unavailable
-After=network-online.target
-[Service]
-Type=oneshot
-WorkingDirectory=/home/ubuntu/framer
-ExecStart=/home/ubuntu/framer/.venv/bin/python deploy/free_plan_guard.py

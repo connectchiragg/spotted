@@ -1,0 +1,7 @@
+[Unit]
+Description=Stop Spotted if free-plan coverage is unavailable
+After=network-online.target
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ubuntu/spotted
+ExecStart=/home/ubuntu/spotted/.venv/bin/python deploy/free_plan_guard.py

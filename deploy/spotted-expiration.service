@@ -1,5 +1,5 @@
 [Unit]
-Description=Stop Framer at AWS Free Plan expiration
+Description=Stop Spotted at AWS Free Plan expiration
 [Service]
 Type=oneshot
 ExecStart=/usr/sbin/shutdown -h now

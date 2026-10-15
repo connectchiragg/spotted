@@ -1,6 +1,6 @@
 /**
  * Workers AI embeddings (default @cf/baai/bge-m3, 1024 dims, 1,075 neurons per M tokens) in
- * the Vectorize index `framer-cf-m3` (cosine; metadata indexes on `kind` and `video_id`).
+ * the Vectorize index `spotted-vectors` (cosine; metadata indexes on `kind` and `video_id`).
  * Three kinds of entry per video; the vector id encodes what it points at, so search needs
  * no metadata round trip (topK can stay at 100):
  *   s:<video>          kind=summary     summary + tags + labels and sounds (with ancestors) + the start of the transcript

@@ -24,7 +24,7 @@ async def public_budget(request, call_next):
         return await call_next(request)
     path = request.url.path.rstrip('/')
     if request.method == 'POST' and path in ('/videos', '/videos/tag'):
-        return JSONResponse({'detail': 'Use the direct upload flow in the Framer interface.'}, status_code=403)
+        return JSONResponse({'detail': 'Use the direct upload flow in the Spotted interface.'}, status_code=403)
     if request.method == 'POST' and path == '/videos/uploads' and not os.getenv('GEMINI_API_KEY'):
         return JSONResponse({'detail': 'Video analysis is being configured. Please try uploading later.'}, status_code=503)
     operation = 'upload' if path == '/videos/uploads' else 'query' if path == '/query' else None

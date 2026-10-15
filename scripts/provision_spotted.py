@@ -1,4 +1,4 @@
-"""Framer infrastructure provisioning guarded by the AWS Free Plan."""
+"""Spotted infrastructure provisioning guarded by the AWS Free Plan."""
 import argparse
 import ipaddress
 import json
@@ -11,7 +11,7 @@ import boto3
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
-MANIFEST = ROOT / 'data/framer-deploy/manifest.json'
+MANIFEST = ROOT / 'data/spotted-deploy/manifest.json'
 
 
 def main():
@@ -38,7 +38,7 @@ def main():
         raise SystemExit('Existing manifest: inspect/clean previous resources before creating new ones')
     MANIFEST.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(MANIFEST.parent, 0o700)
-    name = 'framer-' + str(int(time.time()))
+    name = 'spotted-' + str(int(time.time()))
     state = {'region': 'ap-south-1', 'name': name, 'expires_at': str(plan['accountPlanExpirationDate'])}
     def save():
         MANIFEST.write_text(json.dumps(state, indent=2))
@@ -52,7 +52,7 @@ def main():
     save()
     s3.put_public_access_block(Bucket=bucket,PublicAccessBlockConfiguration={k:True for k in ['BlockPublicAcls','IgnorePublicAcls','BlockPublicPolicy','RestrictPublicBuckets']})
     s3.put_bucket_encryption(Bucket=bucket,ServerSideEncryptionConfiguration={'Rules':[{'ApplyServerSideEncryptionByDefault':{'SSEAlgorithm':'AES256'}}]})
-    s3.put_bucket_cors(Bucket=bucket,CORSConfiguration={'CORSRules':[{'AllowedOrigins':['https://framer.haciensus.com'],'AllowedMethods':['PUT','GET','HEAD'],'AllowedHeaders':['*'],'ExposeHeaders':['ETag'],'MaxAgeSeconds':600}]})
+    s3.put_bucket_cors(Bucket=bucket,CORSConfiguration={'CORSRules':[{'AllowedOrigins':['https://spotted.haciensus.com'],'AllowedMethods':['PUT','GET','HEAD'],'AllowedHeaders':['*'],'ExposeHeaders':['ETag'],'MaxAgeSeconds':600}]})
     s3.put_bucket_lifecycle_configuration(Bucket=bucket,LifecycleConfiguration={'Rules':[{'ID':'bound-demo-storage','Status':'Enabled','Filter':{'Prefix':'videos/'},'Expiration':{'Days':7},'AbortIncompleteMultipartUpload':{'DaysAfterInitiation':1}}]})
     iam.create_role(RoleName=name, AssumeRolePolicyDocument=json.dumps({'Version':'2012-10-17',
         'Statement':[{'Effect':'Allow','Principal':{'Service':'ec2.amazonaws.com'},'Action':'sts:AssumeRole'}]}))
@@ -100,7 +100,7 @@ def main():
         BlockDeviceMappings=[{'DeviceName':ami['RootDeviceName'],'Ebs':{'VolumeSize':20,
             'VolumeType':'gp3','Encrypted':True,'DeleteOnTermination':True}}],
         TagSpecifications=[{'ResourceType':'instance','Tags':[{'Key':'Name','Value':name},
-            {'Key':'Project','Value':'Framer'}]}],UserData='#!/bin/bash\n# Persistent Framer; free-plan guard installed during deployment.\n')['Instances'][0]
+            {'Key':'Project','Value':'Spotted'}]}],UserData='#!/bin/bash\n# Persistent Spotted; free-plan guard installed during deployment.\n')['Instances'][0]
     state['instance_id']=instance['InstanceId']
     save()
     ec2.get_waiter('instance_running').wait(InstanceIds=[state['instance_id']],WaiterConfig={'Delay':5,'MaxAttempts':30})

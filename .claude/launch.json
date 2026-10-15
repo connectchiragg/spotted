@@ -2,7 +2,7 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "framer-cf-dev",
+      "name": "spotted-dev",
       "runtimeExecutable": "sh",
       "runtimeArgs": [
         "-c",

@@ -1,5 +1,5 @@
 {
-  "name": "framer-cf",
+  "name": "spotted",
   "private": true,
   "type": "module",
   "scripts": {
@@ -7,7 +7,7 @@
     "test": "vitest run && vitest run --config vitest.workers.config.ts",
     "test:unit": "vitest run",
     "test:workers": "vitest run --config vitest.workers.config.ts",
-    "db:migrate": "wrangler d1 migrations apply framer-cf-db --remote",
+    "db:migrate": "wrangler d1 migrations apply spotted-db --remote",
     "deploy": "wrangler deploy --env=\"\""
   },
   "dependencies": {

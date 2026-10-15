@@ -3,9 +3,7 @@
     {
       "allowed": {
         "origins": [
-          "https://framer.haciensus.com",
-          "https://spotted.haciensus.com",
-          "https://framer-cf-api.connect-chirag-g.workers.dev"
+          "https://spotted.haciensus.com"
         ],
         "methods": [
           "PUT",

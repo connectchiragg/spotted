@@ -8,9 +8,9 @@
 - **What happens:** the search for "ambulance" returns a football clip. The ambulance appears in only 1 of its 7 sampled frames, in the background at 0:10, and Spotted cites that exact frame.
 - **How it was made:** recorded from the real app and data in headless Chrome; the music is an original composition.
 
-**Live:** https://framer.haciensus.com (private, behind Cloudflare Access) · **Portfolio:** https://haciensus.com
+**Live:** https://spotted.haciensus.com (private, behind Cloudflare Access) · **Portfolio:** https://haciensus.com
 
-An independent project, formerly called Framer, running entirely on Cloudflare's free tier.
+An independent project, running entirely on Cloudflare's free tier.
 
 ## What it does
 
@@ -49,12 +49,12 @@ Google Photos / Drive / upload
 
 | Piece | Cloudflare service |
 |---|---|
-| API and UI (one HTML file, no build step) | Worker `framer-cf-api` |
+| API and UI (one HTML file, no build step) | Worker `spotted-api` |
 | Per-video pipeline and live status | Durable Object `VideoDO` (hibernatable WebSockets) |
 | Google Photos sessions, Drive sync | Durable Object `LibraryDO` |
-| Videos, results, Google connection | D1 `framer-cf-db` |
-| Vectors (1024-d) | Vectorize `framer-cf-m3` |
-| Originals (kept 7 days), frames, audio | R2 `framer-cf-videos` |
+| Videos, results, Google connection | D1 `spotted-db` |
+| Vectors (1024-d) | Vectorize `spotted-vectors` |
+| Originals (kept 7 days), frames, audio | R2 `spotted-videos` |
 | Speech, embeddings, reranking | Workers AI |
 | Sign-in | Cloudflare Access (Google) |
 
@@ -108,4 +108,4 @@ npx wrangler dev  # local; AI, Vectorize and Media need a Cloudflare login
 
 ## History
 
-Spotted (originally named Framer) started as a FastAPI + PostgreSQL/pgvector + FFmpeg app on AWS EC2. That version is still in `app/`, `scripts/` and `deploy/`, with its tests in `tests/`. Its instance is stopped. The move to Cloudflare, with its design decisions, is documented in [docs/cloudflare-port.md](docs/cloudflare-port.md).
+Spotted started as a FastAPI + PostgreSQL/pgvector + FFmpeg app on AWS EC2. That version is still in `app/`, `scripts/` and `deploy/`, with its tests in `tests/`. Its instance is stopped. The move to Cloudflare, with its design decisions, is documented in [docs/cloudflare-port.md](docs/cloudflare-port.md).

@@ -14,7 +14,7 @@ from app.jobs_api import router
 from app.search_api import router as search_router
 from app.query_api import router as query_router
 
-app = FastAPI(title='Framer — Find the moment', version='0.3.0')
+app = FastAPI(title='Spotted — Find the moment', version='0.3.0')
 app.middleware('http')(public_budget)
 
 

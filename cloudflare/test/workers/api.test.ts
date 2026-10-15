@@ -138,11 +138,11 @@ describe('search candidates on D1', () => {
 
 describe('Google sign-in on more than one domain', () => {
   it('redirects back to the domain the owner started on, if it is one of ours', async () => {
-    const googleConfig = { clientId: 'cid', clientSecret: 's', encKey: 'ab'.repeat(32), redirectUri: 'https://framer.haciensus.com/oauth/google/callback' };
-    const app = appDeps(db, { googleConfig, origins: ['https://framer.haciensus.com', 'https://spotted.haciensus.com'] });
+    const googleConfig = { clientId: 'cid', clientSecret: 's', encKey: 'ab'.repeat(32), redirectUri: 'https://spotted.haciensus.com/oauth/google/callback' };
+    const app = appDeps(db, { googleConfig, origins: ['https://spotted.haciensus.com', 'https://www.spotted.example'] });
     const start = async (host: string) => new URL((await handle(new Request(`https://${host}/oauth/google/start`), app)).headers.get('location')!).searchParams.get('redirect_uri');
+    expect(await start('www.spotted.example')).toBe('https://www.spotted.example/oauth/google/callback');
     expect(await start('spotted.haciensus.com')).toBe('https://spotted.haciensus.com/oauth/google/callback');
-    expect(await start('framer.haciensus.com')).toBe('https://framer.haciensus.com/oauth/google/callback');
-    expect(await start('evil.example')).toBe('https://framer.haciensus.com/oauth/google/callback'); // not ours: the default
+    expect(await start('evil.example')).toBe('https://spotted.haciensus.com/oauth/google/callback'); // not ours: the default
   });
 });

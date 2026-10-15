@@ -821,7 +821,7 @@ export class VideoDO extends DurableObject<Env> {
 
 export function googleClient(env: Env): Google | null {
   if (!env.DB || !env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.TOKEN_ENC_KEY) return null;
-  const origin = env.PUBLIC_ORIGIN || 'https://framer.haciensus.com';
+  const origin = env.PUBLIC_ORIGIN || 'https://spotted.haciensus.com';
   return new Google({ clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET, encKey: env.TOKEN_ENC_KEY,
     redirectUri: `${origin}/oauth/google/callback` }, d1TokenStore(env.DB));
 }

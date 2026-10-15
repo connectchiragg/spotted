@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily Framer free-plan safety check
+Description=Daily Spotted free-plan safety check
 [Timer]
 OnBootSec=10min
 OnUnitActiveSec=1d

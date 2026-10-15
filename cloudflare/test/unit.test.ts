@@ -320,12 +320,12 @@ describe('Google OAuth', () => {
     await expect(decryptSecret(sealed, 'cd'.repeat(32))).rejects.toThrow();
   });
   it('asks for offline access with both scopes and a state', () => {
-    const url = new URL(authUrl({ clientId: 'cid', clientSecret: 's', encKey: key, redirectUri: 'https://framer.test/oauth/google/callback' }, 'st'));
+    const url = new URL(authUrl({ clientId: 'cid', clientSecret: 's', encKey: key, redirectUri: 'https://spotted.test/oauth/google/callback' }, 'st'));
     expect(url.searchParams.get('scope')).toBe(SCOPES.join(' '));
     expect(url.searchParams.get('access_type')).toBe('offline');
     expect(url.searchParams.get('prompt')).toBe('consent');
     expect(url.searchParams.get('state')).toBe('st');
-    expect(url.searchParams.get('redirect_uri')).toBe('https://framer.test/oauth/google/callback');
+    expect(url.searchParams.get('redirect_uri')).toBe('https://spotted.test/oauth/google/callback');
   });
 });
 

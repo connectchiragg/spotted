@@ -1,10 +1,10 @@
 // Convert an export of the EC2 Postgres "jobs" table into D1 SQL.
 //
 // On the EC2 host (one row_to_json object per line; see docs/cloudflare-port.md):
-//   psql -d irl -Atc "SELECT row_to_json(j) FROM jobs j" > framer-jobs.jsonl
+//   psql -d irl -Atc "SELECT row_to_json(j) FROM jobs j" > jobs.jsonl
 // Locally:
-//   node scripts/ec2-to-d1.mjs framer-jobs.jsonl > framer-import.sql
-//   wrangler d1 execute framer-cf-db --remote --file framer-import.sql
+//   node scripts/ec2-to-d1.mjs jobs.jsonl > import.sql
+//   wrangler d1 execute spotted-db --remote --file import.sql
 //
 // - every request becomes a row in `videos` (same id, so R2 keys videos/<id>/... match S3)
 // - completed videos get needs_index=1: their VideoDO recomputes the vectors with
@@ -41,7 +41,7 @@ export function toSql(rows) {
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const file = process.argv[2];
   if (!file) {
-    console.error('Usage: node scripts/ec2-to-d1.mjs framer-jobs.jsonl > framer-import.sql');
+    console.error('Usage: node scripts/ec2-to-d1.mjs jobs.jsonl > import.sql');
     process.exit(2);
   }
   const rows = readFileSync(file, 'utf8').split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));

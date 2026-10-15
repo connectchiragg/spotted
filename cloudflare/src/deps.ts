@@ -9,7 +9,7 @@ import { workersAiEmbedder } from './vectors';
 
 export function build(env: Env, waitUntil: (p: Promise<unknown>) => void): AppDeps {
   const config = settings(env);
-  const origin = env.PUBLIC_ORIGIN || 'https://framer.haciensus.com';
+  const origin = env.PUBLIC_ORIGIN || 'https://spotted.haciensus.com';
   const googleReady = Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.TOKEN_ENC_KEY);
   return {
     db: env.DB ?? null,

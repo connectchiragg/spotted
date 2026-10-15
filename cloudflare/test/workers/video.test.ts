@@ -127,7 +127,7 @@ describe('VideoDO: the frame + transcript pipeline', () => {
       expect(s).toMatchObject({ step: 'describe', attempts: 0, quota_waits: wait, quota_model: settings.geminiModel });
       expect(s.next_retry_at! - Date.now()).toBeGreaterThan(110_000); // RetryInfo 120 s
       if (wait === 1) {
-        const api = await worker.fetch(`https://framer.test/videos/${t.video.id}`);
+        const api = await worker.fetch(`https://spotted.test/videos/${t.video.id}`);
         expect((await api.json<any>()).progress).toMatchObject({ stage: 'Waiting to retry', percent: 70 });
       }
       await t.skipWait();
@@ -287,7 +287,7 @@ describe('VideoDO: the frame + transcript pipeline', () => {
     await u.stub.start(u.video.id);
     await u.drive();
     await db.prepare('DELETE FROM videos WHERE id=?1').bind(u.video.id).run();
-    expect((await worker.fetch(`https://framer.test/videos/${u.video.id}`)).status).toBe(404);
+    expect((await worker.fetch(`https://spotted.test/videos/${u.video.id}`)).status).toBe(404);
     expect(await u.state()).toBeNull();
   });
 });
@@ -295,7 +295,7 @@ describe('VideoDO: the frame + transcript pipeline', () => {
 // ------------------------------------------------------------------ WebSockets
 
 async function open(videoId: string) {
-  const res = await worker.fetch(`https://framer.test/videos/${videoId}/ws`, { headers: { Upgrade: 'websocket' } });
+  const res = await worker.fetch(`https://spotted.test/videos/${videoId}/ws`, { headers: { Upgrade: 'websocket' } });
   expect(res.status).toBe(101);
   const ws = res.webSocket!;
   const messages: any[] = [];
@@ -371,7 +371,7 @@ describe('VideoDO: hibernatable WebSocket status', () => {
     e.ws.send('ping');
     await e.until(() => pongs.length > 0);
     expect(pongs).toEqual(['pong']);
-    expect((await worker.fetch(`https://framer.test/videos/${t.video.id}/ws`)).status).toBe(426);
+    expect((await worker.fetch(`https://spotted.test/videos/${t.video.id}/ws`)).status).toBe(426);
     e.ws.close(1000);
   });
 });

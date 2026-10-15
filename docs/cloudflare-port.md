@@ -1,23 +1,23 @@
-# Framer on Cloudflare (free tier)
+# Spotted on Cloudflare (free tier)
 
-This branch (`cloudflare-port`) moves Framer off its AWS EC2 server. A Worker in
+This branch (`cloudflare-port`) moves Spotted off its original AWS EC2 server. A Worker in
 [`cloudflare/`](../cloudflare) runs it on Cloudflare's free tier. The Python app
 in `app/` is unchanged and its tests still pass.
 
 Status on 2026-10-16:
-- **Renamed:** the product is now **Spotted** (formerly Framer). This document keeps the old name where it describes history; infrastructure names (`framer-cf-*`, `framer.haciensus.com`) are unchanged.
-- **Live:** https://framer.haciensus.com is served by the Worker `framer-cf-api`, behind Cloudflare Access (Google login). The custom domain is attached in the dashboard.
+- **Renamed and migrated (2026-10-16):** the product is Spotted, on new resources (`spotted-api`, `spotted-db`, `spotted-vectors`, `spotted-videos`) at `spotted.haciensus.com`. `scripts/spotted-setup.sh` finishes the move and `scripts/spotted-cleanup.sh` retires the originals. Names below are the current ones; historical sections keep only what still applies.
+- **Live:** https://spotted.haciensus.com is served by the Worker `spotted-api`, behind Cloudflare Access (Google login). The custom domain is attached by `scripts/spotted-setup.sh`.
 - **Resources (free tier):**
-  - D1 `framer-cf-db` (migrations 0001–0004);
-  - Vectorize `framer-cf-m3` (1024 d);
-  - R2 `framer-cf-videos`;
+  - D1 `spotted-db` (migrations 0001–0004);
+  - Vectorize `spotted-vectors` (1024 d);
+  - R2 `spotted-videos`;
   - Workers AI, Media Transformations;
   - Durable Objects `VideoDO` (one per video) and `LibraryDO` (Google Photos and Drive).
 - **Phase 2** (§10): Google Photos and Drive sources, frames + Whisper + Gemini descriptions, labels and sound tags, and the reranked search, tuned on the owner's library.
 - **EC2:** the instance is stopped. The Python app in `app/` is kept as history; its tests still pass.
-- **Superseded designs:** §1–§9 describe the first port (Gemini on the whole video, 384-d `framer-cf-vectors`, SSE). §10 supersedes them where they differ.
+- **Superseded designs:** §1–§9 describe the first port (Gemini on the whole video, a 384-d index, SSE). §10 supersedes them where they differ.
 
-## 1. What Framer does today
+## 1. What the original app did (EC2)
 
 A shared video library you can search in plain language:
 
@@ -25,7 +25,7 @@ A shared video library you can search in plain language:
    - `POST /videos/uploads` validates the request and returns a presigned S3 PUT URL (400 MB max).
    - The browser uploads directly to S3.
    - `POST /videos/{id}/complete` checks the object's size and type, then queues the job in Postgres.
-2. **Ingest.** The `framer-worker` service does this work:
+2. **Ingest.** The `spotted-worker` service does this work:
    - It leases a job with `FOR UPDATE SKIP LOCKED`.
    - It downloads the video and probes it with **FFmpeg**.
    - It picks up to 16 frames by pixel change and extracts them as JPEGs. It uploads the JPEGs to S3 and sends them to **Gemini**, which returns a summary, tags with frame evidence, and a description of each frame.
@@ -54,13 +54,13 @@ A shared video library you can search in plain language:
 
 | Today (EC2) | Cloudflare | Free-tier limits that matter | Source |
 |---|---|---|---|
-| FastAPI + Uvicorn | **Worker** `framer-cf-api` (TypeScript), UI served as static assets | 100k requests/day; **10 ms CPU** per request or cron run; 128 MB memory; 50 subrequests (1,000 to Cloudflare services); 100 MB request body | [Workers limits](https://developers.cloudflare.com/workers/platform/limits/), [pricing](https://developers.cloudflare.com/workers/platform/pricing/) |
+| FastAPI + Uvicorn | **Worker** `spotted-api` (TypeScript), UI served as static assets | 100k requests/day; **10 ms CPU** per request or cron run; 128 MB memory; 50 subrequests (1,000 to Cloudflare services); 100 MB request body | [Workers limits](https://developers.cloudflare.com/workers/platform/limits/), [pricing](https://developers.cloudflare.com/workers/platform/pricing/) |
 | Background worker (systemd) + `work_queue` | **Durable Object `VideoDO`**, one per video (SQLite-backed): runs that video's steps from its own alarm | DOs on Free: SQLite backend only; 100k requests/day (alarms count); 13,000 GB-s/day duration; 30 s CPU per invocation; alarm handler 15 min wall time; 100k rows written/day (each storage write and `setAlarm` is one) | [DO pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/), [DO limits](https://developers.cloudflare.com/durable-objects/platform/limits/), [alarms](https://developers.cloudflare.com/durable-objects/api/alarms/) |
 | 3 s status polling | **SSE** `GET /videos/:id/events`, served by the same `VideoDO` | an open stream keeps its DO awake: 13,000 GB-s/day ÷ 128 MB ≈ 28.9 stream-hours/day across all videos | same as above |
-| Postgres metadata | **D1** `framer-cf-db` (tables `videos`, `usage_counters`, `usage_events`): the record other code reads | 10 DBs; 500 MB per DB; 5M rows read and 100k rows written per day; 50 queries per invocation | [D1 limits](https://developers.cloudflare.com/d1/platform/limits/), [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/) |
-| pgvector | **Vectorize** `framer-cf-vectors` (384 dims, cosine; metadata indexes `kind` and `video_id`) | 5M stored dimensions (≈13k vectors, ≈700 videos at 18 vectors each); 30M queried dimensions/month; topK ≤ 100 | [Vectorize pricing](https://developers.cloudflare.com/vectorize/platform/pricing/), [limits](https://developers.cloudflare.com/vectorize/platform/limits/) |
+| Postgres metadata | **D1** `spotted-db` (tables `videos`, `usage_counters`, `usage_events`): the record other code reads | 10 DBs; 500 MB per DB; 5M rows read and 100k rows written per day; 50 queries per invocation | [D1 limits](https://developers.cloudflare.com/d1/platform/limits/), [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/) |
+| pgvector | **Vectorize**, first a 384-d index, now `spotted-vectors` (1024 d, §10) (384 dims at first, cosine; metadata indexes `kind` and `video_id`) | 5M stored dimensions (≈13k vectors, ≈700 videos at 18 vectors each); 30M queried dimensions/month; topK ≤ 100 | [Vectorize pricing](https://developers.cloudflare.com/vectorize/platform/pricing/), [limits](https://developers.cloudflare.com/vectorize/platform/limits/) |
 | FastEmbed in-process | **Workers AI** `@cf/baai/bge-small-en-v1.5` (384 dims; others: bge-base 768, bge-large 1024, bge-m3, embeddinggemma-300m, qwen3-embedding-0.6b, plamo-embedding-1b) | 10,000 neurons/day; bge-small costs 1,841 neurons per M tokens, so about 5 neurons per video | [Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/), [models](https://developers.cloudflare.com/workers-ai/models/) |
-| S3 (videos, frames) | **R2** `framer-cf-videos`: presigned PUT/GET over the S3 API; lifecycle 7 days | 10 GB-month; 1M Class A and 10M Class B ops per month; free egress; single PUT up to 5 GiB | [R2 pricing](https://developers.cloudflare.com/r2/pricing/), [presigned URLs](https://developers.cloudflare.com/r2/api/s3/presigned-urls/) |
+| S3 (videos, frames) | **R2** `spotted-videos`: presigned PUT/GET over the S3 API; lifecycle 7 days | 10 GB-month; 1M Class A and 10M Class B ops per month; free egress; single PUT up to 5 GiB | [R2 pricing](https://developers.cloudflare.com/r2/pricing/), [presigned URLs](https://developers.cloudflare.com/r2/api/s3/presigned-urls/) |
 | FFmpeg frame extraction | **Not possible on Workers.** Gemini samples ~16 frames of the video itself (`videoMetadata.fps`, §3.1) via its Files API and returns timestamped "moments" | Gemini Files API: 2 GB per file on the free tier, files kept 48 h; ~100 tokens/s at low media resolution | [Gemini video understanding](https://ai.google.dev/gemini-api/docs/video-understanding) |
 | SQLite usage.db and the AWS free-plan timers | D1 `usage_counters`. Workers Free has hard limits that fail rather than bill, so the EC2 timers are unnecessary | — | — |
 
@@ -82,7 +82,7 @@ A shared video library you can search in plain language:
 
 **Single executor.** A Durable Object is a single-threaded actor, and its alarms never overlap, so the object is the lock. No lease queue, fencing token, scheduler or cron is needed. Those were removed:
 - D1 migration `0003` drops `jobs` and `step_results`;
-- DO migration `v3` deletes the earlier `FramerScheduler` and `VideoEvents` classes.
+- DO migration `v3` deleted the earlier scheduler and `VideoEvents` classes (the renamed Worker starts with `VideoDO` and `LibraryDO` only).
 
 **Rule: write durably before every side effect, and record each external result before moving on.**
 - Each try persists `attempts + 1` before running, so a crash loop still stops at 5 attempts.
@@ -227,7 +227,7 @@ EC2 picked frames by pixel change. Uniform sampling (§3.1) can miss short event
 **Records in the `VideoDO` (§2.1).** Each step's idempotency key is persisted before the call, and each result is persisted right after it.
 
 **Gemini upload.**
-- It uses a deterministic file id, `files/framer-<uuid hex>` (≤ 40 chars of `[a-z0-9-]`, [File.name](https://ai.google.dev/api/files)), and display name `framer-<video_id>`.
+- It uses a deterministic file id, `files/<prefix>-<uuid hex>` (≤ 40 chars of `[a-z0-9-]`, [File.name](https://ai.google.dev/api/files)), and display name `<prefix>-<video_id>`.
 - Before uploading, the step reuses, in order:
   1. the recorded file;
   2. the deterministic name (GET);
@@ -276,47 +276,47 @@ The EC2 instance is **stopped**; don't leave it running. It has no Elastic IP, s
 **Snapshot:**
 1. Start the instance temporarily and note its new public IP.
 2. On the instance (`ssh ubuntu@<new-ip>`), run:
-   `psql -d irl -Atc "SELECT row_to_json(j) FROM jobs j" > framer-jobs.jsonl`
-3. Copy `framer-jobs.jsonl` to this machine, then **stop the instance again**.
+   `psql -d irl -Atc "SELECT row_to_json(j) FROM jobs j" > jobs.jsonl`
+3. Copy `jobs.jsonl` to this machine, then **stop the instance again**.
 
 **Import:**
-1. `cd cloudflare && node scripts/ec2-to-d1.mjs framer-jobs.jsonl > framer-import.sql`
-2. `wrangler d1 execute framer-cf-db --remote --file framer-import.sql`
-3. Imported videos are started lazily. Run `node scripts/kick-imported.mjs <base-url> framer-jobs.jsonl`, which visits each video once:
+1. `cd cloudflare && node scripts/ec2-to-d1.mjs jobs.jsonl > import.sql`
+2. `wrangler d1 execute spotted-db --remote --file import.sql`
+3. Imported videos are started lazily. Run `node scripts/kick-imported.mjs <base-url> jobs.jsonl`, which visits each video once:
    - `pending` videos have their `VideoDO` start ingestion;
    - `completed` ones (`needs_index`) are re-embedded.
 4. Delete the `.jsonl`/`.sql` files afterwards: they contain user metadata.
 
 **Objects:**
-- Copy the S3 bucket (its name is in the ignored `data/framer-deploy/manifest.json`) into R2 `framer-cf-videos` with the same keys, e.g. with `rclone copy s3:<bucket> r2:framer-cf-videos`.
+- Copy the S3 bucket (its name is in the ignored `data/spotted-deploy/manifest.json`) into R2 `spotted-videos` with the same keys, e.g. with `rclone copy s3:<bucket> r2:spotted-videos`.
 - An R2 API token is needed for that copy; S3 egress is AWS-billed beyond its free allowance.
 - Because of the 7-day S3 lifecycle, only recent videos still have their originals. Older entries keep their metadata and become searchable after re-embedding, but cannot play.
 
 **Cutover:**
-1. Remove the custom domain from the old `framer` proxy Worker (`deploy/cloudflare/wrangler.jsonc`).
-2. Add `"routes": [{ "pattern": "framer.haciensus.com", "custom_domain": true }]` to `cloudflare/wrangler.jsonc`.
+1. Remove the custom domain from the old EC2 proxy Worker (since deleted).
+2. Attach the custom domain to the Worker (`scripts/spotted-setup.sh` does this for `spotted.haciensus.com`).
 3. Run `npm run deploy`.
 4. Rollback is the reverse, plus restarting EC2.
 
 ## 5. Owner steps, in order
 
 1. **Enable R2:** Dashboard → R2 → complete the R2 subscription checkout ($0 plan). This may ask for a payment method; I can't verify whether it does. Then:
-   - `wrangler r2 bucket create framer-cf-videos`
-   - `wrangler r2 bucket cors set framer-cf-videos --file r2-cors.json`
-   - `wrangler r2 bucket lifecycle add framer-cf-videos expire-videos videos/ --expire-days 7`
-   - `wrangler r2 bucket lifecycle add framer-cf-videos abort-multipart --abort-multipart-days 1`
+   - `wrangler r2 bucket create spotted-videos`
+   - `wrangler r2 bucket cors set spotted-videos --file r2-cors.json`
+   - `wrangler r2 bucket lifecycle add spotted-videos expire-originals videos/ --expire-days 7`
+   - `wrangler r2 bucket lifecycle add spotted-videos abort-uploads "" --abort-multipart-days 1`
 2. **R2 API token** (Dashboard → R2 → Manage API tokens; Object Read & Write, this bucket only). Then:
    - `wrangler secret put R2_ACCESS_KEY_ID`
    - `wrangler secret put R2_SECRET_ACCESS_KEY`
 3. **Gemini key:** `wrangler secret put GEMINI_API_KEY`, with the same key as the EC2 `.env`. Never commit it.
 4. **Deploy:** `cd cloudflare && npm ci && npm test && npm run deploy`. Migrations 0001–0002 are already applied; `npm run db:migrate` is idempotent. *(Done 2026-10-15, including the Gemini secret.)*
-5. **Smoke test** `https://framer-cf-api.connect-chirag-g.workers.dev`:
+5. **Smoke test** the Worker (then on its workers.dev URL, since disabled):
    - upload a short MP4;
    - watch it reach Completed;
    - search for it.
 6. **Migrate data:** see §4. This needs a temporary EC2 start; stop it again afterwards.
 7. **Cut over** the domain (§4). Then retire EC2 resources with the existing cleanup process. Do this only after the owner confirms.
-8. **Optional:** delete the `framer-cf-smoke` Worker with `wrangler delete --env smoke`.
+8. **Optional:** delete the smoke-test Worker (`scripts/spotted-cleanup.sh` does this).
 
 ## 6. Development
 
@@ -335,7 +335,7 @@ npm run typecheck
   - `migrations/`.
   - `scripts/ec2-to-d1.mjs`.
 - **Wrangler environments:**
-  - top-level (`framer-cf-api`): the production config;
+  - top-level (`spotted-api`): the production config;
   - `smoke`: no R2, no Durable Object bindings (to be deleted after cutover);
   - `test`: local only.
 
@@ -344,7 +344,7 @@ npm run typecheck
 The first runs used the intermediate designs: first the cron with the D1 queue, then the scheduler DO with SSE.
 
 
-Run without a browser against `framer-cf-api`, with a 5 s, 45 KB synthetic MP4 (ffmpeg colour clip plus `say` audio).
+Run without a browser against the first deployed Worker, with a 5 s, 45 KB synthetic MP4 (ffmpeg colour clip plus `say` audio).
 
 **Verified live.**
 - **Upload flow.** The presigned upload works. A retried `POST /videos/uploads` with the same `Idempotency-Key` returned the same request. The PUT to R2 returned 200, and `complete` returned 202.
@@ -368,9 +368,9 @@ Run without a browser against `framer-cf-api`, with a 5 s, 45 KB synthetic MP4 (
 
 ## 8. Operations: Access, admin purge and deleting videos
 
-- **Access.** `framer.haciensus.com` is behind Cloudflare Access (Google login), and `workers_dev` is `false`, so every route, including `/health`, needs an Access session. The custom domain is attached in the dashboard; `wrangler deploy` leaves it in place, because the config has no `routes`.
+- **Access.** `spotted.haciensus.com` is behind Cloudflare Access (Google login), and `workers_dev` is `false`, so every route, including `/health`, needs an Access session. The custom domain is attached in the dashboard; `wrangler deploy` leaves it in place, because the config has no `routes`.
 - **Signed-in user.** `GET /me` returns `{email, signed_in, source, logout_url}` from the `Cf-Access-Authenticated-User-Email` header that Access adds to every request. The header is trusted without verifying `Cf-Access-Jwt-Assertion`: `workers_dev` and `preview_urls` are off and the custom domain is the only route, so every request comes through Access, and the identity is only displayed (no authorization depends on it). Verifying the JWT would need the Access team domain and application AUD pinned as vars; add that before the email is ever used for a decision. The browser asks `/cdn-cgi/access/get-identity` for a display name (best effort), shows initials, the email and a menu with Access, Google and live-update state and **Sign out** (`/cdn-cgi/access/logout`). Under `wrangler dev` (no Access) it shows "Local dev".
-- **Deleting a video completely:** `DELETE /admin/videos/:id` with `Authorization: Bearer $FRAMER_ADMIN_TOKEN` (Worker secret `ADMIN_TOKEN`; the value is in the ignored `instawork/.env`).
+- **Deleting a video completely:** `DELETE /admin/videos/:id` with `Authorization: Bearer $SPOTTED_ADMIN_TOKEN` (Worker secret `ADMIN_TOKEN`; the value is in the ignored `instawork/.env`).
   - What it removes, in order:
     1. the D1 row;
     2. the actor: its alarm, streams, Gemini file and all its storage, leaving a tombstone so an in-flight step cannot write again;
@@ -398,7 +398,7 @@ Google sign-in redirects back to whichever domain is in use (`PUBLIC_ORIGIN` + `
 
 ## 9. Incident: the ghost per-minute cron (2026-10-14/15)
 
-- **Symptom.** `framer-cf-api` received `cron: "* * * * *"` scheduled events every minute. Each failed with "Handler does not export a scheduled() function", although the dashboard, `GET .../workers/scripts/framer-cf-api/schedules` and `wrangler deployments` showed no cron.
+- **Symptom.** The API Worker received `cron: "* * * * *"` scheduled events every minute. Each failed with "Handler does not export a scheduled() function", although the dashboard, `GET .../workers/scripts/<worker>/schedules` and `wrangler deployments` showed no cron.
 - **Timeline (UTC, from the GraphQL `workersInvocationsScheduled` dataset):**
   - 19:07: the first per-minute run succeeds. The code then exported `scheduled()`, and `crons: ["* * * * *"]` was deployed by commit `f695474`/`72d22bb`.
   - 19:15: commit `7a607a4` deploys `crons: []` and removes `scheduled()`. The schedules API returns `[]`.
@@ -427,11 +427,11 @@ extracts frames itself, Workers AI transcribes the speech, and Gemini describes 
 ### 10.1 Sources
 
 - **Google OAuth** (`src/google.ts`, routes `GET /oauth/google/start` and `GET /oauth/google/callback`, behind Access).
-  - Client: "Framer app" in GCP project `framer-511620`. `GOOGLE_CLIENT_ID` is a var and `GOOGLE_CLIENT_SECRET` a secret (set by the owner). Redirect URI `https://framer.haciensus.com/oauth/google/callback`.
+  - Client: the "Spotted" OAuth client in the GCP project. `GOOGLE_CLIENT_ID` is a var and `GOOGLE_CLIENT_SECRET` a secret (set by the owner). Redirect URI `https://spotted.haciensus.com/oauth/google/callback`.
   - Scopes `photospicker.mediaitems.readonly` and `drive.readonly`, with `access_type=offline` and `prompt=consent`; a one-time `state` (D1 `oauth_states`, 10 minutes) guards against CSRF.
   - The refresh token is sealed with AES-GCM (secret `TOKEN_ENC_KEY`, associated data `google-refresh-token`) in D1 `google_auth`. No route returns it and it is never logged.
   - The OAuth app is in Testing mode, so refresh tokens **expire after 7 days**. `invalid_grant` sets `google_auth.status = reconnect_needed`, the UI shows "Reconnect Google", and Drive polling pauses until then.
-- **Google Photos** (primary). Since March 2025 the Library API cannot read a user's library, so Framer uses the [Picker API](https://developers.google.com/photos/picker):
+- **Google Photos** (primary). Since March 2025 the Library API cannot read a user's library, so Spotted uses the [Picker API](https://developers.google.com/photos/picker):
   1. `POST /photos/sessions` creates a session; the UI opens `pickerUri + /autoclose`.
   2. The **LibraryDO** alarm polls `sessions.get` at Google's `pollInterval` until `mediaItemsSet`.
   3. It marks the session `importing`, runs `mediaItems.list` and creates one video per picked VIDEO, with `(source, source_id)` unique, so a re-pick is a no-op.
@@ -457,7 +457,7 @@ extracts frames itself, Workers AI transcribes the speech, and Gemini describes 
 | `transcribe` | ≤ 10 MB: the whole video to Whisper as base64; otherwise 60 s M4A chunks from the Media binding; no audio track gives an empty transcript. Then the first `SOUND_MAX_S` (60 s) of audio as M4A is kept in R2 `videos/<id>/sound.m4a` for sound tags (the > 10 MB path reuses chunk 0; ≤ 10 MB makes one Media audio call; `9412` = no audio track → `sound: none`) | Workers AI `whisper-large-v3-turbo`, Media binding | per chunk; `sound` after the R2 put |
 | `describe` | 8 frames per call, inline JPEG + timestamp + nearby speech, giving one 80-180-word paragraph per frame (scene, objects, people and actions, quoted on-screen text, framing, change since the previous frame) | Gemini 3.1 Flash Lite | per batch |
 | `summarize` | one call: narrative paragraph + tags (environment, object, action, speech) + `labels` picked from the fixed vocabulary in `src/labels.ts` + `sounds` heard in the inline M4A (prompt `cf-frames-v4-labels`). Labels and sounds are validated against the vocabulary (synonyms folded, unknown names dropped); ancestors are added by our code (`expandLabels`), never by the model | Gemini 3.1 Flash Lite | summary, tags, labels, sounds |
-| `index` | bge-m3 vectors: `s:<id>` summary + tags + labels and sounds with ancestors + transcript head, `t:<id>:<n>` 45 s transcript windows every 30 s, `f:<id>:<i>` frame paragraphs, each with `{video_id, kind, t_start, t_end, source, source_id, thumb_key}` | Workers AI `bge-m3`, Vectorize `framer-cf-m3` | upsert (idempotent) |
+| `index` | bge-m3 vectors: `s:<id>` summary + tags + labels and sounds with ancestors + transcript head, `t:<id>:<n>` 45 s transcript windows every 30 s, `f:<id>:<i>` frame paragraphs, each with `{video_id, kind, t_start, t_end, source, source_id, thumb_key}` | Workers AI `bge-m3`, Vectorize `spotted-vectors` | upsert (idempotent) |
 
 **Verified live on this account (2026-10-15).**
 - Spritesheets stack tiles vertically (15 × 64×36 → 64×540 JPEG).
@@ -525,14 +525,13 @@ The thresholds were retuned on the owner's real library on 2026-10-15 (§10.7). 
 ### 10.6 Owner steps and status
 
 1. `cd cloudflare && npx wrangler secret put GOOGLE_CLIENT_SECRET` (owner).
-2. Open https://framer.haciensus.com (Access), click **Connect Google**, and consent with a test user.
+2. Open https://spotted.haciensus.com (Access), click **Connect Google**, and consent with a test user.
 3. **Import from Google Photos**: pick a few short videos, then Done. Or paste a Drive folder link.
 4. Every 7 days (Testing-mode tokens): **Reconnect Google** when the UI asks.
 5. Optional cleanup:
-   - `wrangler vectorize delete framer-cf-vectors` (the old 384-d index, empty);
-   - `wrangler delete framer-cf-smoke`: that Worker still exists but its config is gone.
+   - the old 384-d index and the smoke-test Worker are removed by `scripts/spotted-cleanup.sh`.
 
-**Done.** D1 migration 0004 applied remotely, Vectorize index `framer-cf-m3` created (1024 d, cosine, metadata indexes `kind` and `video_id`), secret `TOKEN_ENC_KEY` set, Worker deployed.
+**Done.** D1 migration 0004 applied remotely, Vectorize index (now `spotted-vectors`) created (1024 d, cosine, metadata indexes `kind` and `video_id`), secret `TOKEN_ENC_KEY` set, Worker deployed.
 
 **Verified with `wrangler dev`** (the local runtime against the real AI, Media, R2 and Vectorize) on a 30 s test clip:
 - it completed in 32–72 s;
@@ -548,7 +547,7 @@ The thresholds were retuned on the owner's real library on 2026-10-15 (§10.7). 
 
 **Evidence, in pipeline order.**
 1. **Ingestion.** All 5 are `completed`, with no error or skip (5–18 s each, well under 100 MB / 10 min, no quota waits). They are an AEK–LASK goal, a crocodile entering a lake, a wild boar foraging by water, a blue-team goal celebration at sunset, and an ISL match at 3-2.
-2. **Vectors.** `framer-cf-m3` holds 35 vectors, exactly the expected 5 summaries + 1 transcript window + 29 frames; mutations are processed up to 12:56:56. Metadata indexes `kind` and `video_id` exist (search uses no filter; only the duplicate check filters on `kind`). Every vector is returned when queried by its own values.
+2. **Vectors.** The index held 35 vectors, exactly the expected 5 summaries + 1 transcript window + 29 frames; mutations are processed up to 12:56:56. Metadata indexes `kind` and `video_id` exist (search uses no filter; only the duplicate check filters on `kind`). Every vector is returned when queried by its own values.
 3. **Content.** The crocodile and boar summaries and frames describe the animals ("a grey-brown crocodile", "a brownish-gray wild boar … foraging", "natural, undisturbed behavior"), but none uses the word "wildlife".
 4. **Query path** (same models, index and passage texts as the Worker; scratch script with `getPlatformProxy` remote bindings):
 

@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  // Serves framer.haciensus.com (custom domain attached in the dashboard).
-  "name": "framer-cf-api",
+  // Spotted. Serves spotted.haciensus.com (custom domain attached by scripts/spotted-setup.sh).
+  "name": "spotted-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-15",
   "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
@@ -9,8 +9,8 @@
   // Off: the public *.workers.dev URL would bypass Cloudflare Access on the custom domain.
   "workers_dev": false,
   "preview_urls": false,
-  // No "routes" on purpose: the custom domain framer.haciensus.com is attached in the
-  // dashboard and managed by the owner; a deploy without "routes" leaves it untouched.
+  // No "routes" on purpose: the custom domain spotted.haciensus.com is attached outside this file
+  // (Workers custom domain), so a deploy leaves it untouched.
 
   "assets": {
     "directory": "./public",
@@ -26,16 +26,12 @@
   // Actor per video: VideoDO (SQLite-backed, the only kind on Workers Free) runs one video's
   // ingestion from its own alarm and serves that video's hibernatable WebSocket (src/video.ts).
   // LibraryDO (one object) polls Google Photos picker sessions and the Drive folder (src/library.ts).
-  // v1/v2 created the earlier FramerScheduler/VideoEvents classes; v3 deletes them.
   "durable_objects": { "bindings": [
     { "name": "VIDEO", "class_name": "VideoDO" },
     { "name": "LIBRARY", "class_name": "LibraryDO" }
   ] },
   "migrations": [
-    { "tag": "v1-scheduler", "new_sqlite_classes": ["FramerScheduler"] },
-    { "tag": "v2-video-events", "new_sqlite_classes": ["VideoEvents"] },
-    { "tag": "v3-actor-per-video", "deleted_classes": ["FramerScheduler", "VideoEvents"], "new_sqlite_classes": ["VideoDO"] },
-    { "tag": "v4-library", "new_sqlite_classes": ["LibraryDO"] }
+    { "tag": "v1", "new_sqlite_classes": ["VideoDO", "LibraryDO"] }
   ],
 
   "ai": { "binding": "AI" },
@@ -44,35 +40,33 @@
   // (input < 100 MB and <= 10 min). No public origin needed, so Access is not in the way.
   "media": { "binding": "MEDIA" },
 
-  // Created (free tier): `wrangler d1 create framer-cf-db`.
-  // Schema: `wrangler d1 migrations apply framer-cf-db --remote`.
+  // Created (free tier): `wrangler d1 create spotted-db`.
+  // Schema: `wrangler d1 migrations apply spotted-db --remote`.
   "d1_databases": [
-    { "binding": "DB", "database_name": "framer-cf-db", "database_id": "88d79c4f-1ca9-42d7-9d26-9e7bea9ba2b7", "migrations_dir": "migrations" }
+    { "binding": "DB", "database_name": "spotted-db", "database_id": "43256075-1f4b-4d4e-b239-7e7a12df0848", "migrations_dir": "migrations" }
   ],
 
-  // Created (free tier): `wrangler vectorize create framer-cf-m3 --dimensions 1024 --metric cosine`
-  // plus metadata indexes on "kind" and "video_id" (string). Free tier stores 5M dimensions,
-  // i.e. ~4,880 vectors at 1024 d (~200 videos at MAX_FRAMES=16). The old 384-d index
-  // framer-cf-vectors is unused (empty).
+  // Created (free tier): `wrangler vectorize create spotted-vectors --dimensions 1024 --metric cosine`
+  // plus metadata indexes on "kind" and "video_id" (string), created before any insert. Free tier
+  // stores 5M dimensions, i.e. ~4,880 vectors at 1024 d (~200 videos at MAX_FRAMES=16).
   "vectorize": [
-    { "binding": "VECTORIZE", "index_name": "framer-cf-m3" }
+    { "binding": "VECTORIZE", "index_name": "spotted-vectors" }
   ],
 
+  // Lifecycle: originals under videos/ expire after 7 days; frames (thumbs/) are kept; incomplete
+  // multipart uploads are aborted after 1 day. CORS: r2-cors.json.
   "r2_buckets": [
-    { "binding": "VIDEOS", "bucket_name": "framer-cf-videos" }
+    { "binding": "VIDEOS", "bucket_name": "spotted-videos" }
   ],
 
   // Gemini 3.1 Flash Lite free tier on the key's project: 15 RPM, 500 RPD, shared by frame
   // descriptions (2 calls per 16-frame video), summaries (1 per video) and /query (1 each).
   // Imports start IMPORT_STAGGER_S apart to stay under 15 RPM; 429s wait without failing.
   "vars": {
-    "PUBLIC_ORIGIN": "https://framer.haciensus.com",
-    // Second custom domain for the Spotted rename; Google OAuth redirects back to whichever is in use
-    // (each needs its redirect URI on the OAuth client). See cloudflare/scripts/spotted-subdomain.sh.
-    "PUBLIC_ORIGINS": "https://spotted.haciensus.com",
+    "PUBLIC_ORIGIN": "https://spotted.haciensus.com",
     "GOOGLE_CLIENT_ID": "157133842980-16181ouhjshhpjcjgjpa3hf8nf1imik0.apps.googleusercontent.com",
     "R2_ACCOUNT_ID": "0187f7c38bf35a8abcc4e9f9abfa213e",
-    "R2_BUCKET_NAME": "framer-cf-videos",
+    "R2_BUCKET_NAME": "spotted-videos",
     "GEMINI_MODEL": "gemini-3.1-flash-lite",
     "EMBEDDING_MODEL": "@cf/baai/bge-m3",
     "RERANK_MODEL": "@cf/baai/bge-reranker-base",
@@ -109,7 +103,7 @@
   "env": {
     // Test-only (vitest.workers.config.ts): local Miniflare D1 and Durable Objects, never deployed.
     "test": {
-      "name": "framer-cf-test",
+      "name": "spotted-test",
       "triggers": { "crons": [] },
       "durable_objects": { "bindings": [
         { "name": "VIDEO", "class_name": "VideoDO" },
@@ -117,7 +111,7 @@
       ] },
       "migrations": [{ "tag": "v1", "new_sqlite_classes": ["VideoDO", "LibraryDO"] }],
       "d1_databases": [
-        { "binding": "DB", "database_name": "framer-cf-test", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+        { "binding": "DB", "database_name": "spotted-test", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
       ],
       "vars": { "PUBLIC_DEMO_LIMITS": "false" }
     }
