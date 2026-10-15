@@ -88,7 +88,7 @@ npx wrangler dev  # local; AI, Vectorize and Media need a Cloudflare login
   - `gemini.ts`: prompts and validation.
 - **UI:** `cloudflare/public/index.html`.
 - **Deploy:** `cd cloudflare && npm run deploy`. The custom domain and Access are configured in the Cloudflare dashboard, not in `wrangler.jsonc`.
-- **Secrets** (`wrangler secret put`, never committed): `GEMINI_API_KEY`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `ADMIN_TOKEN`, `TOKEN_ENC_KEY`, `GOOGLE_CLIENT_SECRET`.
+- **Secrets** (`wrangler secret put`, never committed): `GEMINI_API_KEY`, `ADMIN_TOKEN`, `TOKEN_ENC_KEY`, `GOOGLE_CLIENT_SECRET`. Uploads and playback go through the Worker (`PUT /videos/:id/upload`, `GET /videos/:id/source`); an optional R2 API token (`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) switches them to presigned URLs.
 - **Operations:** deleting a video (`DELETE /admin/videos/:id`), owner setup steps, the free-tier budget and incident notes are all in [docs/cloudflare-port.md](docs/cloudflare-port.md).
 
 ## Limits

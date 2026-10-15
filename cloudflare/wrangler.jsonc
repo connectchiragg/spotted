@@ -95,8 +95,9 @@
     "DRIVE_POLL_MINUTES": "60",
     "DRIVE_LOOKBACK_MONTHS": "24"
   },
-  // Secrets (set with `wrangler secret put`, never committed): GEMINI_API_KEY, R2_ACCESS_KEY_ID,
-  // R2_SECRET_ACCESS_KEY, ADMIN_TOKEN, TOKEN_ENC_KEY, GOOGLE_CLIENT_SECRET (set by the owner).
+  // Secrets (set with `wrangler secret put`, never committed): GEMINI_API_KEY, ADMIN_TOKEN,
+  // TOKEN_ENC_KEY, GOOGLE_CLIENT_SECRET. Optional: R2_ACCESS_KEY_ID + R2_SECRET_ACCESS_KEY switch
+  // uploads and playback from the Worker routes to presigned R2 URLs.
 
   "observability": { "enabled": true },
 

@@ -2,7 +2,7 @@
 # Retire the old site after the move to Spotted. Run it yourself from cloudflare/, ONLY after
 # https://spotted.haciensus.com works:  bash scripts/spotted-cleanup.sh
 #
-# It refuses to start unless spotted.haciensus.com is live behind Access, spotted-api has its six
+# It refuses to start unless spotted.haciensus.com is live behind Access, spotted-api has its four
 # secrets, and spotted-db holds everything the old database holds. Then, asking before each step:
 #   1. detaches the old domain from the old Worker;
 #   2. deletes the old Access application(s) for that domain (never one that covers Spotted);
@@ -47,10 +47,10 @@ res=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 15 "http
 [[ "${res%% *}" =~ ^30[1278]$ && "${res#* }" == *cloudflareaccess.com* ]] || die "https://$NEW is not live behind Access yet (run scripts/spotted-setup.sh first)."
 ok "https://$NEW is live behind Access."
 secrets=$(npx wrangler secret list --name "$NEW_WORKER" 2>/dev/null || echo '[]')
-for s in GEMINI_API_KEY GOOGLE_CLIENT_SECRET TOKEN_ENC_KEY ADMIN_TOKEN R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY; do
+for s in GEMINI_API_KEY GOOGLE_CLIENT_SECRET TOKEN_ENC_KEY ADMIN_TOKEN; do
   grep -q "\"$s\"" <<< "$secrets" || die "$NEW_WORKER is missing the secret $s (run scripts/spotted-setup.sh)."
 done
-ok "$NEW_WORKER has all six secrets."
+ok "$NEW_WORKER has all four secrets."
 if npx wrangler d1 info "$OLD_DB" > /dev/null 2>&1; then
   q="SELECT count(*) n, coalesce(max(updated_at),'') last FROM videos"
   old=$(d1 "$OLD_DB" "$q"); new=$(d1 "$NEW_DB" "$q")

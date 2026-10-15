@@ -146,3 +146,38 @@ describe('Google sign-in on more than one domain', () => {
     expect(await start('evil.example')).toBe('https://spotted.haciensus.com/oauth/google/callback'); // not ours: the default
   });
 });
+
+describe('uploads and playback through the Worker (no R2 API token)', () => {
+  it('uploads, confirms, then streams the original with byte ranges', async () => {
+    const objects: Record<string, any> = {};
+    const app = appDeps(db, { presigner: null, bucket: fakeBucket(objects) });
+    const bytes = new Uint8Array(Array.from({ length: 20 }, (_, i) => i));
+    const created = await (await handle(new Request('https://spotted.test/videos/uploads', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: 'clip.mp4', content_type: 'video/mp4', size_bytes: bytes.length }) }), app)).json() as any;
+    const id = created.request.id;
+    expect(created.upload).toMatchObject({ url: `/videos/${id}/upload`, method: 'PUT', headers: { 'Content-Type': 'video/mp4' } });
+    const put = (body: Uint8Array, type = 'video/mp4') => handle(new Request(`https://spotted.test/videos/${id}/upload`, { method: 'PUT',
+      headers: { 'Content-Type': type, 'Content-Length': String(body.length) }, body }), app);
+    expect((await put(bytes.slice(0, 5))).status).toBe(400);          // wrong size
+    expect((await put(bytes, 'video/quicktime')).status).toBe(400);   // wrong type
+    expect((await put(bytes)).status).toBe(200);
+    expect((await handle(new Request(`https://spotted.test/videos/${id}/complete`, { method: 'POST' }), app)).status).toBe(202);
+    expect((await put(bytes)).status).toBe(409);                      // no second upload after completion
+    const video = await (await handle(new Request(`https://spotted.test/videos/${id}`), app)).json() as any;
+    expect(video.download_url).toBe(`/videos/${id}/source`);
+    const get = (range?: string) => handle(new Request(`https://spotted.test/videos/${id}/source`, { headers: range ? { Range: range } : {} }), app);
+    const whole = await get();
+    expect(whole.status).toBe(200);
+    expect(whole.headers.get('accept-ranges')).toBe('bytes');
+    expect([...new Uint8Array(await whole.arrayBuffer())]).toEqual([...bytes]);
+    const part = await get('bytes=2-5');
+    expect(part.status).toBe(206);
+    expect(part.headers.get('content-range')).toBe('bytes 2-5/20');
+    expect([...new Uint8Array(await part.arrayBuffer())]).toEqual([2, 3, 4, 5]);
+    const tail = await get('bytes=-3');
+    expect([...new Uint8Array(await tail.arrayBuffer())]).toEqual([17, 18, 19]);
+    expect((await get('bytes=50-')).status).toBe(416);
+    const head = await handle(new Request(`https://spotted.test/videos/${id}/source`, { method: 'HEAD' }), app);
+    expect([head.status, head.headers.get('content-length')]).toEqual([200, '20']);
+  });
+});

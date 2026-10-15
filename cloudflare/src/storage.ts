@@ -1,8 +1,8 @@
 /**
- * R2 access. Object bytes go browser -> R2 directly with a presigned PUT (Workers
- * cap request bodies at 100 MB, uploads go to 400 MB), and playback uses
- * presigned GETs. Presigning uses R2's S3-compatible API and an R2 API token;
- * HEAD/GET/DELETE inside the Worker use the R2 binding.
+ * Optional R2 presigning. With an R2 API token (R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY), uploads
+ * and playback use presigned PUT/GET URLs straight to R2. Without one (the default), they go
+ * through the Worker: PUT /videos/:id/upload and GET /videos/:id/source (src/api.ts), within the
+ * 100 MB request-body limit that matches the source limit. Everything else uses the R2 binding.
  */
 import { AwsClient } from 'aws4fetch';
 import { Env } from './env';

@@ -92,7 +92,8 @@ export async function present(job: Job, presigner: Presigner | null): Promise<Re
   result.download_url_expires_at = null;
   if (job.uploaded) {
     if (!presigner) {
-      result.download_error = 'Preview link temporarily unavailable';
+      // No R2 API token: play through the Worker (same origin, behind Access, byte ranges).
+      result.download_url = `/videos/${encodeURIComponent(job.id)}/source`;
     } else {
       result.download_url = await presigner.getUrl(job.object_key, DOWNLOAD_TTL);
       result.download_url_expires_at = new Date(Date.now() + DOWNLOAD_TTL * 1000).toISOString().replace('Z', '+00:00');
@@ -217,7 +218,8 @@ export async function publicBudget(request: Request, path: string, deps: AppDeps
 
 async function createUpload(request: Request, deps: AppDeps) {
   const db = need(deps.db, 'Database is not configured');
-  const presigner = need(deps.presigner, 'Storage is not configured; set the R2 API token secrets');
+  const presigner = deps.presigner;
+  if (!presigner && !deps.bucket) throw new HttpError(503, 'Storage is not configured');
   const body = validateUploadIntent(await readJson(request));
   if (body.size_bytes >= deps.settings.maxSourceBytes) throw new HttpError(413, `Videos over ${Math.round(deps.settings.maxSourceBytes / 1e6)} MB are skipped`);
   const key = idempotencyKey(request);
@@ -227,7 +229,9 @@ async function createUpload(request: Request, deps: AppDeps) {
   const job = existing ?? await store.createVideo(db, { filename: body.filename, contentType: body.content_type, size: body.size_bytes, displayName: body.display_name, idempotencyKey: key });
   let url: string;
   try {
-    url = await presigner.putUrl(job.object_key, job.content_type, 600);
+    // With an R2 API token the browser PUTs to R2 directly; without one it PUTs to this Worker,
+    // which streams the body into R2 (Workers accept request bodies up to 100 MB: the source limit).
+    url = presigner ? await presigner.putUrl(job.object_key, job.content_type, 600) : `/videos/${encodeURIComponent(job.id)}/upload`;
   } catch {
     await store.uploadFailed(db, job.id, 'Could not prepare direct upload; submit again');
     throw new HttpError(503, 'Could not prepare direct upload');
@@ -361,6 +365,55 @@ async function history(url: URL, deps: AppDeps) {
   await store.expireUploads(db); // lazily: there is no background sweeper
   const jobs = await store.listVideos(db, { limit, offset, tags, includeArchived });
   return json({ items: await Promise.all(jobs.map((j) => present(j, deps.presigner))), limit, offset });
+}
+
+/** PUT /videos/:id/upload: the upload body, streamed into R2 (used when there is no R2 API token). */
+async function receiveUpload(request: Request, id: string, deps: AppDeps) {
+  const db = need(deps.db, 'Database is not configured');
+  const bucket = need(deps.bucket, 'Storage is not configured');
+  const job = await store.getVideo(db, id);
+  if (!job) throw new HttpError(404, 'Request not found');
+  if (job.status !== 'uploading') throw new HttpError(409, 'This upload is already complete or expired');
+  const length = Number(request.headers.get('content-length'));
+  if (!Number.isFinite(length) || length !== job.expected_size) throw new HttpError(400, 'The upload size does not match the request');
+  if ((request.headers.get('content-type') ?? '').split(';')[0].trim() !== job.content_type) throw new HttpError(400, 'The upload type does not match the request');
+  if (!request.body) throw new HttpError(400, 'Empty upload');
+  await bucket.put(job.object_key, request.body, { httpMetadata: { contentType: job.content_type } });
+  return json({ id: job.id, stored: true });
+}
+
+/** "bytes=a-b" | "bytes=a-" | "bytes=-n" for an object of `size` bytes -> {offset, length}; null = whole; 'invalid' = 416. */
+export function byteRange(header: string | null, size: number): { offset: number; length: number } | null | 'invalid' {
+  if (!header) return null;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!m || (m[1] === '' && m[2] === '')) return null; // unsupported (e.g. multiple ranges): send the whole object
+  let start: number, end: number;
+  if (m[1] === '') { const n = Number(m[2]); if (n === 0) return 'invalid'; start = Math.max(0, size - n); end = size - 1; }
+  else { start = Number(m[1]); end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1); }
+  if (start >= size || end < start) return 'invalid';
+  return { offset: start, length: end - start + 1 };
+}
+
+/** GET|HEAD /videos/:id/source: the original, streamed from R2 with byte ranges (players seek with them). */
+async function source(request: Request, id: string, deps: AppDeps) {
+  const db = need(deps.db, 'Database is not configured');
+  const bucket = need(deps.bucket, 'Storage is not configured');
+  const job = await store.getVideo(db, id);
+  if (!job || !job.uploaded) throw new HttpError(404, 'Video not found');
+  const head = await bucket.head(job.object_key);
+  if (!head) throw new HttpError(404, 'The original is no longer stored (originals are kept 7 days)');
+  const headers = new Headers({ 'Content-Type': head.httpMetadata?.contentType || job.content_type || 'video/mp4', 'Accept-Ranges': 'bytes',
+    'Cache-Control': 'private, max-age=3600', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline' });
+  if (head.httpEtag) headers.set('ETag', head.httpEtag);
+  const range = byteRange(request.headers.get('range'), head.size);
+  if (range === 'invalid') return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${head.size}` } });
+  if (request.method === 'HEAD') { headers.set('Content-Length', String(head.size)); return new Response(null, { headers }); }
+  const object = await bucket.get(job.object_key, range ? { range } : undefined);
+  if (!object || !('body' in object)) throw new HttpError(404, 'Video not found');
+  if (!range) { headers.set('Content-Length', String(head.size)); return new Response(object.body, { headers }); }
+  headers.set('Content-Range', `bytes ${range.offset}-${range.offset + range.length - 1}/${head.size}`);
+  headers.set('Content-Length', String(range.length));
+  return new Response(object.body, { status: 206, headers });
 }
 
 /** GET /videos/:id/thumbs/:i: a selected frame's JPEG, streamed from R2 (same-origin, behind Access). */
@@ -622,6 +675,8 @@ const VIDEO = /^\/videos\/([^/]+)$/;
 const ADMIN_VIDEO = /^\/admin\/videos\/([^/]+)$/;
 const VIDEO_ACTION = /^\/videos\/([^/]+)\/(complete|archive|restore)$/;
 const THUMB = /^\/videos\/([^/]+)\/(?:thumbs|frames)\/(\d+)$/;
+const SOURCE = /^\/videos\/([^/]+)\/source$/;
+const UPLOAD = /^\/videos\/([^/]+)\/upload$/;
 const PICKER_SESSION = /^\/photos\/sessions\/([^/]+)$/;
 
 export async function handle(request: Request, deps: AppDeps): Promise<Response> {
@@ -666,6 +721,10 @@ export async function handle(request: Request, deps: AppDeps): Promise<Response>
     if (method === 'GET' && path === '/videos') return await history(url, deps);
     if (method === 'GET' && path === '/search') return await search(url, deps);
     if (method === 'POST' && path === '/query') return await queryVideos(request, deps);
+    const src = SOURCE.exec(path);
+    if (src && (method === 'GET' || method === 'HEAD')) return await source(request, decodeURIComponent(src[1]), deps);
+    const up = UPLOAD.exec(path);
+    if (up && method === 'PUT') return await receiveUpload(request, decodeURIComponent(up[1]), deps);
     let m = THUMB.exec(path);
     if (m && method === 'GET') return await thumb(decodeURIComponent(m[1]), Number(m[2]), deps);
     m = VIDEO_ACTION.exec(path);

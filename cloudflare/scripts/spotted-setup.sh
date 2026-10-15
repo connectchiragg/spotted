@@ -14,7 +14,7 @@
 #   3. Secrets for spotted-api, never printed: GEMINI_API_KEY, ADMIN_TOKEN and TOKEN_ENC_KEY come
 #      from ../.env (the encryption key is checked by decrypting the stored Google token locally;
 #      if it does not match, a new one is generated and you reconnect Google once); you paste the
-#      Google client secret and a new R2 token for the spotted-videos bucket.
+#      Google client secret. (No R2 token: uploads and playback go through the Worker.)
 #   4. Worker custom domain: attaches spotted.haciensus.com to spotted-api, then checks from outside
 #      that it redirects to the Access login. If it does not, the domain is detached again at once.
 #
@@ -159,18 +159,9 @@ if ask "Set the secrets for $WORKER now? (existing ones are kept unless you choo
     echo "  Google client secret: on the OAuth client page, copy the client secret (or \"Add secret\" to make a new one)."
     read -r -s -p "  Google client secret (hidden): " v; echo; [[ -n "$v" ]] || die "No Google client secret given."
     put_secret GOOGLE_CLIENT_SECRET "$v"; fi
-  # R2 token for the new bucket (presigned upload and playback links).
-  if has R2_ACCESS_KEY_ID && has R2_SECRET_ACCESS_KEY; then ok "R2 keys already set."; else
-    echo "  R2 token: dashboard -> R2 -> Manage API tokens -> Create API token:"
-    echo "    permissions \"Object Read & Write\", apply to the bucket \"$BUCKET\" only. Copy the S3 credentials."
-    command -v open > /dev/null && open "https://dash.cloudflare.com/$ACCOUNT_ID/r2/api-tokens" || true
-    read -r -s -p "  R2 Access Key ID (hidden): " v; echo; [[ -n "$v" ]] || die "No R2 access key id given."
-    put_secret R2_ACCESS_KEY_ID "$v"
-    read -r -s -p "  R2 Secret Access Key (hidden): " v; echo; [[ -n "$v" ]] || die "No R2 secret given."
-    put_secret R2_SECRET_ACCESS_KEY "$v"; fi
   unset v k sealed
 else
-  warn "Skipped; $WORKER cannot reach Gemini, Google or R2 links until its secrets are set."
+  warn "Skipped; $WORKER cannot reach Gemini or Google until its secrets are set."
 fi
 
 # ---------------------------------------------------------------- 4. Worker custom domain + check

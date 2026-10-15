@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { handle, HttpError, validateUploadIntent } from '../src/api';
+import { byteRange, handle, HttpError, validateUploadIntent } from '../src/api';
 import { settings as readSettings } from '../src/env';
 import { changeScores, mad, mp4Duration, selectFrames, spriteTiles, spriteWindows, tileTime } from '../src/frames';
 import { Gemini, validateAnswer, validateDescriptions, validateSummary } from '../src/gemini';
@@ -306,6 +306,19 @@ describe('label hierarchy', () => {
     expect(queryLabels('a pig eating grass')).toEqual(['pig', 'eating']);
     expect(queryLabels('cheering crowd')).toEqual(['cheering', 'crowd']);
     expect(queryLabels('office meeting')).toEqual(['meeting']);
+  });
+});
+
+describe('byte ranges for playback', () => {
+  it('parses single ranges and rejects unsatisfiable ones', () => {
+    expect(byteRange(null, 100)).toBeNull();
+    expect(byteRange('bytes=0-', 100)).toEqual({ offset: 0, length: 100 });
+    expect(byteRange('bytes=10-19', 100)).toEqual({ offset: 10, length: 10 });
+    expect(byteRange('bytes=90-500', 100)).toEqual({ offset: 90, length: 10 });
+    expect(byteRange('bytes=-30', 100)).toEqual({ offset: 70, length: 30 });
+    expect(byteRange('bytes=0-1,5-6', 100)).toBeNull(); // multiple ranges: whole object
+    expect(byteRange('bytes=100-', 100)).toBe('invalid');
+    expect(byteRange('bytes=-0', 100)).toBe('invalid');
   });
 });
 
