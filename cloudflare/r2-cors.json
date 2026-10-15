@@ -2,11 +2,23 @@
   "rules": [
     {
       "allowed": {
-        "origins": ["https://framer.haciensus.com", "https://framer-cf-api.connect-chirag-g.workers.dev"],
-        "methods": ["PUT", "GET", "HEAD"],
-        "headers": ["Content-Type"]
+        "origins": [
+          "https://framer.haciensus.com",
+          "https://spotted.haciensus.com",
+          "https://framer-cf-api.connect-chirag-g.workers.dev"
+        ],
+        "methods": [
+          "PUT",
+          "GET",
+          "HEAD"
+        ],
+        "headers": [
+          "Content-Type"
+        ]
       },
-      "exposeHeaders": ["ETag"],
+      "exposeHeaders": [
+        "ETag"
+      ],
       "maxAgeSeconds": 3600
     }
   ]

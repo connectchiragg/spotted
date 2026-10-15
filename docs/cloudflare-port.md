@@ -386,6 +386,16 @@ Run without a browser against `framer-cf-api`, with a 5 s, 45 KB synthetic MP4 (
   - Vectorize was already empty;
   - the two actors purge at their pending alarms (~22:06 and ~22:21 UTC).
 
+### Second domain: spotted.haciensus.com (rename)
+
+`cloudflare/scripts/spotted-subdomain.sh` (run by the owner) does the following, in order, asking before each change:
+1. **Access:** creates a new Access application "Spotted" for the new hostname, with the same sign-in rules. The existing application is never modified.
+2. **Google:** pauses while the owner adds the OAuth redirect URI in the Google console.
+3. **R2:** applies `r2-cors.json` to the bucket.
+4. **Domain:** attaches the custom domain, then checks from outside that it redirects to the Access login, detaching it at once if not.
+
+Google sign-in redirects back to whichever domain is in use (`PUBLIC_ORIGIN` + `PUBLIC_ORIGINS`).
+
 ## 9. Incident: the ghost per-minute cron (2026-10-14/15)
 
 - **Symptom.** `framer-cf-api` received `cron: "* * * * *"` scheduled events every minute. Each failed with "Handler does not export a scheduled() function", although the dashboard, `GET .../workers/scripts/framer-cf-api/schedules` and `wrangler deployments` showed no cron.

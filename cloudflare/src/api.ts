@@ -29,6 +29,8 @@ export interface AppDeps {
   library?: DurableObjectNamespace | null;
   /** Google OAuth config (client id/secret, encryption key) and client; null until configured. */
   googleConfig?: GoogleConfig | null;
+  /** Origins the app is served on (PUBLIC_ORIGIN + PUBLIC_ORIGINS); OAuth redirects back to the one in use. */
+  origins?: string[];
   google?: Google | null;
   /** ADMIN_TOKEN secret; null disables the admin routes (they answer 404). */
   adminToken?: string | null;
@@ -455,7 +457,12 @@ const clock = (t: unknown) => {
 // ---------------------------------------------------------------- Google sources
 
 /** One-time state for the consent redirect (CSRF), valid 10 minutes. */
-async function googleStart(deps: AppDeps) {
+/** The OAuth config for this request: redirect back to the domain the owner is on, if it is one of ours. */
+function oauthFor(url: URL, deps: AppDeps, cfg: GoogleConfig): GoogleConfig {
+  return deps.origins?.includes(url.origin) ? { ...cfg, redirectUri: `${url.origin}/oauth/google/callback` } : cfg;
+}
+
+async function googleStart(url: URL, deps: AppDeps) {
   const db = need(deps.db, 'Database is not configured');
   const cfg = need(deps.googleConfig, 'Google sign-in is not configured yet (GOOGLE_CLIENT_SECRET / TOKEN_ENC_KEY)');
   const state = [...crypto.getRandomValues(new Uint8Array(24))].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -464,7 +471,7 @@ async function googleStart(deps: AppDeps) {
     db.prepare('DELETE FROM oauth_states WHERE created_at < ?1').bind(now - 600),
     db.prepare('INSERT INTO oauth_states (state, created_at) VALUES (?1, ?2)').bind(state, now),
   ]);
-  return new Response(null, { status: 302, headers: { Location: authUrl(cfg, state), 'Cache-Control': 'no-store' } });
+  return new Response(null, { status: 302, headers: { Location: authUrl(oauthFor(url, deps, cfg), state), 'Cache-Control': 'no-store' } });
 }
 
 async function googleCallback(url: URL, deps: AppDeps) {
@@ -479,7 +486,7 @@ async function googleCallback(url: URL, deps: AppDeps) {
   const code = url.searchParams.get('code');
   if (!code) return back('error');
   try {
-    const { refreshToken, scope } = await exchangeCode(cfg, code);
+    const { refreshToken, scope } = await exchangeCode(oauthFor(url, deps, cfg), code);
     const sealed = await encryptSecret(refreshToken, cfg.encKey);
     const ts = store.nowIso();
     await db.prepare(`INSERT INTO google_auth (id, refresh_token_enc, scopes, status, error, connected_at, updated_at) VALUES (1, ?1, ?2, 'connected', NULL, ?3, ?3)
@@ -638,7 +645,7 @@ export async function handle(request: Request, deps: AppDeps): Promise<Response>
     }
     if (method !== 'GET' && method !== 'HEAD' && !sameOrigin(request, url)) throw new HttpError(403, 'Cross-origin request refused');
     if (method === 'GET' && path === '/me') return me(request);
-    if (method === 'GET' && path === '/oauth/google/start') return await googleStart(deps);
+    if (method === 'GET' && path === '/oauth/google/start') return await googleStart(url, deps);
     if (method === 'GET' && path === '/oauth/google/callback') return await googleCallback(url, deps);
     if (method === 'GET' && path === '/google/status') return await googleStatus(deps);
     if (method === 'POST' && path === '/photos/sessions') return await createPickerSession(deps);

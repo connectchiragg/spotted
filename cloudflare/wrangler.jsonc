@@ -67,6 +67,9 @@
   // Imports start IMPORT_STAGGER_S apart to stay under 15 RPM; 429s wait without failing.
   "vars": {
     "PUBLIC_ORIGIN": "https://framer.haciensus.com",
+    // Second custom domain for the Spotted rename; Google OAuth redirects back to whichever is in use
+    // (each needs its redirect URI on the OAuth client). See cloudflare/scripts/spotted-subdomain.sh.
+    "PUBLIC_ORIGINS": "https://spotted.haciensus.com",
     "GOOGLE_CLIENT_ID": "157133842980-16181ouhjshhpjcjgjpa3hf8nf1imik0.apps.googleusercontent.com",
     "R2_ACCOUNT_ID": "0187f7c38bf35a8abcc4e9f9abfa213e",
     "R2_BUCKET_NAME": "framer-cf-videos",

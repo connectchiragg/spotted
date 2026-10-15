@@ -22,6 +22,8 @@ export interface Env {
   // Plain vars (wrangler.jsonc "vars").
   GOOGLE_CLIENT_ID?: string;
   PUBLIC_ORIGIN?: string;
+  /** More origins serving the app (comma-separated), e.g. a second custom domain during a rename. */
+  PUBLIC_ORIGINS?: string;
   R2_ACCOUNT_ID?: string;
   R2_BUCKET_NAME?: string;
   GEMINI_MODEL?: string;

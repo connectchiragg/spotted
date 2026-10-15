@@ -26,6 +26,7 @@ export function build(env: Env, waitUntil: (p: Promise<unknown>) => void): AppDe
     library: env.LIBRARY ?? null,
     googleConfig: googleReady ? { clientId: env.GOOGLE_CLIENT_ID!, clientSecret: env.GOOGLE_CLIENT_SECRET!, encKey: env.TOKEN_ENC_KEY!, redirectUri: `${origin}/oauth/google/callback` } : null,
     google: googleClient(env),
+    origins: [origin, ...(env.PUBLIC_ORIGINS ?? '').split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean)],
     adminToken: env.ADMIN_TOKEN || null,
     waitUntil,
   };
