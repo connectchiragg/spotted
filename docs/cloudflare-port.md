@@ -4,11 +4,17 @@ This branch (`cloudflare-port`) moves Framer off its AWS EC2 server. A Worker in
 [`cloudflare/`](../cloudflare) runs it on Cloudflare's free tier. The Python app
 in `app/` is unchanged and its tests still pass.
 
-Status on 2026-10-15:
-- **Created (free):** the D1 database `framer-cf-db` (migrations 0001–0002 applied), the Vectorize index `framer-cf-vectors`, and the R2 bucket `framer-cf-videos` (by the owner).
-- **Deployed:** the API Worker `framer-cf-api` at https://framer-cf-api.connect-chirag-g.workers.dev, with the secrets `GEMINI_API_KEY`, `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`. The `framer-cf-smoke` Worker still exists (optional cleanup in §5). End-to-end results are in §7.
-- **Actor per video.** Each video's ingestion runs in its own Durable Object (`VideoDO`), which also streams its progress over Server-Sent Events (§2.1). There is no cron, queue or scheduler. The earlier D1 lease queue and scheduler designs are in git history (commits up to `74eae37`).
-- **Unchanged:** nothing that points at `framer.haciensus.com`. That domain still belongs to the old `framer` proxy Worker. The EC2 instance is stopped, so the site is currently offline.
+Status on 2026-10-16:
+- **Live:** https://framer.haciensus.com is served by the Worker `framer-cf-api`, behind Cloudflare Access (Google login). The custom domain is attached in the dashboard.
+- **Resources (free tier):**
+  - D1 `framer-cf-db` (migrations 0001–0004);
+  - Vectorize `framer-cf-m3` (1024 d);
+  - R2 `framer-cf-videos`;
+  - Workers AI, Media Transformations;
+  - Durable Objects `VideoDO` (one per video) and `LibraryDO` (Google Photos and Drive).
+- **Phase 2** (§10): Google Photos and Drive sources, frames + Whisper + Gemini descriptions, labels and sound tags, and the reranked search, tuned on the owner's library.
+- **EC2:** the instance is stopped. The Python app in `app/` is kept as history; its tests still pass.
+- **Superseded designs:** §1–§9 describe the first port (Gemini on the whole video, 384-d `framer-cf-vectors`, SSE). §10 supersedes them where they differ.
 
 ## 1. What Framer does today
 
@@ -626,4 +632,16 @@ One file, no build step, no external scripts; the API is unchanged.
 - **Backfill:** the 8 existing videos were updated from their stored tags with no Gemini calls, and the changed ones re-embedded. The backup is in the session scratchpad (`videos-backup-before-tagfill.json`).
 - **Added labels:** cat and living room (the 37 s cat clip), pet, athlete, night, crowd, outdoor.
 - **Remaining effect of the 3-result cap:** "animals" now has 5 label hits, so the boar drops out.
+
+**Review fixes (2026-10-16).**
+- **Drive:**
+  - A changed file is downloaded again: `VideoDO.restart` deletes the stored copy and its sound clip, because fetch reuses an existing object.
+  - A change that arrives while the video is processing is marked `refresh_pending` and applied at the next sync, instead of being dropped.
+  - Files removed, trashed or moved out of the folder are archived (hidden, nothing deleted).
+- **Photos:** a transient Google error while refreshing an expired download link now retries, instead of failing the video with "pick it again".
+- **Search:**
+  - Archived or unfinished videos no longer use up the 10 candidate slots.
+  - Videos carrying every query label are also looked up in D1 (`labelMatches`, up to 10 more), so label hits don't depend on the nearest-vector cut.
+- **WebSocket:** upgrades must come from the same origin.
+- **UI:** generated titles are cached per render.
 

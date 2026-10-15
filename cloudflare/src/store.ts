@@ -73,7 +73,12 @@ export async function upsertSourceVideo(db: D1Database, input: SourceVideoInput,
     input.source, input.sourceId, JSON.stringify(input.meta)).first();
   if (row) return { video: decode(row)!, created: true };
   const existing = decode(await db.prepare('SELECT * FROM videos WHERE source=?1 AND source_id=?2').bind(input.source, input.sourceId).first())!;
-  if (refresh && existing.status !== 'processing') {
+  if (refresh && existing.status === 'processing') {
+    // Restarting mid-step could race the running step; record the change and let the next sync apply it.
+    await db.prepare('UPDATE videos SET source_meta=?2 WHERE id=?1').bind(existing.id, JSON.stringify({ ...input.meta, refresh_pending: true })).run();
+    return { video: existing, created: false };
+  }
+  if (refresh) {
     await db.prepare(`UPDATE videos SET source_meta=?2, expected_size=?3, status=?4, error=?5, result=NULL, uploaded=0, updated_at=?6, archived_at=NULL WHERE id=?1`)
       .bind(existing.id, JSON.stringify(input.meta), input.size, input.status, input.error ?? null, nowIso()).run();
     return { video: (await getVideo(db, existing.id))!, created: false };

@@ -158,6 +158,12 @@ describe('index entries and ranking', () => {
     expect(ranked[1].retrieval.citation).toMatchObject({ kind: 'transcript', timestamp_seconds: 30, image_url: '/videos/b/thumbs/1' });
   });
 
+  it('lists a label and everything below it', async () => {
+    const { descendantsOf } = await import('../src/labels');
+    expect(descendantsOf('animal')).toEqual(expect.arrayContaining(['animal', 'crocodile', 'cat', 'wild boar']));
+    expect(descendantsOf('animal')).not.toContain('soccer');
+  });
+
   it('normalizes conversational queries', () => {
     expect(normalizeQuery('Can you show me dogs running in action')).toBe('dogs running');
     expect(normalizeQuery('Wildlife')).toBe('wildlife');

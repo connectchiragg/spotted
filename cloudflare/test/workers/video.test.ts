@@ -9,7 +9,7 @@ import { exports } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { handle } from '../../src/api';
 import { PROMPT_VERSION } from '../../src/gemini';
-import { Google } from '../../src/google';
+import { Google, GoogleError } from '../../src/google';
 import * as store from '../../src/store';
 import { EvictionError, IngestState, MAX_ATTEMPTS, MAX_QUOTA_WINDOW_MS, VideoDO } from '../../src/video';
 import { appDeps, fakeBucket, fakeEmbedder, fakeGemini, FakeGeminiOptions, fakeMedia, FakeMediaOptions, fakeMp4, FakeObject, fakeTranscriber, fakeVectorize, settings } from '../helpers';
@@ -202,6 +202,35 @@ describe('VideoDO: the frame + transcript pipeline', () => {
     expect(progress.length).toBeGreaterThan(0);
     expect(progress[0]).toMatchObject({ stage: 'Copying from Google', bytes_total: null, percent: 10 }); // no Content-Length, no size known
     expect(progress[0].bytes_done).toBeGreaterThanOrEqual(4 * 1024 * 1024);
+  });
+
+  it('restart downloads the source again instead of re-analysing the stored copy', async () => {
+    const versions = [fakeMp4(30, 6000), fakeMp4(30, 9000)];
+    let downloads = 0;
+    const google = { downloadPhotoVideo: async () => new Response(versions[downloads++]) } as Partial<Google>;
+    const t = await setup({ source: 'photos', google });
+    await t.stub.start(t.video.id);
+    expect((await t.drive())!.step).toBe('done');
+    expect(t.objects[t.video.object_key].size).toBe(6000);
+    await t.stub.restart(t.video.id);
+    expect((await t.drive())!.step).toBe('done');
+    expect(downloads).toBe(2);
+    expect(t.objects[t.video.object_key].size).toBe(9000);
+  });
+
+  it('a transient error while refreshing an expired Photos link retries instead of failing', async () => {
+    let calls = 0;
+    const google = {
+      listPickedItems: async () => { if (++calls === 1) throw new GoogleError('List picked items: Google is temporarily unavailable', 503, true); return [{ id: 'x', type: 'VIDEO', mediaFile: { baseUrl: 'https://photos.test/b', mimeType: 'video/mp4' } }]; },
+      downloadPhotoVideo: async () => new Response(fakeMp4(30, 6000)),
+    } as Partial<Google>;
+    const t = await setup({ source: 'photos', google });
+    await db.prepare("UPDATE videos SET source_id='x', source_meta=json_set(source_meta, '$.base_url_expires_at', '2000-01-01T00:00:00Z') WHERE id=?1").bind(t.video.id).run();
+    await t.stub.start(t.video.id);
+    expect((await t.drive((st) => Boolean(st.last_error)))!).toMatchObject({ step: 'fetch', last_error: expect.stringContaining('temporarily unavailable') });
+    await t.skipWait();
+    expect((await t.drive())!.step).toBe('done');
+    expect(calls).toBe(2);
   });
 
   it('copy progress is a fraction of the Content-Length', async () => {

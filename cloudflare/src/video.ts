@@ -179,10 +179,20 @@ export class VideoDO extends DurableObject<Env> {
     return state;
   }
 
-  /** Forget all progress and run again (a Drive file that changed). Keeps open sockets. */
+  /**
+   * Forget all progress and run again (a Drive file that changed, or a failed Photos pick picked
+   * again). Keeps open sockets. The stored copy and its sound clip are deleted first: fetch reuses
+   * an existing object, so keeping it would re-analyse the old bytes.
+   */
   async restart(videoId: string, notBefore = 0): Promise<IngestState> {
     if (await this.isPurged()) throw new PurgedError('Video was deleted');
     await this.ctx.storage.deleteAlarm();
+    const upload = await this.ctx.storage.get<{ key: string; uploadId: string }>('mpu');
+    const bucket = VideoDO.testDeps.get(videoId)?.().bucket ?? this.env.VIDEOS;
+    if (upload && bucket) await bucket.resumeMultipartUpload(upload.key, upload.uploadId).abort().catch(() => {});
+    const db = VideoDO.testDeps.get(videoId)?.().db ?? this.env.DB;
+    const video = db ? await getVideo(db, videoId) : null;
+    if (bucket && video?.source && video.source !== 'upload') await bucket.delete([video.object_key, soundKey(videoId)]);
     await this.ctx.storage.delete(['state', 'transcript', 'descriptions', 'summary', 'mpu']);
     const old = this.ctx.storage.sql.exec('SELECT MAX(version) AS v FROM events').one().v as number | null;
     const state = await this.start(videoId, notBefore);
@@ -380,7 +390,11 @@ export class VideoDO extends DurableObject<Env> {
       let baseUrl: string = meta.base_url;
       if (!baseUrl || (meta.base_url_expires_at && Date.parse(meta.base_url_expires_at) < Date.now())) {
         // Picker baseUrls live 60 minutes; the session can hand out fresh ones while it lasts.
-        const items = await deps.google.listPickedItems(meta.session_id).catch(() => []);
+        // A definitive answer (session expired or gone) means "pick again"; a transient error retries.
+        const items = await deps.google.listPickedItems(meta.session_id).catch((error) => {
+          if (error instanceof GoogleError && !error.retryable) return [];
+          throw error;
+        });
         baseUrl = items.find((i) => i.id === video.source_id)?.mediaFile.baseUrl ?? '';
         if (!baseUrl) throw new PermanentError('The Google Photos link expired; pick the video again');
       }

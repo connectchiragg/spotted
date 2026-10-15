@@ -92,4 +92,41 @@ describe('LibraryDO', () => {
     expect((await db.prepare('SELECT page_token FROM drive_sync').first<any>()).page_token).toBe('token-2');
     LibraryDO.testDeps = null;
   });
+
+  it('archives Drive files that were removed, trashed or moved out of the folder (nothing deleted)', async () => {
+    const { google } = fakeGoogle({ driveChanges: async () => ({ files: [{ id: 'd2', name: 'huge.mp4', mimeType: 'video/mp4', modifiedTime: '2026-10-01T00:00:00Z', parents: ['OTHER'] }],
+      removed: ['d1'], next: 'token-2' }) });
+    LibraryDO.testDeps = () => ({ db, google, videos: null, settings });
+    await db.prepare("INSERT INTO drive_sync (id, folder_id, folder_name, updated_at) VALUES (1, 'F', 'Videos', 'now')").run();
+    await lib.poke();
+    await settle(async () => (await count('SELECT count(*) AS n FROM drive_sync WHERE initial_done=1')) === 1);
+    await lib.poke();
+    await settle(async () => (await count("SELECT count(*) AS n FROM drive_sync WHERE page_token='token-2'")) === 1);
+    const rows = (await db.prepare("SELECT source_id, archived_at IS NOT NULL AS archived FROM videos WHERE source='drive' ORDER BY source_id").all()).results;
+    expect(rows).toEqual([{ source_id: 'd1', archived: 1 }, { source_id: 'd2', archived: 1 }]);
+    LibraryDO.testDeps = null;
+  });
+
+  it('defers a change that arrives while the video is processing, and applies it on a later sync', async () => {
+    let sync = 0;
+    const { google } = fakeGoogle({ driveChanges: async () => (++sync === 1
+      ? { files: [{ id: 'd1', name: 'a.mp4', mimeType: 'video/mp4', size: '1200', modifiedTime: '2026-10-01T00:00:00Z', parents: ['F'] }], removed: [], next: 'token-2' }
+      : { files: [], removed: [], next: 'token-3' }) });
+    LibraryDO.testDeps = () => ({ db, google, videos: null, settings });
+    await db.prepare("INSERT INTO drive_sync (id, folder_id, folder_name, updated_at) VALUES (1, 'F', 'Videos', 'now')").run();
+    await lib.poke();
+    await settle(async () => (await count('SELECT count(*) AS n FROM drive_sync WHERE initial_done=1')) === 1);
+    await db.prepare("UPDATE videos SET status='processing' WHERE source_id='d1'").run();
+    await lib.poke();
+    await settle(async () => (await count("SELECT count(*) AS n FROM drive_sync WHERE page_token='token-2'")) === 1);
+    const meta = async () => JSON.parse((await db.prepare("SELECT source_meta FROM videos WHERE source_id='d1'").first<any>()).source_meta);
+    expect((await db.prepare("SELECT status FROM videos WHERE source_id='d1'").first<any>()).status).toBe('processing'); // not restarted mid-step
+    expect(await meta()).toMatchObject({ modified_time: '2026-10-01T00:00:00Z', refresh_pending: true });
+    await db.prepare("UPDATE videos SET status='completed', result='{}' WHERE source_id='d1'").run();
+    await lib.poke();
+    await settle(async () => (await count("SELECT count(*) AS n FROM drive_sync WHERE page_token='token-3'")) === 1);
+    expect(await db.prepare("SELECT status, result FROM videos WHERE source_id='d1'").first()).toEqual({ status: 'pending', result: null });
+    expect((await meta()).refresh_pending).toBeUndefined();
+    LibraryDO.testDeps = null;
+  });
 });

@@ -2,8 +2,9 @@
 import { env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { handle, reserve } from '../../src/api';
+import { search } from '../../src/retrieval';
 import * as store from '../../src/store';
-import { appDeps, fakeBucket, settings } from '../helpers';
+import { appDeps, fakeBucket, fakeReranker, fakeVectorize, settings } from '../helpers';
 
 const db: D1Database = env.DB;
 
@@ -106,5 +107,31 @@ describe('identity and Photos import status', () => {
     expect(await (await handle(new Request('https://x/photos/sessions/latest'), app)).json()).toMatchObject({ id: 's9', status: 'importing', video_ids: [video.id] });
     expect(await (await handle(new Request('https://x/photos/sessions/s9'), app)).json()).toMatchObject({ id: 's9', video_ids: [video.id] });
     expect((await handle(new Request('https://x/photos/sessions/nope'), app)).status).toBe(404);
+  });
+});
+
+describe('search candidates on D1', () => {
+  const T = { minScore: 0.02, softMinScore: 0.008, minSimilarity: 0.53, vectorMargin: 0.07 };
+  const add = (id: string, result: Record<string, unknown>, archived = false) => db.prepare(
+    `INSERT INTO videos (id, filename, object_key, content_type, status, created_at, updated_at, archived_at, result)
+     VALUES (?1, ?1, ?2, 'video/mp4', 'completed', ?3, ?3, ?4, ?5)`).bind(id, `videos/${id}/source`, `2026-10-01T00:00:${id.slice(-2)}+00:00`,
+    archived ? '2026-10-02T00:00:00+00:00' : null, JSON.stringify(result)).run();
+  const summary = (text: string, labels: string[] = []) => ({ summary: text, labels, sampled_timestamps: [0], thumbs: [0] });
+
+  it('archived videos do not use up candidate slots', async () => {
+    const { index } = fakeVectorize();
+    for (let i = 10; i < 22; i++) { await add(`arch${i}`, summary('A crocodile in a lake.'), true); await index.upsert([{ id: `s:arch${i}`, values: [1, 0], metadata: {} }]); }
+    await add('live01', summary('A crocodile in a lake.'));
+    await index.upsert([{ id: 's:live01', values: [0.9, 0.1], metadata: {} }]); // ranks after all 12 archived ones
+    const ranked = await search({ db, index, reranker: fakeReranker() }, [1, 0], 'crocodile', T);
+    expect(ranked.map((r) => r.job.id)).toEqual(['live01']);
+  });
+
+  it('finds label hits even when their vectors are not among the nearest', async () => {
+    const { index } = fakeVectorize();
+    for (let i = 10; i < 22; i++) { await add(`ball${i}`, summary('A soccer match.', ['soccer'])); await index.upsert([{ id: `s:ball${i}`, values: [1, 0], metadata: {} }]); }
+    await add('croc01', summary('A crocodile slides into a lake.', ['crocodile'])); // no vectors at all
+    const ranked = await search({ db, index, reranker: fakeReranker() }, [1, 0], 'animals', T);
+    expect(ranked.map((r) => [r.job.id, r.retrieval.matched_by])).toEqual([['croc01', 'label']]);
   });
 });

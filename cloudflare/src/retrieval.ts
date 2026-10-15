@@ -27,11 +27,13 @@
  *   - none:     the query names no label, or the video neither has nor contradicts it -> the
  *               rerank + cosine rule above decides.
  */
-import { exclusiveSiblings, expandLabels, queryLabels } from './labels';
-import { getVideos, Video as Job } from './store';
+import { descendantsOf, exclusiveSiblings, expandLabels, queryLabels } from './labels';
+import { decode as decodeVideo, getVideos, Video as Job } from './store';
 import { nearestFrame, parseVectorId } from './vectors';
 
 export const CANDIDATE_VIDEOS = 10;
+/** Videos found by their labels alone (not among the nearest vectors) that are added to the candidates. */
+export const LABEL_CANDIDATES = 10;
 export const PASSAGES_PER_VIDEO = 4;
 export const MAX_RESULTS = 3;
 export const RELATIVE_CUTOFF = 0.25;
@@ -182,12 +184,35 @@ export async function search(deps: SearchDeps, queryVector: number[], query: str
     if (list.length < PASSAGES_PER_VIDEO) list.push({ kind: p.kind, n: p.n, score: m.score });
     byVideo.set(p.videoId, list);
   }
-  const ids = [...byVideo.keys()].slice(0, CANDIDATE_VIDEOS);
-  const videos = (await getVideos(deps.db, ids)).filter((v) => v.status === 'completed' && !v.archived_at && v.result);
-  const groups = videos.map((job) => ({ job, passages: byVideo.get(job.id)!.map((h) => passageOf(job, h.kind, h.n, h.score)).filter((p): p is Passage => Boolean(p && p.text)) }))
-    .filter((g) => g.passages.length);
+  // Archived and unfinished videos keep their vectors: drop them before taking the top
+  // CANDIDATE_VIDEOS, or they use up slots and push real matches out.
+  const ranks = new Map([...byVideo.keys()].map((id, i) => [id, i]));
+  const videos = (await getVideos(deps.db, [...byVideo.keys()]))
+    .filter((v) => v.status === 'completed' && !v.archived_at && v.result)
+    .sort((a, b) => ranks.get(a.id)! - ranks.get(b.id)!)
+    .slice(0, CANDIDATE_VIDEOS);
+  const qLabels = queryLabels(query);
+  // Label hits are looked up directly, not only among the nearest vectors: as the library grows, a
+  // labelled video can rank below the vector cut for a broad query ("animals"). They join with
+  // their summary as the only passage (cosine 0; a label hit is accepted without it).
+  const extra = (await labelMatches(deps.db, qLabels, LABEL_CANDIDATES)).filter((v) => !videos.some((x) => x.id === v.id));
+  const groups = [
+    ...videos.map((job) => ({ job, passages: byVideo.get(job.id)!.map((h) => passageOf(job, h.kind, h.n, h.score)).filter((p): p is Passage => Boolean(p && p.text)) })),
+    ...extra.map((job) => ({ job, passages: [passageOf(job, 'summary', 0, 0)].filter((p): p is Passage => Boolean(p && p.text)) })),
+  ].filter((g) => g.passages.length);
   const scores = await deps.reranker.rerank(query, groups.flatMap((g) => g.passages.map((p) => rerankText(g.job, p))));
   let k = 0;
   const reranked = groups.map((g) => ({ job: g.job, passages: g.passages.map((p) => ({ ...p, rerank: scores[k++] ?? 0 })) }));
-  return rankVideos(reranked, thresholds, queryLabels(query));
+  return rankVideos(reranked, thresholds, qLabels);
+}
+
+/** Completed, unarchived videos whose labels or sounds imply every query label (newest first). */
+export async function labelMatches(db: D1Database, names: string[], limit: number): Promise<Job[]> {
+  if (!names.length) return [];
+  const has = "(EXISTS (SELECT 1 FROM json_each(COALESCE(json_extract(result, '$.labels'), '[]')) WHERE value IN (SELECT value FROM json_each(?{n})))"
+    + " OR EXISTS (SELECT 1 FROM json_each(COALESCE(json_extract(result, '$.sounds'), '[]')) WHERE value IN (SELECT value FROM json_each(?{n}))))";
+  const where = names.map((_, i) => has.replaceAll('{n}', String(i + 1))).join(' AND ');
+  const { results } = await db.prepare(`SELECT * FROM videos WHERE status='completed' AND archived_at IS NULL AND result IS NOT NULL AND ${where}
+    ORDER BY created_at DESC LIMIT ${Math.floor(limit)}`).bind(...names.map((n) => JSON.stringify(descendantsOf(n)))).all();
+  return results.map((r) => decodeVideo(r)!);
 }

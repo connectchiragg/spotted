@@ -304,6 +304,11 @@ export function queryLabels(query: string): string[] {
   return found;
 }
 
+/** `name` and every label below it (whose ancestors include it): what a stored pick must be to imply `name`. */
+export function descendantsOf(name: string): string[] {
+  return defs.filter((d) => expandLabels([d.name]).includes(name)).map((d) => d.name);
+}
+
 /** Labels in the same exclusive group as `name` (its mutually exclusive siblings). */
 export function exclusiveSiblings(name: string): string[] {
   const group = LABEL_BY_NAME.get(name)?.group;

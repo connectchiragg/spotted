@@ -98,9 +98,7 @@ npx wrangler dev  # local; AI, Vectorize and Media need a Cloudflare login
   - Labels and descriptions are generated and can be wrong.
   - Thresholds are tuned on a small library.
   - Broad queries are capped at 3 results.
-- **Drive:**
-  - Files removed from the watched folder are not yet removed from Framer.
-  - A changed file is re-analysed from the stored copy while it lasts.
+- **Drive:** checked hourly. Files removed from the folder are archived in Framer (hidden, not deleted), and changed files are analysed again.
 
 ## History
 

@@ -14,7 +14,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { videoStub } from './actor';
 import { Env, settings, Settings } from './env';
 import { durationMs, DriveFile, Google, GoogleError, PickedItem } from './google';
-import { nowIso, upsertSourceVideo, Video } from './store';
+import { decode as decodeVideo, nowIso, upsertSourceVideo, Video } from './store';
 import { googleClient } from './video';
 
 const DEFAULT_POLL_MS = 5_000;
@@ -138,12 +138,15 @@ export class LibraryDO extends DurableObject<Env> {
       for (const file of await deps.google.listDriveVideos(sync.folder_id, since)) await this.importDrive(deps, file, false);
       await deps.db.prepare('UPDATE drive_sync SET page_token=?1, initial_done=1, last_sync_at=?2, error=NULL, updated_at=?2 WHERE id=1').bind(token, nowIso()).run();
     } else {
-      const { files, next } = await deps.google.driveChanges(sync.page_token);
+      const { files, removed, next } = await deps.google.driveChanges(sync.page_token);
       for (const file of files) {
-        if (!file.parents?.includes(sync.folder_id) || !file.mimeType?.startsWith('video/')) continue;
+        if (!file.mimeType?.startsWith('video/')) continue;
+        if (!file.parents?.includes(sync.folder_id)) { await this.archiveDrive(deps, file.id); continue; } // moved out of the folder
         if (file.modifiedTime && file.modifiedTime < since) continue;
         await this.importDrive(deps, file, true);
       }
+      for (const id of removed) await this.archiveDrive(deps, id); // deleted or trashed in Drive
+      await this.applyPendingRefreshes(deps);
       await deps.db.prepare('UPDATE drive_sync SET page_token=?1, last_sync_at=?2, error=NULL, updated_at=?2 WHERE id=1').bind(next, nowIso()).run();
     }
     const at = Date.now() + interval;
@@ -164,10 +167,30 @@ export class LibraryDO extends DurableObject<Env> {
     const { video, created } = await upsertSourceVideo(deps.db, input, changed);
     if (tooBig) return;
     if (created) await this.startVideo(deps, video);
-    else if (changed) await this.startVideo(deps, video, true); // the file changed in Drive: process it again
+    // The file changed in Drive: process it again (deferred to the next sync while it is processing).
+    else if (changed && video.status !== 'processing') await this.startVideo(deps, video, true);
   }
 
   // ------------------------------------------------------------ starting videos
+
+  /** A Drive file left the folder (removed, trashed or moved): archive its video, which hides it but deletes nothing. */
+  private async archiveDrive(deps: LibraryDeps, fileId: string): Promise<void> {
+    await deps.db.prepare("UPDATE videos SET archived_at=COALESCE(archived_at, ?2) WHERE source='drive' AND source_id=?1").bind(fileId, nowIso()).run();
+  }
+
+  /** Changes that arrived while their video was processing (store.upsertSourceVideo): apply them now. */
+  private async applyPendingRefreshes(deps: LibraryDeps): Promise<void> {
+    const { results } = await deps.db.prepare(
+      "SELECT * FROM videos WHERE source='drive' AND status!='processing' AND json_extract(source_meta, '$.refresh_pending')=1",
+    ).all();
+    for (const row of results) {
+      const video = decodeVideo(row)!;
+      const { refresh_pending: _, ...meta } = video.source_meta ?? {};
+      const { video: fresh } = await upsertSourceVideo(deps.db, { source: 'drive', sourceId: video.source_id!, filename: video.filename,
+        contentType: video.content_type, size: video.expected_size, meta, status: 'pending', error: null }, true);
+      await this.startVideo(deps, fresh, true);
+    }
+  }
 
   private async startVideo(deps: LibraryDeps, video: Video, restart = false): Promise<void> {
     if (!deps.videos) return;

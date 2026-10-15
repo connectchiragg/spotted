@@ -247,6 +247,8 @@ const VIDEO_WS = /^\/videos\/([^/]+)\/ws$/;
  */
 async function videoSocket(request: Request, id: string, deps: AppDeps) {
   if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') throw new HttpError(426, 'Expected a WebSocket upgrade');
+  // The upgrade is a GET, so the non-GET same-origin guard misses it; browsers always send Origin here.
+  if (!sameOrigin(request, new URL(request.url))) throw new HttpError(403, 'Cross-origin request refused');
   const db = need(deps.db, 'Database is not configured');
   const videos = need(deps.videos, 'Live updates are not configured');
   const video = await store.getVideo(db, id);

@@ -599,11 +599,24 @@ function cameraTitle(name) {
   return kind || when ? [kind || 'Video', when].filter(Boolean).join(' · ') : '';
 }
 function baseTitle(j) { return (j.display_name && j.display_name.trim()) || derivedTitle(j.result) || cleanFilename(j.filename) || cameraTitle(j.filename) || (ACTIVE.includes(j.status) ? 'New video' : 'Untitled video') }
-/** Two videos must not share a generated title: add the first label or tag the others lack, else the length. */
+/** Two videos must not share a generated title: add the first label or tag the others lack, else the length.
+    Base titles are cached per job object (updates replace the object) and the duplicates index per jobs array,
+    so a render costs O(n), not a title derivation for every other video on each call. */
+const baseTitles = new WeakMap();
+function cachedBase(j) { let t = baseTitles.get(j); if (t === undefined) { t = baseTitle(j); baseTitles.set(j, t) } return t }
+let twinIndex = { list: null, size: -1, byTitle: new Map() };
+function twinsOf(j, base) {
+  if (twinIndex.list !== jobs || twinIndex.size !== jobs.length) {
+    const byTitle = new Map();
+    for (const o of jobs) if (!(o.display_name && o.display_name.trim())) { const k = cachedBase(o); byTitle.set(k, [...(byTitle.get(k) || []), o]) }
+    twinIndex = { list: jobs, size: jobs.length, byTitle };
+  }
+  return (twinIndex.byTitle.get(base) || []).filter((o) => o.id !== j.id);
+}
 function titleOf(j) {
-  const base = baseTitle(j);
+  const base = cachedBase(j);
   if (j.display_name && j.display_name.trim()) return base;
-  const twins = jobs.filter((o) => o.id !== j.id && !(o.display_name && o.display_name.trim()) && baseTitle(o) === base);
+  const twins = twinsOf(j, base);
   if (!twins.length) return base;
   const words = (x) => [...(x.result?.labels || []), ...(x.result?.tags || []).filter((t) => t.category !== 'speech').map((t) => t.label)].map((w) => String(w).toLowerCase());
   const lower = base.toLowerCase();
