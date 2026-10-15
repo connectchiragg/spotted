@@ -39,6 +39,9 @@ export interface Env {
   DESCRIBE_BATCH?: string;
   WHISPER_DIRECT_MAX_MB?: string;
   SEARCH_MIN_SCORE?: string;
+  SEARCH_SOFT_MIN_SCORE?: string;
+  SEARCH_MIN_SIMILARITY?: string;
+  SEARCH_VECTOR_MARGIN?: string;
   DUPLICATE_SIMILARITY_THRESHOLD?: string;
   PUBLIC_DEMO_LIMITS?: string;
   DAILY_UPLOAD_LIMIT?: string;
@@ -65,7 +68,13 @@ export interface Settings {
   changeThreshold: number;
   describeBatch: number;
   whisperDirectMaxBytes: number;
+  /** Rerank score that accepts a video on its own (bge-reranker-base, 0..1). */
   searchMinScore: number;
+  /** Lower rerank floor, accepted only with bge-m3 cosine >= searchMinSimilarity (broad one-word queries). */
+  searchSoftMinScore: number;
+  searchMinSimilarity: number;
+  /** A video's best cosine must be within this of the best video's (vetoes reranker-only matches). */
+  searchVectorMargin: number;
   duplicateThreshold: number;
   publicLimits: boolean;
   dailyUploadLimit: number;
@@ -102,6 +111,9 @@ export function settings(env: Env): Settings {
     describeBatch: num(env.DESCRIBE_BATCH, 8),
     whisperDirectMaxBytes: num(env.WHISPER_DIRECT_MAX_MB, 10) * 1000 * 1000,
     searchMinScore: num(env.SEARCH_MIN_SCORE, 0.02),
+    searchSoftMinScore: num(env.SEARCH_SOFT_MIN_SCORE, 0.008),
+    searchMinSimilarity: num(env.SEARCH_MIN_SIMILARITY, 0.53),
+    searchVectorMargin: num(env.SEARCH_VECTOR_MARGIN, 0.07),
     duplicateThreshold: num(env.DUPLICATE_SIMILARITY_THRESHOLD, 0.97),
     publicLimits: (env.PUBLIC_DEMO_LIMITS || 'false').toLowerCase() === 'true',
     dailyUploadLimit: num(env.DAILY_UPLOAD_LIMIT, 10),
@@ -113,7 +125,7 @@ export function settings(env: Env): Settings {
   if (!(result.maxFrames >= 1 && result.maxFrames <= 40)) throw new Error('MAX_FRAMES must be between 1 and 40');
   if (!(result.maxSourceBytes > 0 && result.maxSourceBytes <= 100 * 1000 * 1000)) throw new Error('MAX_SOURCE_MB must be at most 100 (Media Transformations input limit)');
   if (!(result.describeBatch >= 1 && result.describeBatch <= 16)) throw new Error('DESCRIBE_BATCH must be between 1 and 16');
-  for (const value of [result.searchMinScore, result.duplicateThreshold]) {
+  for (const value of [result.searchMinScore, result.searchSoftMinScore, result.searchMinSimilarity, result.searchVectorMargin, result.duplicateThreshold]) {
     if (!(value >= 0 && value <= 1)) throw new Error('Score thresholds must be between 0 and 1');
   }
   return result;

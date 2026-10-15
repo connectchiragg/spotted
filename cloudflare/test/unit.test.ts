@@ -5,6 +5,8 @@ import { changeScores, mad, mp4Duration, selectFrames, spriteTiles, spriteWindow
 import { Gemini, validateAnswer, validateDescriptions, validateSummary } from '../src/gemini';
 import { authUrl, decryptSecret, encryptSecret, SCOPES } from '../src/google';
 import { normalizeQuery, passageOf, rankVideos } from '../src/retrieval';
+
+const T = { minScore: 0.02, softMinScore: 0.008, minSimilarity: 0.53, vectorMargin: 0.07 };
 import { parseVectorId, transcriptWindows } from '../src/vectors';
 import { appDeps, encodeTiles, fakeGemini, fakeMp4 } from './helpers';
 
@@ -126,10 +128,10 @@ describe('index entries and ranking', () => {
       transcript_windows: [{ start: 30, end: 75, text: 'fold it' }] } }) as any;
     const [a, b, c] = [job('a'), job('b'), job('c')];
     const ranked = rankVideos([
-      { job: a, passages: [{ ...passageOf(a, 'frame', 1, 0.5)!, rerank: 0.9 }, { ...passageOf(a, 'summary', 0, 0.6)!, rerank: 0.1 }] },
-      { job: b, passages: [{ ...passageOf(b, 'transcript', 0, 0.7)!, rerank: 0.5 }] },
-      { job: c, passages: [{ ...passageOf(c, 'frame', 0, 0.9)!, rerank: 0.1 }] }, // under 25% of the best
-    ], 0.02);
+      { job: a, passages: [{ ...passageOf(a, 'frame', 1, 0.6)!, rerank: 0.9 }, { ...passageOf(a, 'summary', 0, 0.55)!, rerank: 0.1 }] },
+      { job: b, passages: [{ ...passageOf(b, 'transcript', 0, 0.58)!, rerank: 0.5 }] },
+      { job: c, passages: [{ ...passageOf(c, 'frame', 0, 0.62)!, rerank: 0.1 }] }, // under 25% of the best
+    ], T);
     expect(ranked.map((r) => r.job.id)).toEqual(['a', 'b']);
     expect(ranked[0].retrieval.citation).toMatchObject({ kind: 'frame', timestamp_seconds: 7.5, image_url: '/videos/a/thumbs/1' });
     expect(ranked[1].retrieval.citation).toMatchObject({ kind: 'transcript', timestamp_seconds: 30, image_url: '/videos/b/thumbs/1' });
@@ -137,6 +139,34 @@ describe('index entries and ranking', () => {
 
   it('normalizes conversational queries', () => {
     expect(normalizeQuery('Can you show me dogs running in action')).toBe('dogs running');
+    expect(normalizeQuery('Wildlife')).toBe('wildlife');
+  });
+
+  // Regression (2026-10-15): "wildlife" over the owner's 5 real videos returned nothing. Scores below are
+  // the measured bge-m3 cosines and bge-reranker-base scores of each video's best passage.
+  const video = (id: string) => ({ id, result: { summary: id, sampled_timestamps: [0], thumbs: [0], frame_descriptions: [{ frame_index: 0, description: id }] } }) as any;
+  const groupsOf = (scores: Record<string, [number, number]>) => Object.entries(scores).map(([id, [cosine, rerank]]) => {
+    const job = video(id);
+    return { job, passages: [{ ...passageOf(job, 'frame', 0, cosine)!, rerank }] };
+  });
+  const ids = (r: { job: { id: string } }[]) => r.map((x) => x.job.id);
+
+  it('finds both wildlife videos for the one-word query "wildlife"', () => {
+    const groups = groupsOf({ boar: [0.587, 0.0137], crocodile: [0.535, 0.0289], isl: [0.422, 5.4e-5], blue: [0.401, 3.3e-4], aek: [0.375, 3.0e-4] });
+    expect(ids(rankVideos(groups, { ...T, softMinScore: 1, minSimilarity: 1 }))).toEqual(['crocodile']); // the rerank cutoff alone dropped the boar
+    const ranked = rankVideos(groups, T);
+    expect(ids(ranked)).toEqual(['crocodile', 'boar']);
+    expect(ranked[1].retrieval.matched_by).toBe('rerank+semantic');
+  });
+
+  it('still returns nothing for unrelated one-word queries', () => {
+    expect(rankVideos(groupsOf({ boar: [0.514, 0.0099], crocodile: [0.483, 0.0045], isl: [0.425, 3.7e-5] }), T)).toEqual([]); // "dog"
+    expect(rankVideos(groupsOf({ isl: [0.425, 3.7e-5], aek: [0.408, 3.7e-5], blue: [0.4, 3.7e-5] }), T)).toEqual([]); // "car"
+  });
+
+  it('drops a high rerank score whose video is far from the best vector match', () => {
+    // "indian super league": only one clip is the ISL match; the reranker also liked another match.
+    expect(ids(rankVideos(groupsOf({ isl: [0.568, 0.97], aek: [0.449, 0.07], blue: [0.418, 0.13] }), T))).toEqual(['isl']);
   });
 });
 

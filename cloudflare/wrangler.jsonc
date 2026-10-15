@@ -84,7 +84,12 @@
     "CHANGE_THRESHOLD": "12",
     "DESCRIBE_BATCH": "8",
     "WHISPER_DIRECT_MAX_MB": "10",
+    // Search thresholds, tuned on the owner's 5 real videos and 48 labelled queries (2026-10-15;
+    // docs/cloudflare-port.md §10.7). SEARCH_MIN_SCORE alone missed broad words like "wildlife".
     "SEARCH_MIN_SCORE": "0.02",
+    "SEARCH_SOFT_MIN_SCORE": "0.008",
+    "SEARCH_MIN_SIMILARITY": "0.53",
+    "SEARCH_VECTOR_MARGIN": "0.07",
     "DUPLICATE_SIMILARITY_THRESHOLD": "0.97",
     "PUBLIC_DEMO_LIMITS": "true",
     "DAILY_UPLOAD_LIMIT": "10",

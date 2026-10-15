@@ -6,7 +6,7 @@ import { libraryStub, videoStub } from './actor';
 import { Settings } from './env';
 import { Gemini, validateAnswer } from './gemini';
 import { authUrl, encryptSecret, exchangeCode, Google, GoogleConfig, GoogleError } from './google';
-import { normalizeQuery, Reranker, search as rankedSearch } from './retrieval';
+import { normalizeQuery, Reranker, search as rankedSearch, thresholdsOf } from './retrieval';
 import { Presigner } from './storage';
 import * as store from './store';
 import { Video as Job } from './store';
@@ -385,7 +385,7 @@ async function retrieve(q: string, deps: AppDeps) {
   try {
     const normalized = normalizeQuery(q);
     const [vector] = await embedder.embed([normalized]);
-    return await rankedSearch({ db, index, reranker }, vector, normalized, deps.settings.searchMinScore);
+    return await rankedSearch({ db, index, reranker }, vector, normalized, thresholdsOf(deps.settings));
   } catch (error) {
     if (error instanceof HttpError) throw error;
     console.warn('search failed', (error as Error)?.message);

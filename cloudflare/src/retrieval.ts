@@ -4,9 +4,14 @@
  *   2. group by video, keep each video's best few passages (top CANDIDATE_VIDEOS videos);
  *   3. rerank every kept passage against the query with a cross-encoder
  *      (@cf/baai/bge-reranker-base, 283 neurons per M tokens);
- *   4. a video's score is its best passage's rerank score; keep those >= minScore and within
- *      a fraction of the best, at most MAX_RESULTS; the best passage is the citation
- *      (timestamp + thumbnail).
+ *   4. a video's score is its best passage's rerank score. It is kept when its best cosine is within
+ *      `vectorMargin` of the best video's, and either the rerank score >= minScore, or the rerank
+ *      score >= softMinScore and the cosine >= minSimilarity; then within a fraction of the best,
+ *      at most MAX_RESULTS. The best passage is the citation (timestamp + thumbnail).
+ * Why two signals: bge-reranker-base scores a broad word against a specific description low
+ * ("wildlife" vs a crocodile frame: 0.03; capitalised "Wildlife": 0.011), and sometimes scores
+ * a wrong video high ("indian super league" vs another match: 0.33), so neither model's score
+ * is a reliable cutoff on its own (docs/cloudflare-port.md §10.7).
  * Passage texts come from the D1 result JSON, so Vectorize stores no text.
  */
 import { getVideos, Video as Job } from './store';
@@ -19,7 +24,8 @@ export const RELATIVE_CUTOFF = 0.25;
 
 export function normalizeQuery(text: string): string {
   text = text.replace(/^\s*(?:please\s+)?(?:i (?:want|would like) to (?:see|find)|(?:can|could) you (?:show|find)(?: me)?|show me|find me)\s+/i, '');
-  return text.replace(/\s+in action[.!?]*\s*$/i, '').trim();
+  // Lowercased: the reranker scores "Wildlife" a third of "wildlife", and bge-m3 shifts too.
+  return text.replace(/\s+in action[.!?]*\s*$/i, '').trim().toLowerCase();
 }
 
 export interface Reranker {
@@ -80,24 +86,33 @@ export function citationOf(job: Job, p: Passage): Citation {
 export interface Ranked { job: Job; retrieval: Record<string, any> }
 const round4 = (x: number) => Math.round(x * 1e4) / 1e4;
 
+export interface Thresholds { minScore: number; softMinScore: number; minSimilarity: number; vectorMargin: number }
+
+export const thresholdsOf = (s: { searchMinScore: number; searchSoftMinScore: number; searchMinSimilarity: number; searchVectorMargin: number }): Thresholds =>
+  ({ minScore: s.searchMinScore, softMinScore: s.searchSoftMinScore, minSimilarity: s.searchMinSimilarity, vectorMargin: s.searchVectorMargin });
+
 /** Pure ranking (unit-tested): passages already reranked, grouped per video. */
-export function rankVideos(groups: { job: Job; passages: (Passage & { rerank: number })[] }[], minScore: number): Ranked[] {
-  const scored = groups.map((g) => {
+export function rankVideos(groups: { job: Job; passages: (Passage & { rerank: number })[] }[], t: Thresholds): Ranked[] {
+  const scored = groups.filter((g) => g.passages.length).map((g) => {
     const best = [...g.passages].sort((a, b) => b.rerank - a.rerank || b.vectorScore - a.vectorScore)[0];
-    return { g, best };
-  }).filter((x) => x.best && x.best.rerank >= minScore);
-  scored.sort((a, b) => b.best.rerank - a.best.rerank || (a.g.job.id < b.g.job.id ? -1 : 1));
-  const top = scored[0]?.best.rerank ?? 0;
-  return scored.filter((x) => x.best.rerank >= RELATIVE_CUTOFF * top).slice(0, MAX_RESULTS).map(({ g, best }) => ({
+    return { g, best, cosine: Math.max(...g.passages.map((p) => p.vectorScore)) };
+  });
+  const topCosine = Math.max(0, ...scored.map((x) => x.cosine));
+  const kept = scored.filter((x) => x.cosine >= topCosine - t.vectorMargin
+    && (x.best.rerank >= t.minScore || (x.best.rerank >= t.softMinScore && x.cosine >= t.minSimilarity)));
+  kept.sort((a, b) => b.best.rerank - a.best.rerank || (a.g.job.id < b.g.job.id ? -1 : 1));
+  const top = kept[0]?.best.rerank ?? 0;
+  return kept.filter((x) => x.best.rerank >= RELATIVE_CUTOFF * top).slice(0, MAX_RESULTS).map(({ g, best, cosine }) => ({
     job: g.job,
-    retrieval: { score: round4(best.rerank), rerank_score: round4(best.rerank), semantic_score: round4(Math.max(...g.passages.map((p) => p.vectorScore))),
-      citation: citationOf(g.job, best), evidence_kinds: [...new Set(g.passages.filter((p) => p.rerank >= minScore).map((p) => p.kind))] },
+    retrieval: { score: round4(best.rerank), rerank_score: round4(best.rerank), semantic_score: round4(cosine),
+      matched_by: best.rerank >= t.minScore ? 'rerank' : 'rerank+semantic',
+      citation: citationOf(g.job, best), evidence_kinds: [...new Set(g.passages.filter((p) => p.rerank >= t.softMinScore).map((p) => p.kind))] },
   }));
 }
 
 export interface SearchDeps { db: D1Database; index: VectorizeIndex; reranker: Reranker }
 
-export async function search(deps: SearchDeps, queryVector: number[], query: string, minScore: number): Promise<Ranked[]> {
+export async function search(deps: SearchDeps, queryVector: number[], query: string, thresholds: Thresholds): Promise<Ranked[]> {
   const { matches } = await deps.index.query(queryVector, { topK: 100 });
   const byVideo = new Map<string, { kind: Citation['kind']; n: number; score: number }[]>();
   for (const m of matches) {
@@ -115,5 +130,5 @@ export async function search(deps: SearchDeps, queryVector: number[], query: str
   const scores = await deps.reranker.rerank(query, flat.map((p) => p.text));
   let k = 0;
   const reranked = groups.map((g) => ({ job: g.job, passages: g.passages.map((p) => ({ ...p, rerank: scores[k++] ?? 0 })) }));
-  return rankVideos(reranked, minScore);
+  return rankVideos(reranked, thresholds);
 }

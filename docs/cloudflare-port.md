@@ -454,13 +454,17 @@ extracts frames itself, Workers AI transcribes the speech, and Gemini describes 
 
 ### 10.3 Search and `/query`
 
-1. Embed the query with bge-m3 and take the 100 nearest vectors of any kind.
+1. Lowercase the query (after stripping "show me …"), embed it with bge-m3 and take the 100 nearest vectors of any kind.
 2. Group them by video (top 10 videos, 4 passages each) and load the passage texts from the D1 result.
-3. Rerank every passage with `@cf/baai/bge-reranker-base`. A video scores its best passage, kept if ≥ `SEARCH_MIN_SCORE` (0.02) and ≥ 25% of the best video; at most 3 results.
+3. Rerank every passage with `@cf/baai/bge-reranker-base`. A video scores its best passage and is kept if
+   - its best bge-m3 cosine is within `SEARCH_VECTOR_MARGIN` (0.07) of the best video's, **and**
+   - its rerank score is ≥ `SEARCH_MIN_SCORE` (0.02), **or** ≥ `SEARCH_SOFT_MIN_SCORE` (0.008) with a cosine ≥ `SEARCH_MIN_SIMILARITY` (0.53);
+
+   then ≥ 25% of the best video's score, at most 3 results. `retrieval.matched_by` says which rule accepted it (see §10.7).
 4. The citation is that passage's kind and time, with the nearest frame's thumbnail (`GET /videos/:id/thumbs/:i`, streamed from R2 behind Access).
 5. `/query` sends the cited passages (with `m:ss`) to Flash Lite, which must cite `[n]` inline. It reports `answer_model` and `answer_usage`.
 
-The thresholds were set on test clips only: retune `SEARCH_MIN_SCORE` and `DUPLICATE_SIMILARITY_THRESHOLD` (0.97, on summary vectors) on the owner's real library.
+The thresholds were retuned on the owner's real library on 2026-10-15 (§10.7). Retune them again once the library is larger: the fit is on 5 videos.
 
 ### 10.4 Free-tier budget for ~200 short videos (≈60 s, ≤16 frames)
 
@@ -511,3 +515,46 @@ The thresholds were set on test clips only: retune `SEARCH_MIN_SCORE` and `DUPLI
 - the WebSocket replayed and then closed with 1000.
 
 **Not verified:** the Google flows (they need the client secret and a consent), WebSockets through Access, and the deployed Worker end to end (Access blocks unauthenticated tests).
+
+### 10.7 Incident: "wildlife" found nothing (2026-10-15)
+
+**Symptom.** The owner imported 5 Google Photos videos (12:55 UTC); `/query` "wildlife" answered "No matching videos were found".
+
+**Evidence, in pipeline order.**
+1. **Ingestion.** All 5 are `completed`, with no error or skip (5–18 s each, well under 100 MB / 10 min, no quota waits). They are an AEK–LASK goal, a crocodile entering a lake, a wild boar foraging by water, a blue-team goal celebration at sunset, and an ISL match at 3-2.
+2. **Vectors.** `framer-cf-m3` holds 35 vectors, exactly the expected 5 summaries + 1 transcript window + 29 frames; mutations are processed up to 12:56:56. Metadata indexes `kind` and `video_id` exist (search uses no filter; only the duplicate check filters on `kind`). Every vector is returned when queried by its own values.
+3. **Content.** The crocodile and boar summaries and frames describe the animals ("a grey-brown crocodile", "a brownish-gray wild boar … foraging", "natural, undisturbed behavior"), but none uses the word "wildlife".
+4. **Query path** (same models, index and passage texts as the Worker; scratch script with `getPlatformProxy` remote bindings):
+
+   | query | step | boar | crocodile | best soccer clip |
+   |---|---|---|---|---|
+   | wildlife | bge-m3 cosine | 0.587 | 0.535 | 0.422 |
+   | wildlife | rerank | 0.0137 | 0.0289 | 0.0003 |
+   | Wildlife | bge-m3 cosine | 0.531 | 0.470 | 0.350 |
+   | Wildlife | rerank | 0.0047 | 0.0115 | 0.0013 |
+
+   Vectorize ranked both wildlife clips first, and the reranker ranked them first by about 30×. They dropped out only at the absolute `SEARCH_MIN_SCORE` 0.02. Capitalised "Wildlife" (as typed in the search box) put both under it, so the answer was empty. Lowercase "wildlife" kept only the crocodile.
+
+**Root cause.** The single absolute cutoff on bge-reranker-base scores. The cross-encoder gives broad category words low scores against specific frame descriptions (0.005–0.03 for "wildlife", "nature" and "animals"), and it is case-sensitive. The model, pooling, index binding and namespace were all correct, and 0.02 had only been tuned on synthetic clips. The same cutoff also let wrong videos in: the UI's own example "Tidying pillows on a bed" returned the boar (0.072) and two soccer clips.
+
+**Fix** (`src/retrieval.ts`):
+- Lowercase the query for both models.
+- Accept a video on a strong rerank score, or on a weaker one (≥ 0.008) backed by a high bge-m3 cosine (≥ 0.53).
+- Veto any video whose cosine is more than 0.07 below the best video's, so a reranker-only match cannot win.
+
+Regression tests in `test/unit.test.ts` use the measured scores.
+
+**Tuning.** I labelled 48 queries derived from the videos (22 that should match, such as "crocodile", "ambulance", "Nivia", "van Mieghem" and "3-2", plus 26 that should not, such as "car", "dog" and "office meeting"), then grid-searched the four thresholds:
+
+| rule | missed videos | wrong videos |
+|---|---|---|
+| old: rerank ≥ 0.02 (queries as typed: 13 misses) | 3 | 9 |
+| new | 0 | 8 |
+
+The remaining errors are all confident reranker mistakes that no threshold separates ("birthday party" → goal celebrations 0.21, "basketball" → soccer 0.99, "bird" → crocodile 0.043). Margins are thin, for example "dog" → boar has a cosine of 0.514 against the 0.53 floor, so retune on a larger library.
+
+**Not changed, and why.**
+- **No lexical fallback.** No failure was lexical: proper nouns and numbers ("Nivia", "van Mieghem", "AEK", "3-2") were found by the reranker once the query is lowercased, and "wildlife" never occurs literally, so keyword matching would not have helped.
+- **`DUPLICATE_SIMILARITY_THRESHOLD` stays 0.97.** Distinct real clips reach a summary cosine of 0.766 (two soccer clips), and a reworded summary of the same clip scores 0.774. Summary vectors cannot tell a re-import from a similar clip at any threshold, so 0.97 only flags near-identical text. The check is advisory, and exact re-imports are already blocked by `(source, source_id)`. A content hash or a frame hash would be the real fix.
+- Vectorize once returned 19 of 35 vectors for a query (approximate search); a rerun returned all 35. Both wildlife clips were in the 19.
+
