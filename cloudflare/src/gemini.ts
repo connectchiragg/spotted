@@ -133,7 +133,11 @@ export function validateSummary(raw: any, frameCount: number): SummaryResult {
     const all = new Set([...(merged.get(key)?.frame_indices ?? []), ...indices]);
     merged.set(key, { label, category, frame_indices: [...all].sort((a, b) => a - b) });
   }
-  return { summary, tags: [...merged.values()], labels: validateLabels(raw.labels, 'visual'), sounds: validateLabels(raw.sounds, 'sound', 12) };
+  // Object and environment tags that name a vocabulary label count as labels too: Gemini tagged a clip
+  // ('object', 'cat') but listed only "animal" and "home" as labels, so "cats" missed it by label.
+  const tagged = [...merged.values()].filter((t) => t.category === 'object' || t.category === 'environment').map((t) => t.label);
+  const labels = validateLabels([...(Array.isArray(raw.labels) ? raw.labels : []), ...tagged], 'visual');
+  return { summary, tags: [...merged.values()], labels, sounds: validateLabels(raw.sounds, 'sound', 12) };
 }
 
 export class Gemini {

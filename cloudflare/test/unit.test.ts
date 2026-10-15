@@ -95,7 +95,11 @@ describe('Gemini on frames', () => {
     expect(() => validateDescriptions({ frames: [{ index: 2, description: 'A' }] }, [{ index: 2 }, { index: 5 }])).toThrow(/skipped a frame/);
     const s = validateSummary({ summary: 's', tags: [{ label: 'Cat ', category: 'object', frame_indices: [0, 9] }, { label: 'cat', category: 'object', frame_indices: [1] }] }, 2);
     expect(s.tags).toEqual([{ label: 'cat', category: 'object', frame_indices: [0, 1] }]);
-     expect(s.labels).toEqual([]);
+    expect(s.labels).toEqual(['cat']); // from the object tag
+    // Regression (2026-10-16): labels ["animal","home"] while the tags named the cat.
+    const t = validateSummary({ summary: 's', labels: ['animal', 'home'], tags: [{ label: 'cat', category: 'object' }, { label: 'resting', category: 'action' }, { label: 'living room', category: 'environment' }] }, 1);
+    expect(t.labels.slice(0, 3)).toEqual(['animal', 'home', 'cat']);
+    expect(t.labels).not.toContain('resting');
     const l = validateSummary({ summary: 's', tags: [], labels: [{ label: 'Wild boar', frame_indices: [0] }, 'pig', 'dragon'], sounds: ['birds chirping', 'soccer'] }, 2);
     expect([l.labels, l.sounds]).toEqual([['wild boar', 'pig'], ['birdsong']]);
   });

@@ -619,3 +619,11 @@ One file, no build step, no external scripts; the API is unchanged.
 - **Detail sheet.** A dialog on the right, used for library rows and result cards. It shows the player, or key frames once the 7-day original is gone, then the facts, the live progress or the failure reason, the summary, key frames, tags and the transcript (frames and transcript lines seek the player). There is no retry endpoint: a failed Photos video offers **Pick it again in Google Photos**, and a failed upload offers **Upload again**. Archive and restore are in the footer.
 - **Account.** The initials come from the display name when there is one, otherwise from the first letter of the email. The chip waits up to 0.8 s for `/cdn-cgi/access/get-identity`, and the last name seen is cached in `localStorage`, so the initials don't flip between loads.
 - **Accessibility.** The page has landmarks, a skip link and visible focus. The sheet and drawer trap focus and return it when closed; Esc closes the menu, then the sheet, then the drawer. Search status and import progress are announced through `aria-live`, and `prefers-reduced-motion` is respected.
+
+**Follow-up (2026-10-16): labels from tags.**
+- **The problem:** of the owner's 3 new videos (all cats), Gemini labelled one only `animal` and `home`, although its tags included `('object', 'cat')`, so "cats" found it only through the reranker.
+- **The fix:** `validateSummary` now also turns object and environment tags that name a vocabulary label into labels.
+- **Backfill:** the 8 existing videos were updated from their stored tags with no Gemini calls, and the changed ones re-embedded. The backup is in the session scratchpad (`videos-backup-before-tagfill.json`).
+- **Added labels:** cat and living room (the 37 s cat clip), pet, athlete, night, crowd, outdoor.
+- **Remaining effect of the 3-result cap:** "animals" now has 5 label hits, so the boar drops out.
+
