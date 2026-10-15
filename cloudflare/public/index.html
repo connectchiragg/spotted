@@ -172,7 +172,8 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 
 .card.flash{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .card:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .frame{position:relative;aspect-ratio:16/9;background:#0a0b0a;overflow:hidden}
-.frame>img,.frame>video{display:block;width:100%;height:100%;object-fit:cover}
+/* contain, not cover: phone clips are portrait, and cover showed only the middle third of the cited frame */
+.frame>img,.frame>video{display:block;width:100%;height:100%;object-fit:contain}
 .frame-empty{position:absolute;inset:0;display:grid;place-items:center;align-content:center;gap:var(--sp-2);color:var(--text-3);font-size:var(--fs-12);text-align:center;padding:var(--sp-4)}
 .frame-empty .icon{width:22px;height:22px}
 .frame .num{position:absolute;top:var(--sp-2);left:var(--sp-2);min-width:24px;height:24px;padding:0 6px;border-radius:var(--r-sm);display:grid;place-items:center;background:var(--accent);color:var(--accent-ink);font-size:var(--fs-12);font-weight:750}
@@ -414,7 +415,7 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 
   <form class="search" id="search-form" role="search" aria-label="Search your footage">
     <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
     <label for="search-input" class="sr-only">Describe a scene, an object or something said</label>
-    <input id="search-input" type="search" placeholder="Describe a moment, e.g. “crocodile entering the water”" autocomplete="off" enterkeyhint="search" maxlength="500" aria-describedby="search-hint">
+    <input id="search-input" type="search" placeholder="Describe a moment…" autocomplete="off" enterkeyhint="search" maxlength="500" aria-describedby="search-hint">
     <span id="search-hint" class="sr-only">Press slash to focus search from anywhere.</span>
     <kbd aria-hidden="true">/</kbd>
     <button class="icon-btn clear" id="search-clear" type="button" aria-label="Clear search" hidden><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
@@ -597,7 +598,20 @@ function cameraTitle(name) {
   if (m) { const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])); if (d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3]) when = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }) }
   return kind || when ? [kind || 'Video', when].filter(Boolean).join(' · ') : '';
 }
-function titleOf(j) { return (j.display_name && j.display_name.trim()) || derivedTitle(j.result) || cleanFilename(j.filename) || cameraTitle(j.filename) || (ACTIVE.includes(j.status) ? 'New video' : 'Untitled video') }
+function baseTitle(j) { return (j.display_name && j.display_name.trim()) || derivedTitle(j.result) || cleanFilename(j.filename) || cameraTitle(j.filename) || (ACTIVE.includes(j.status) ? 'New video' : 'Untitled video') }
+/** Two videos must not share a generated title: add the first label or tag the others lack, else the length. */
+function titleOf(j) {
+  const base = baseTitle(j);
+  if (j.display_name && j.display_name.trim()) return base;
+  const twins = jobs.filter((o) => o.id !== j.id && !(o.display_name && o.display_name.trim()) && baseTitle(o) === base);
+  if (!twins.length) return base;
+  const words = (x) => [...(x.result?.labels || []), ...(x.result?.tags || []).filter((t) => t.category !== 'speech').map((t) => t.label)].map((w) => String(w).toLowerCase());
+  const lower = base.toLowerCase();
+  const extra = words(j).find((w) => w && !lower.includes(w) && twins.every((o) => !words(o).includes(w)));
+  if (extra) return base + ' · ' + extra;
+  const d = Number(j.result?.duration_seconds ?? j.duration_seconds);
+  return d ? base + ' · ' + clock(d) : base;
+}
 
 /* ------------------------------------------------------------------ requests */
 const SESSION_EXPIRED = 'Your sign-in has expired. Reload the page to sign in again.';
