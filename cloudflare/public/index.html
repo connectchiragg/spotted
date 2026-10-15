@@ -1358,7 +1358,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 /* ------------------------------------------------------------------ start */
-{ const narrow = matchMedia('(max-width: 900px)'); const setPlaceholder = () => { $('search-input').placeholder = narrow.matches ? 'Search your footage' : 'Describe a moment, e.g. “crocodile entering the water”' }; setPlaceholder(); narrow.addEventListener('change', setPlaceholder) }
+{ const narrow = matchMedia('(max-width: 900px)'); const setPlaceholder = () => { $('search-input').placeholder = narrow.matches ? 'Search footage' : 'Describe a moment, e.g. “crocodile entering the water”' }; setPlaceholder(); narrow.addEventListener('change', setPlaceholder) }
 renderHistory();
 loadMe();
 loadGoogle();
