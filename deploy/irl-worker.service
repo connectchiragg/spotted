@@ -6,9 +6,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/instawork
-EnvironmentFile=/home/ubuntu/instawork/.env
-ExecStart=/home/ubuntu/instawork/.venv/bin/python -m app.worker
+WorkingDirectory=/home/ubuntu/spotted
+EnvironmentFile=/home/ubuntu/spotted/.env
+ExecStart=/home/ubuntu/spotted/.venv/bin/python -m app.worker
 Restart=always
 RestartSec=5
 UMask=0077

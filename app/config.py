@@ -20,7 +20,7 @@ class Settings:
     aws_region: str = field(default_factory=lambda: os.getenv('AWS_REGION', 'ap-south-1'))
     s3_bucket: str = field(default_factory=lambda: os.getenv('S3_BUCKET', ''))
     sqs_queue_url: str = field(default_factory=lambda: os.getenv('SQS_QUEUE_URL', ''))
-    database_path: str = field(default_factory=lambda: os.getenv('DATABASE_PATH', 'data/instawork.db'))
+    database_path: str = field(default_factory=lambda: os.getenv('DATABASE_PATH', 'data/spotted.db'))
     database_url: str = field(default_factory=lambda: os.getenv('DATABASE_URL', ''), repr=False)
     aws_usage_enabled: bool = field(default_factory=lambda: os.getenv('AWS_USAGE_ENABLED', 'false').lower() == 'true')
     embedding_model: str = field(default_factory=lambda: os.getenv('EMBEDDING_MODEL', 'BAAI/bge-small-en-v1.5'))

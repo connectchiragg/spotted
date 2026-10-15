@@ -63,7 +63,7 @@ def process_message(message, store, cloud, tagger, settings, duplicate_detector=
     try:
         if job['attempts'] > 3:
             raise MediaError('Processing exceeded three attempts')
-        with tempfile.TemporaryDirectory(prefix='instawork-worker-') as directory:
+        with tempfile.TemporaryDirectory(prefix='spotted-worker-') as directory:
             path = Path(directory) / 'source.video'
             store.set_progress(request_id, token, "Waiting for decoder", 2)
             waited = time.monotonic()

@@ -51,7 +51,7 @@ def migrate(source, dsn):
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--source',default='data/instawork.db')
+    parser.add_argument('--source',default='data/spotted.db')
     parser.add_argument('--dsn',required=True)
     args=parser.parse_args()
     print(json.dumps(migrate(args.source,args.dsn)))

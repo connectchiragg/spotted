@@ -6,9 +6,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/instawork
-EnvironmentFile=/home/ubuntu/instawork/.env
-ExecStart=/home/ubuntu/instawork/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
+WorkingDirectory=/home/ubuntu/spotted
+EnvironmentFile=/home/ubuntu/spotted/.env
+ExecStart=/home/ubuntu/spotted/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
 Restart=always
 RestartSec=3
 UMask=0077

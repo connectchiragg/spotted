@@ -16,7 +16,7 @@ def configure_cors(s3, bucket):
             raise
         rules = []
     rule = {
-        'ID': 'instawork-local-ui',
+        'ID': 'spotted-local-ui',
         'AllowedOrigins': ['http://127.0.0.1:8000', 'http://localhost:8000', 'https://irl.haciensus.com'],
         'AllowedMethods': ['PUT', 'GET', 'HEAD'],
         'AllowedHeaders': ['content-type', 'content-length', 'if-none-match',
@@ -37,8 +37,8 @@ def main():
     config = Config(connect_timeout=5, read_timeout=20, retries={'max_attempts': 1})
     identity = session.client('sts', config=config).get_caller_identity()
     account = identity['Account']
-    bucket = f'instawork-{account}-{region}-98e3'
-    queue_name = 'instawork-video-ingestion-98e3'
+    bucket = f'spotted-{account}-{region}-98e3'
+    queue_name = 'spotted-video-ingestion-98e3'
     s3, sqs = session.client('s3', config=config), session.client('sqs', config=config)
     try:
         s3.create_bucket(Bucket=bucket, CreateBucketConfiguration={'LocationConstraint': region},
@@ -50,12 +50,12 @@ def main():
         'BlockPublicPolicy': True, 'RestrictPublicBuckets': True})
     s3.put_bucket_encryption(Bucket=bucket, ServerSideEncryptionConfiguration={
         'Rules': [{'ApplyServerSideEncryptionByDefault': {'SSEAlgorithm': 'AES256'}}]})
-    s3.put_bucket_tagging(Bucket=bucket, Tagging={'TagSet': [{'Key': 'Project', 'Value': 'instawork-assessment'}]})
+    s3.put_bucket_tagging(Bucket=bucket, Tagging={'TagSet': [{'Key': 'Project', 'Value': 'spotted-assessment'}]})
     configure_cors(s3, bucket)
     queue_url = sqs.create_queue(QueueName=queue_name, Attributes={
         'VisibilityTimeout': '600', 'ReceiveMessageWaitTimeSeconds': '10',
         'MessageRetentionPeriod': '345600', 'SqsManagedSseEnabled': 'true'},
-        tags={'Project': 'instawork-assessment'})['QueueUrl']
+        tags={'Project': 'spotted-assessment'})['QueueUrl']
     env = Path('.env')
     for key, value in {'AWS_PROFILE':'default','AWS_REGION':region,'S3_BUCKET':bucket,'SQS_QUEUE_URL':queue_url}.items():
         set_key(env, key, value)

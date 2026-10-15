@@ -33,7 +33,7 @@ def main():
                 continue
             original_json = original['result']
             original_result = json.loads(original_json)
-            with tempfile.TemporaryDirectory(prefix='instawork-description-') as directory:
+            with tempfile.TemporaryDirectory(prefix='spotted-description-') as directory:
                 source = Path(directory) / 'video.mp4'
                 cloud.download(job, source)
                 _, frames = extract_frames(source, settings.max_frames, settings.max_video_seconds)

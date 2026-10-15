@@ -23,7 +23,7 @@ selected.update(AWS_PROFILE='',AWS_USAGE_ENABLED='true',TAGGING_PROVIDER='gemini
 p=Path(sys.argv[1]); p.write_text(''.join(f"{k}='{v}'\n" for k,v in selected.items())); p.chmod(0o600)
 PY
 SSH=(ssh -i "$KEY" -o StrictHostKeyChecking=accept-new "ubuntu@$HOST")
-"${SSH[@]}" 'mkdir -p /home/ubuntu/instawork && chmod 700 /home/ubuntu/instawork'
-scp -i "$KEY" -o StrictHostKeyChecking=accept-new "$DEPLOY_TMP/app.tar.gz" "$DEPLOY_TMP/demo.env" "ubuntu@$HOST:/home/ubuntu/instawork/"
-"${SSH[@]}" 'cd /home/ubuntu/instawork && tar xzf app.tar.gz && mv demo.env .env && chmod 600 .env && rm app.tar.gz && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/python deploy/prepare_search_model.py && sudo cp deploy/irl-api.service deploy/irl-worker.service /etc/systemd/system/ && sudo systemctl daemon-reload'
+"${SSH[@]}" 'mkdir -p /home/ubuntu/spotted && chmod 700 /home/ubuntu/spotted'
+scp -i "$KEY" -o StrictHostKeyChecking=accept-new "$DEPLOY_TMP/app.tar.gz" "$DEPLOY_TMP/demo.env" "ubuntu@$HOST:/home/ubuntu/spotted/"
+"${SSH[@]}" 'cd /home/ubuntu/spotted && tar xzf app.tar.gz && mv demo.env .env && chmod 600 .env && rm app.tar.gz && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/python deploy/prepare_search_model.py && sudo cp deploy/irl-api.service deploy/irl-worker.service /etc/systemd/system/ && sudo systemctl daemon-reload'
 printf '%s\n' 'Prepared remote app. Services not started. Restore the stopped local database snapshot before enabling worker.'

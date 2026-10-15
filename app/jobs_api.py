@@ -155,7 +155,7 @@ def upload_video(file: UploadFile, settings: Settings = Depends(settings_depende
                  store: Store = Depends(store_dependency), cloud: Cloud = Depends(cloud_dependency)):
     job = None
     try:
-        with tempfile.TemporaryDirectory(prefix='instawork-upload-') as directory:
+        with tempfile.TemporaryDirectory(prefix='spotted-upload-') as directory:
             path = Path(directory) / 'upload'
             size = 0
             with path.open('wb') as target:

@@ -50,7 +50,7 @@ def tag_video(
     frame_indices in each tag refer to the zero-based sampled_timestamps array.
     """
     try:
-        with tempfile.TemporaryDirectory(prefix='instawork-') as directory:
+        with tempfile.TemporaryDirectory(prefix='spotted-') as directory:
             path = Path(directory) / 'upload.video'
             size = 0
             with path.open('wb') as destination:
