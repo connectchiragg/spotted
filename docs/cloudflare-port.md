@@ -421,7 +421,7 @@ extracts frames itself, Workers AI transcribes the speech, and Gemini describes 
 - **Google Drive** (secondary).
   - `PUT /drive/folder {"folder": "<link or id>"}` sets the folder.
   - The first LibraryDO run takes `changes.getStartPageToken`, then lists the folder (videos modified in the last 24 months).
-  - Every 15 minutes it reads `changes.list` from the stored token: new files in the folder become videos, and modified ones are re-processed (`VideoDO.restart`).
+  - Every hour (`DRIVE_POLL_MINUTES` = 60, owner decision) it reads `changes.list` from the stored token: new files in the folder become videos, and modified ones are re-processed (`VideoDO.restart`).
   - There is **no push web hook**, so nothing has to bypass Access (owner decision).
 - **Size rule.** Media Transformations accepts inputs **under 100 MB** (and up to 10 minutes). Larger sources are recorded as `skipped` ("Skipped — over 100 MB") and never copied: Drive gives `size`, Photos is checked with HEAD/Range `Content-Length`, and the download stops at 100 MB if a source lied. Videos over 10 minutes are `skipped` after the duration probe. The UI says "Videos over 100 MB are skipped." next to the import button.
 - **Uploads** still work (MP4/MOV under 100 MB) and enter the same pipeline at `probe`.

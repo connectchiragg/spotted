@@ -12,7 +12,7 @@ export const settings: Settings = {
   geminiModel: 'gemini-test', embeddingModel: '@cf/test-embed', rerankModel: '@cf/test-rerank', whisperModel: '@cf/test-whisper',
   maxSourceBytes: 100 * 1000 * 1000, maxVideoSeconds: 600, maxFrames: 16, frameMaxSide: 1024, candidateInterval: 1, minFrameGap: 2, maxFrameGap: 30,
   changeThreshold: 12, describeBatch: 2, whisperDirectMaxBytes: 20 * 1000 * 1000, searchMinScore: 0.02, duplicateThreshold: 0.97,
-  publicLimits: false, dailyUploadLimit: 10, dailyQueryLimit: 100, importStaggerSeconds: 0, drivePollMinutes: 15, driveLookbackMonths: 24,
+  publicLimits: false, dailyUploadLimit: 10, dailyQueryLimit: 100, importStaggerSeconds: 0, drivePollMinutes: 60, driveLookbackMonths: 24,
 };
 
 /** Deterministic bag-of-words embedder: shared words -> high cosine. */

@@ -10,7 +10,7 @@
  *   pickerUri -> poll sessions.get until mediaItemsSet -> mediaItems.list -> download each
  *   video from baseUrl + "=dv" with the bearer token (baseUrls live 60 minutes).
  * - Drive: one folder, videos modified in the last 24 months, then changes.list from a stored
- *   page token, polled every 15 minutes by the LibraryDO alarm (no push web hook, so nothing
+ *   page token, polled hourly (DRIVE_POLL_MINUTES) by the LibraryDO alarm (no push web hook, so nothing
  *   needs to bypass Cloudflare Access).
  * - Testing-mode OAuth apps get refresh tokens that expire after 7 days: `invalid_grant`
  *   marks the connection "reconnect needed" (google_auth.status) and the UI offers Reconnect.

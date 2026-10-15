@@ -75,6 +75,9 @@ export interface Settings {
   driveLookbackMonths: number;
 }
 
+/** Drive changes.list polling interval (owner decision: hourly). Override with the DRIVE_POLL_MINUTES var. */
+export const DEFAULT_DRIVE_POLL_MINUTES = 60;
+
 function num(value: string | undefined, fallback: number): number {
   if (value === undefined || value === '') return fallback;
   const parsed = Number(value);
@@ -104,7 +107,7 @@ export function settings(env: Env): Settings {
     dailyUploadLimit: num(env.DAILY_UPLOAD_LIMIT, 10),
     dailyQueryLimit: num(env.DAILY_QUERY_LIMIT, 100),
     importStaggerSeconds: num(env.IMPORT_STAGGER_S, 20),
-    drivePollMinutes: num(env.DRIVE_POLL_MINUTES, 15),
+    drivePollMinutes: num(env.DRIVE_POLL_MINUTES, DEFAULT_DRIVE_POLL_MINUTES),
     driveLookbackMonths: num(env.DRIVE_LOOKBACK_MONTHS, 24),
   };
   if (!(result.maxFrames >= 1 && result.maxFrames <= 40)) throw new Error('MAX_FRAMES must be between 1 and 40');

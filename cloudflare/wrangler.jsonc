@@ -90,7 +90,7 @@
     "DAILY_UPLOAD_LIMIT": "10",
     "DAILY_QUERY_LIMIT": "100",
     "IMPORT_STAGGER_S": "20",
-    "DRIVE_POLL_MINUTES": "15",
+    "DRIVE_POLL_MINUTES": "60",
     "DRIVE_LOOKBACK_MONTHS": "24"
   },
   // Secrets (set with `wrangler secret put`, never committed): GEMINI_API_KEY, R2_ACCESS_KEY_ID,
