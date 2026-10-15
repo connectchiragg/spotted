@@ -544,7 +544,7 @@ The thresholds were retuned on the owner's real library on 2026-10-15 (§10.7). 
 
 Regression tests in `test/unit.test.ts` use the measured scores.
 
-**Tuning.** I labelled 48 queries derived from the videos (22 that should match, such as "crocodile", "ambulance", "Nivia", "van Mieghem" and "3-2", plus 26 that should not, such as "car", "dog" and "office meeting"), then grid-searched the four thresholds:
+**Tuning.** I labelled 48 queries derived from the videos, then grid-searched the four thresholds. The set has 25 that must find named videos (such as "crocodile", "ambulance", "Nivia", "van Mieghem" and "3-2"), 19 that must find nothing (such as "car", "dog", "office meeting" and "basketball"), and 4 where some videos are acceptable but none is required ("crowd", "trees", "referee", "beach"). The labels and the `getPlatformProxy` scripts are not in the repo.
 
 | rule | missed videos | wrong videos |
 |---|---|---|
