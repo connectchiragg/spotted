@@ -576,7 +576,15 @@ function derivedTitle(r) {
   const labels = (r.labels || []).map((x) => String(x).toLowerCase());
   const tags = r.tags || [];
   const envTag = tags.find((t) => t.category === 'environment' && t.label && !GENERIC_ENV.test(t.label))?.label;
-  const specific = labels.filter((l) => !ABSTRACT.has(l) && !WEAK.has(l) && !SETTINGS.has(l));
+  // A title names what the video is about, not a detail: a label whose tag covers under 30% of the
+  // sampled frames (the ambulance in 1 of 7) stays a searchable tag but is left out of the title.
+  const frames = (r.sampled_timestamps || []).length;
+  const minor = (l) => {
+    const t = tags.find((x) => x.label && Array.isArray(x.frame_indices) && (x.label === l || x.label.includes(l) || l.includes(x.label)));
+    return Boolean(t && frames >= 3 && t.frame_indices.length / frames < 0.3);
+  };
+  const all = labels.filter((l) => !ABSTRACT.has(l) && !WEAK.has(l) && !SETTINGS.has(l));
+  const specific = all.filter((l) => !minor(l)).length ? all.filter((l) => !minor(l)) : all;
   if (specific.length) {
     const setting = envTag || labels.find((l) => SETTINGS.has(l));
     const second = specific.slice(1).find((l) => !NOTABLE.has(l));
