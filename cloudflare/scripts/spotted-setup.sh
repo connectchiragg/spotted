@@ -46,12 +46,20 @@ ask() { local a; read -r -p "  $1 [y/N] " a; [[ "$a" =~ ^[Yy]$ ]]; }
 cf() {
   local token=$1 method=$2 path=$3 body=${4:-}
   local out; out=$(curl -sS -X "$method" "$API$path" -H "Authorization: Bearer $token" -H 'Content-Type: application/json' ${body:+--data @"$body"})
+  [[ -z "$out" ]] && return 0   # some calls (e.g. detaching a domain) answer 2xx with an empty body
   python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d.get("success") else (print("Cloudflare API: " + "; ".join(e.get("message","?") for e in d.get("errors") or []), file=sys.stderr) or 1))' "$out" || return 1
   printf '%s' "$out"
 }
 
 # ---------------------------------------------------------------- 1. Cloudflare Access
 bold "1/4  Cloudflare Access: protect $NEW with the same rules as $OLD"
+# The token is read from the macOS Keychain if saved there once:
+#   security add-generic-password -a "$USER" -s spotted-cloudflare-access -w
+# (it prompts for the value; nothing is echoed or written to disk in plain text).
+if [[ -z "${CLOUDFLARE_ACCESS_TOKEN:-}" ]] && command -v security > /dev/null; then
+  CLOUDFLARE_ACCESS_TOKEN=$(security find-generic-password -a "$USER" -s spotted-cloudflare-access -w 2>/dev/null || true)
+  [[ -n "$CLOUDFLARE_ACCESS_TOKEN" ]] && ok "Using the Cloudflare token saved in your Keychain."
+fi
 if [[ -z "${CLOUDFLARE_ACCESS_TOKEN:-}" ]]; then
   read -r -s -p "  Cloudflare API token (Access: Apps and Policies - Edit), input hidden: " CLOUDFLARE_ACCESS_TOKEN; echo
 fi
