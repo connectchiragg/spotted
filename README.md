@@ -8,15 +8,16 @@
 - **What happens:** the search for "ambulance" returns a football clip. The ambulance appears in only 1 of its 7 sampled frames, in the background at 0:10, and Spotted cites that exact frame.
 - **How it was made:** recorded from the real app and data in headless Chrome; the music is an original composition.
 
-**Live:** https://spotted.haciensus.com (private, behind Cloudflare Access) · **Portfolio:** https://haciensus.com
+**Live:** https://spotted.haciensus.com (sign in with Google; everyone gets a private library) · **Portfolio:** https://haciensus.com
 
 An independent project, running entirely on Cloudflare's free tier.
 
 ## What it does
 
+- **Sign in with Google:** each person has their own library; nobody can see, search or play anyone else's videos.
 - **Bring videos in:**
   - Pick videos in **Google Photos** (Google's own picker; Spotted only sees what you pick);
-  - watch a **Google Drive** folder (checked hourly);
+  - watch a **Google Drive** folder (checked hourly; the owner only);
   - or **upload** a file.
   - Videos under 100 MB and 10 minutes are accepted; larger ones are skipped and say so.
 - **Watch it work:** each video shows live progress, from "19 MB of 41 MB copied from Google" through the analysis steps to ready, over a WebSocket.
@@ -52,11 +53,11 @@ Google Photos / Drive / upload
 | API and UI (one HTML file, no build step) | Worker `spotted-api` |
 | Per-video pipeline and live status | Durable Object `VideoDO` (hibernatable WebSockets) |
 | Google Photos sessions, Drive sync | Durable Object `LibraryDO` |
-| Videos, results, Google connection | D1 `spotted-db` |
+| Users, sessions, videos, results, Google connections | D1 `spotted-db` |
 | Vectors (1024-d) | Vectorize `spotted-vectors` |
 | Originals (kept 7 days), frames, audio | R2 `spotted-videos` |
 | Speech, embeddings, reranking | Workers AI |
-| Sign-in | Cloudflare Access (Google) |
+| Sign-in | Google sign-in (OpenID Connect) and a session cookie, in the Worker |
 
 ### Search quality
 
@@ -87,18 +88,19 @@ npx wrangler dev  # local; AI, Vectorize and Media need a Cloudflare login
   - `retrieval.ts`, `labels.ts`, `vectors.ts`: search;
   - `gemini.ts`: prompts and validation.
 - **UI:** `cloudflare/public/index.html`.
-- **Deploy:** `cd cloudflare && npm run deploy`. The custom domain and Access are configured in the Cloudflare dashboard, not in `wrangler.jsonc`.
+- **Deploy:** `cd cloudflare && npm run deploy`. The custom domain is configured in the Cloudflare dashboard. `OWNER_EMAILS` in `wrangler.jsonc` lists the addresses that sign in as the owner.
 - **Secrets** (`wrangler secret put`, never committed): `GEMINI_API_KEY`, `ADMIN_TOKEN`, `TOKEN_ENC_KEY`, `GOOGLE_CLIENT_SECRET`. Uploads and playback go through the Worker (`PUT /videos/:id/upload`, `GET /videos/:id/source`); an optional R2 API token (`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) switches them to presigned URLs.
-- **Operations:** deleting a video (`DELETE /admin/videos/:id`), owner setup steps, the free-tier budget and incident notes are all in [docs/cloudflare-port.md](docs/cloudflare-port.md).
+- **Operations:** people delete their own videos (`DELETE /videos/:id`); the admin can delete any (`DELETE /admin/videos/:id`); owner setup steps, the free-tier budget and incident notes are all in [docs/cloudflare-port.md](docs/cloudflare-port.md).
 
 ## Limits
 
 - **Size and quotas:**
   - 100 MB and 10 minutes per video;
-  - 10 uploads and 100 searches per UTC day.
+  - guests: 20 videos, 500 MB and 30 searches per UTC day (the owner has no limits);
+  - all guests together: 200 uploads and 2,000 searches per UTC day, a cost ceiling.
 - **Google:**
   - Gemini's free tier allows 15 requests/minute and 500/day (about 2–3 per video). Imports start 20 s apart, and a quota hit waits instead of failing.
-  - The Google OAuth app is in Testing mode, so the Google connection must be renewed every 7 days. The UI asks.
+  - The Google OAuth app is published, but Google's review of the Photos permission is pending: until it passes, connecting Google Photos shows an "unverified app" warning and is capped at 100 users. Sign-in and uploads are unaffected.
 - **Storage:** originals are deleted after 7 days (frames, results and search remain), so playback of older videos stops.
 - **Search:**
   - Labels and descriptions are generated and can be wrong.

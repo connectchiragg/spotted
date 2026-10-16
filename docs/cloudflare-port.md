@@ -6,7 +6,7 @@ in `app/` is unchanged and its tests still pass.
 
 Status on 2026-10-16:
 - **Renamed and migrated (2026-10-16):** the product is Spotted, on its own resources (`spotted-api`, `spotted-db`, `spotted-vectors`, `spotted-videos`) at `spotted.haciensus.com`. The data was copied and verified, the original resources were retired, and the one-time migration scripts were removed afterwards (they are in git history).
-- **Live:** https://spotted.haciensus.com is served by the Worker `spotted-api`, behind Cloudflare Access (Google login). The custom domain is attached as a Workers custom domain.
+- **Live:** https://spotted.haciensus.com is served by the Worker `spotted-api`, open to anyone who signs in with Google (since migration 0005; it was behind Cloudflare Access before). The custom domain is attached as a Workers custom domain.
 - **Resources (free tier):**
   - D1 `spotted-db` (migrations 0001–0004);
   - Vectorize `spotted-vectors` (1024 d);
@@ -366,10 +366,10 @@ Run without a browser against the first deployed Worker, with a 5 s, 45 KB synth
 
 **Bug found and fixed.** The Gemini client called the global `fetch` with the wrong receiver ("Illegal invocation"), which failed every Gemini call in workerd. The fix is commit `94f54fe`.
 
-## 8. Operations: Access, admin purge and deleting videos
+## 8. Operations: sign-in, users, admin purge and deleting videos
 
-- **Access.** `spotted.haciensus.com` is behind Cloudflare Access (Google login), and `workers_dev` is `false`, so every route, including `/health`, needs an Access session. The custom domain is attached in the dashboard; `wrangler deploy` leaves it in place, because the config has no `routes`.
-- **Signed-in user.** `GET /me` returns `{email, signed_in, source, logout_url}` from the `Cf-Access-Authenticated-User-Email` header that Access adds to every request. The header is trusted without verifying `Cf-Access-Jwt-Assertion`: `workers_dev` and `preview_urls` are off and the custom domain is the only route, so every request comes through Access, and the identity is only displayed (no authorization depends on it). Verifying the JWT would need the Access team domain and application AUD pinned as vars; add that before the email is ever used for a decision. The browser asks `/cdn-cgi/access/get-identity` for a display name (best effort), shows initials, the email and a menu with Access, Google and live-update state and **Sign out** (`/cdn-cgi/access/logout`). Under `wrangler dev` (no Access) it shows "Local dev".
+- **Sign-in** (`src/auth.ts`, migration 0005). `GET /auth/login` sends people to Google (scopes `openid email profile`); Google returns to the same `/oauth/google/callback` as the Photos connection, and the stored one-time state says which flow it is. The ID token comes straight from Google's token endpoint, and its issuer, audience, expiry and verified email are checked. The session is a `__Host-spotted` cookie (HttpOnly, Secure, SameSite=Lax, 30 days) whose SHA-256 alone is stored in D1 `sessions`; `POST /auth/logout` ends it. Every route except `/`, `/privacy`, `/health`, `/me`, `/auth/*` and the OAuth callback answers 401 without a session.
+- **Users and limits.** Addresses in `OWNER_EMAILS` sign in as the user `owner`: the original library, Google Drive sync and no limits. Everyone else is `g:<Google sub>`, a guest with Google Photos and uploads, 20 videos, 500 MB and 30 searches a day (`GUEST_*` vars), plus a shared daily ceiling for all guests. Every video, picker session and Google connection carries its `user_id`; routes read and change only the signed-in user's rows, and Vectorize queries filter on the `user_id` metadata index (existing vectors were tagged with `scripts/tag-vector-users.mjs`). `GET /me` returns the user and, for guests, their usage. The `Cf-Access-*` headers are no longer read.
 - **Deleting a video completely:** `DELETE /admin/videos/:id` with `Authorization: Bearer $SPOTTED_ADMIN_TOKEN` (Worker secret `ADMIN_TOKEN`; the value is in the ignored `.env` at the repo root).
   - What it removes, in order:
     1. the D1 row;
