@@ -743,7 +743,8 @@ const THUMB = /^\/videos\/([^/]+)\/(?:thumbs|frames)\/(\d+)$/;
 const SOURCE = /^\/videos\/([^/]+)\/source$/;
 const UPLOAD = /^\/videos\/([^/]+)\/upload$/;
 const PICKER_SESSION = /^\/photos\/sessions\/([^/]+)$/;
-const PAGES = new Set(['/', '/privacy']);
+/** Served from static assets to anyone (no session): the pages, and what crawlers and link previews fetch. */
+const PAGES = new Set(['/', '/privacy', '/robots.txt', '/sitemap.xml', '/favicon.ico', '/favicon.svg', '/favicon-48.png', '/apple-touch-icon.png', '/icon-512.png', '/og.jpg']);
 
 export async function handle(request: Request, deps: AppDeps): Promise<Response> {
   const url = new URL(request.url);
@@ -752,7 +753,7 @@ export async function handle(request: Request, deps: AppDeps): Promise<Response>
   try {
     if ((method === 'GET' || method === 'HEAD') && path === '/health') return json({ status: 'ok' });
     if ((method === 'GET' || method === 'HEAD') && PAGES.has(path)) {
-      // Asset html_handling maps '/' to index.html and '/privacy' to privacy.html.
+      // Asset html_handling maps '/' to index.html and '/privacy' to privacy.html; the rest are files.
       if (deps.assets) return deps.assets.fetch(request);
       throw new HttpError(404, 'Not found');
     }

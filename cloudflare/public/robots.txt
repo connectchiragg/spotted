@@ -1,0 +1,15 @@
+User-agent: *
+Allow: /$
+Allow: /privacy
+Allow: /og.jpg
+Disallow: /auth/
+Disallow: /oauth/
+Disallow: /videos
+Disallow: /search
+Disallow: /query
+Disallow: /photos/
+Disallow: /drive/
+Disallow: /google/
+Disallow: /me
+
+Sitemap: https://spotted.haciensus.com/sitemap.xml

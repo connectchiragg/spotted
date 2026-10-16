@@ -3,11 +3,34 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Spotted · Search your footage by what happens in it</title>
-<meta name="description" content="Spotted finds the exact moment in your videos. Describe a scene, an object or something said, and get the frame, the time and an answer that cites it.">
+<title>Spotted: AI video search for your own videos</title>
+<meta name="description" content="Search your own videos by what happens in them. Describe a scene, an object or something said, and Spotted finds the exact frame and cites it. Free.">
+<link rel="canonical" href="https://spotted.haciensus.com/">
+<meta name="robots" content="index,follow,max-image-preview:large,max-video-preview:-1">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Spotted">
+<meta property="og:url" content="https://spotted.haciensus.com/">
+<meta property="og:title" content="Spotted: search your videos by what happens in them">
+<meta property="og:description" content="Describe a moment and get the exact frame, with an answer that cites it. Free with Google Photos or uploads.">
+<meta property="og:image" content="https://spotted.haciensus.com/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Spotted finding an ambulance in the background of a football clip at 0:10">
+<meta property="og:video" content="https://haciensus.com/works/assets/media/spotted-demo.mp4">
+<meta property="og:video:type" content="video/mp4">
+<meta property="og:video:width" content="1920">
+<meta property="og:video:height" content="1080">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Spotted: search your videos by what happens in them">
+<meta name="twitter:description" content="Describe a moment and get the exact frame, with an answer that cites it.">
+<meta name="twitter:image" content="https://spotted.haciensus.com/og.jpg">
+<meta name="twitter:image:alt" content="Spotted finding an ambulance in the background of a football clip at 0:10">
+<script type="application/ld+json">[{"@context": "https://schema.org", "@type": "WebApplication", "name": "Spotted", "url": "https://spotted.haciensus.com/", "description": "AI video search for your own videos: describe a moment and get the exact frame, cited.", "applicationCategory": "MultimediaApplication", "operatingSystem": "Web browser", "image": "https://spotted.haciensus.com/og.jpg", "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}, "author": {"@type": "Person", "name": "Chirag Goel", "url": "https://haciensus.com/"}, "sameAs": ["https://github.com/connectchiragg/spotted"]}, {"@context": "https://schema.org", "@type": "VideoObject", "name": "Spotted: search your videos by what happens in them", "description": "Searching a video library for “ambulance” finds one in the background of a football clip, at 0:10, with an answer that cites the frame.", "thumbnailUrl": "https://spotted.haciensus.com/og.jpg", "uploadDate": "2026-10-16", "duration": "PT27S", "contentUrl": "https://haciensus.com/works/assets/media/spotted-demo.mp4"}, {"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": [{"@type": "Question", "name": "What is Spotted?", "acceptedAnswer": {"@type": "Answer", "text": "Spotted is an AI video search app for your own videos. You describe a moment, such as a scene, an object or something said, and it finds the exact frame and timestamp, with a short answer that cites where it saw it."}}, {"@type": "Question", "name": "How do I add videos?", "acceptedAnswer": {"@type": "Answer", "text": "Sign in with Google, then pick videos in Google Photos with Google's own picker, or upload MP4 or MOV files. Spotted only sees the videos you pick."}}, {"@type": "Question", "name": "Can other people see my videos?", "acceptedAnswer": {"@type": "Answer", "text": "No. Every person has a private library. Nobody else can see, search or play your videos, and you can delete any video at any time."}}, {"@type": "Question", "name": "Is Spotted free?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Each account can add 20 videos (up to 500 MB) and run 30 searches a day, free."}}, {"@type": "Question", "name": "How does the search work?", "acceptedAnswer": {"@type": "Answer", "text": "Spotted samples frames from each video and describes them with Google Gemini, transcribes speech with Whisper, then combines vector search, a reranker and a label hierarchy, so a football match does not match “birthday party”."}}]}]</script>
 <meta name="theme-color" content="#0f100f">
 <meta name="color-scheme" content="dark">
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f100f'/%3E%3Cpath d='M6 11V7.5A1.5 1.5 0 0 1 7.5 6H11M21 6h3.5A1.5 1.5 0 0 1 26 7.5V11M26 21v3.5a1.5 1.5 0 0 1-1.5 1.5H21M11 26H7.5A1.5 1.5 0 0 1 6 24.5V21' fill='none' stroke='%23d6ff70' stroke-width='2.6' stroke-linecap='round'/%3E%3Ccircle cx='18' cy='14.5' r='4.6' fill='%23d6ff70'/%3E%3C/svg%3E">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>
 /* ------------------------------------------------------------------ tokens */
 :root{
@@ -140,6 +163,15 @@ body:not([data-auth=in]){--header-h:64px}
 .btn-lg{min-height:44px;padding:0 var(--sp-5);font-size:var(--fs-14)}
 .demo{border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden;background:#000;aspect-ratio:16/9;box-shadow:var(--shadow-pop)}
 .demo video{display:block;width:100%;height:100%;object-fit:contain}
+.landing-more{max-width:860px;margin:0 auto;padding:0 clamp(var(--sp-4),4vw,var(--sp-9)) var(--sp-9)}
+.landing-more h2{font-size:var(--fs-24);font-weight:600;letter-spacing:-.02em;margin:var(--sp-8) 0 var(--sp-5)}
+.how{margin:0;padding-left:1.3em;display:grid;gap:var(--sp-4);color:var(--text-2);font-size:var(--fs-16);line-height:1.6}
+.how strong{color:var(--text)}
+.faq{display:grid;gap:var(--sp-2)}
+.faq-item{border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface);padding:var(--sp-4) var(--sp-5)}
+.faq-item summary{cursor:pointer;font-weight:600;color:var(--text)}
+.faq-item p{margin-top:var(--sp-3);color:var(--text-2);line-height:1.6}
+.landing-more>.fine{margin-top:var(--sp-7)}
 @media (max-width:900px){.landing{grid-template-columns:minmax(0,1fr);gap:var(--sp-7);padding:var(--sp-6) var(--sp-4) var(--sp-8)}}
 
 /* ------------------------------------------------------------------ shell */
@@ -461,13 +493,24 @@ body:not([data-auth=in]){--header-h:64px}
 <div class="landing-wrap out-only">
   <section class="landing" id="landing" aria-labelledby="landing-title">
     <div class="hero">
-      <div class="eyebrow">See beyond the footage</div>
+      <div class="eyebrow">AI video search for your own library</div>
       <h1 id="landing-title">Every frame.<br><em>Within reach.</em></h1>
       <p class="lead">Search your own videos by what happens in them: a scene, an object, or something said.</p>
       <a class="btn btn-primary btn-lg" href="/auth/login?next=/">Sign in with Google</a>
       <p class="fine">Guests get 20 videos, 500 MB and 30 searches a day. Videos are processed by Google Gemini and Cloudflare Workers AI. <a href="/privacy">Privacy policy</a></p>
     </div>
     <div class="demo"><video poster="https://haciensus.com/works/assets/media/spotted-use.jpg" src="https://haciensus.com/works/assets/media/spotted-demo.mp4" controls muted playsinline preload="metadata" aria-label="Spotted demo: searching videos by what happens in them"></video></div>
+  </section>
+  <section class="landing-more" aria-labelledby="how-title">
+    <h2 id="how-title">How Spotted finds the moment</h2>
+    <ol class="how">
+      <li><strong>Add your videos.</strong> Pick them in Google Photos or upload MP4 and MOV files. Each one is copied, analysed and searchable in about a minute.</li>
+      <li><strong>Spotted watches them.</strong> It samples the frames that change, describes each one, transcribes what is said and tags objects, places and sounds.</li>
+      <li><strong>Search in plain words.</strong> Ask for &ldquo;the goal celebration&rdquo; or &ldquo;an ambulance&rdquo;. You get the frame, the timestamp and a short answer that cites it.</li>
+    </ol>
+    <h2 id="faq-title">Questions</h2>
+    <div class="faq"><details class="faq-item"><summary>What is Spotted?</summary><p>Spotted is an AI video search app for your own videos. You describe a moment, such as a scene, an object or something said, and it finds the exact frame and timestamp, with a short answer that cites where it saw it.</p></details><details class="faq-item"><summary>How do I add videos?</summary><p>Sign in with Google, then pick videos in Google Photos with Google's own picker, or upload MP4 or MOV files. Spotted only sees the videos you pick.</p></details><details class="faq-item"><summary>Can other people see my videos?</summary><p>No. Every person has a private library. Nobody else can see, search or play your videos, and you can delete any video at any time.</p></details><details class="faq-item"><summary>Is Spotted free?</summary><p>Yes. Each account can add 20 videos (up to 500 MB) and run 30 searches a day, free.</p></details><details class="faq-item"><summary>How does the search work?</summary><p>Spotted samples frames from each video and describes them with Google Gemini, transcribes speech with Whisper, then combines vector search, a reranker and a label hierarchy, so a football match does not match “birthday party”.</p></details></div>
+    <p class="fine">Built by <a href="https://haciensus.com/">Chirag Goel</a> on Cloudflare Workers, D1, Vectorize, R2 and Workers AI, with Google Gemini. <a href="https://github.com/connectchiragg/spotted">Source code</a> · <a href="/privacy">Privacy policy</a></p>
   </section>
 </div>
 

@@ -12,6 +12,16 @@ describe('Worker entrypoint in workerd (D1 and VideoDO only: no R2, Vectorize or
     expect(await res.json()).toEqual({ status: 'ok' });
   });
 
+  it('serves crawler and link-preview files without a session', async () => {
+    for (const path of ['/robots.txt', '/sitemap.xml', '/favicon.ico', '/og.jpg', '/privacy']) {
+      expect((await worker.fetch(`https://spotted.test${path}`)).status, path).toBe(200);
+    }
+    expect(await (await worker.fetch('https://spotted.test/robots.txt')).text()).toContain('Sitemap: https://spotted.haciensus.com/sitemap.xml');
+    const page = await (await worker.fetch('https://spotted.test/')).text();
+    expect(page).toContain('<link rel="canonical" href="https://spotted.haciensus.com/">');
+    for (const block of page.match(/<script type="application\/ld\+json">([^<]+)<\/script>/g) ?? []) JSON.parse(block.replace(/<[^>]+>/g, ''));
+  });
+
   it('serves the UI from static assets', async () => {
     const res = await worker.fetch('https://spotted.test/');
     expect(res.status).toBe(200);
