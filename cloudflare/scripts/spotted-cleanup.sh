@@ -84,8 +84,13 @@ if [[ -z "${CLOUDFLARE_ACCESS_TOKEN:-}" ]] && command -v security > /dev/null; t
   [[ -n "$CLOUDFLARE_ACCESS_TOKEN" ]] && ok "Using the Cloudflare token saved in your Keychain."
 fi
 if [[ -z "${CLOUDFLARE_ACCESS_TOKEN:-}" ]]; then
-  read -r -s -p "  Cloudflare API token (Access: Apps and Policies - Edit), input hidden: " CLOUDFLARE_ACCESS_TOKEN; echo
+  echo "  Optional: the old domain is already gone, so its Access app protects nothing. Press Enter to skip."
+  read -r -s -p "  Cloudflare API token (Access: Apps and Policies - Edit), or Enter to skip: " CLOUDFLARE_ACCESS_TOKEN; echo
 fi
+CLOUDFLARE_ACCESS_TOKEN=$(printf '%s' "${CLOUDFLARE_ACCESS_TOKEN:-}" | tr -d '[:space:]')
+if [[ -z "$CLOUDFLARE_ACCESS_TOKEN" ]]; then
+  warn "Skipped. Delete it later in the dashboard if you like: Zero Trust -> Access controls -> Applications -> $OLD_PREFIX -> Delete."
+else
 cf "$CLOUDFLARE_ACCESS_TOKEN" GET "/accounts/$ACCOUNT_ID/access/apps?per_page=100" > "$WORK/apps.json" || die "Could not list Access applications."
 python3 - "$WORK/apps.json" "$OLD_HOST" "$NEW" > "$WORK/old-apps.txt" <<'PY'
 import json, sys
@@ -104,6 +109,7 @@ else
       cf "$CLOUDFLARE_ACCESS_TOKEN" DELETE "/accounts/$ACCOUNT_ID/access/apps/$id" > /dev/null && ok "Deleted \"$name\"." || warn "Could not delete \"$name\"."
     fi
   done < "$WORK/old-apps.txt"
+fi
 fi
 
 # ---------------------------------------------------------------- 3. Old Workers
