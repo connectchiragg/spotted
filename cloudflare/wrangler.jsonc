@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  // Spotted. Serves spotted.haciensus.com (custom domain attached by scripts/spotted-setup.sh).
+  // Spotted. Serves spotted.haciensus.com (a Workers custom domain, attached outside this file).
   "name": "spotted-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-15",

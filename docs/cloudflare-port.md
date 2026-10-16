@@ -5,8 +5,8 @@ This branch (`cloudflare-port`) moves Spotted off its original AWS EC2 server. A
 in `app/` is unchanged and its tests still pass.
 
 Status on 2026-10-16:
-- **Renamed and migrated (2026-10-16):** the product is Spotted, on new resources (`spotted-api`, `spotted-db`, `spotted-vectors`, `spotted-videos`) at `spotted.haciensus.com`. `scripts/spotted-setup.sh` finishes the move and `scripts/spotted-cleanup.sh` retires the originals. Names below are the current ones; historical sections keep only what still applies.
-- **Live:** https://spotted.haciensus.com is served by the Worker `spotted-api`, behind Cloudflare Access (Google login). The custom domain is attached by `scripts/spotted-setup.sh`.
+- **Renamed and migrated (2026-10-16):** the product is Spotted, on its own resources (`spotted-api`, `spotted-db`, `spotted-vectors`, `spotted-videos`) at `spotted.haciensus.com`. The data was copied and verified, the original resources were retired, and the one-time migration scripts were removed afterwards (they are in git history).
+- **Live:** https://spotted.haciensus.com is served by the Worker `spotted-api`, behind Cloudflare Access (Google login). The custom domain is attached as a Workers custom domain.
 - **Resources (free tier):**
   - D1 `spotted-db` (migrations 0001–0004);
   - Vectorize `spotted-vectors` (1024 d);
@@ -294,7 +294,7 @@ The EC2 instance is **stopped**; don't leave it running. It has no Elastic IP, s
 
 **Cutover:**
 1. Remove the custom domain from the old EC2 proxy Worker (since deleted).
-2. Attach the custom domain to the Worker (`scripts/spotted-setup.sh` does this for `spotted.haciensus.com`).
+2. Attach the custom domain to the Worker (a Workers custom domain for `spotted.haciensus.com`).
 3. Run `npm run deploy`.
 4. Rollback is the reverse, plus restarting EC2.
 
@@ -316,7 +316,7 @@ The EC2 instance is **stopped**; don't leave it running. It has no Elastic IP, s
    - search for it.
 6. **Migrate data:** see §4. This needs a temporary EC2 start; stop it again afterwards.
 7. **Cut over** the domain (§4). Then retire EC2 resources with the existing cleanup process. Do this only after the owner confirms.
-8. **Optional:** delete the smoke-test Worker (`scripts/spotted-cleanup.sh` does this).
+8. **Optional:** delete the smoke-test Worker (done).
 
 ## 6. Development
 
@@ -385,16 +385,6 @@ Run without a browser against the first deployed Worker, with a 5 s, 45 KB synth
   - D1 rows, R2 objects and Gemini files were deleted with wrangler and the Gemini API;
   - Vectorize was already empty;
   - the two actors purge at their pending alarms (~22:06 and ~22:21 UTC).
-
-### Second domain: spotted.haciensus.com (rename)
-
-`cloudflare/scripts/spotted-subdomain.sh` (run by the owner) does the following, in order, asking before each change:
-1. **Access:** creates a new Access application "Spotted" for the new hostname, with the same sign-in rules. The existing application is never modified.
-2. **Google:** pauses while the owner adds the OAuth redirect URI in the Google console.
-3. **R2:** applies `r2-cors.json` to the bucket.
-4. **Domain:** attaches the custom domain, then checks from outside that it redirects to the Access login, detaching it at once if not.
-
-Google sign-in redirects back to whichever domain is in use (`PUBLIC_ORIGIN` + `PUBLIC_ORIGINS`).
 
 ## 9. Incident: the ghost per-minute cron (2026-10-14/15)
 
@@ -529,7 +519,7 @@ The thresholds were retuned on the owner's real library on 2026-10-15 (§10.7). 
 3. **Import from Google Photos**: pick a few short videos, then Done. Or paste a Drive folder link.
 4. Every 7 days (Testing-mode tokens): **Reconnect Google** when the UI asks.
 5. Optional cleanup:
-   - the old 384-d index and the smoke-test Worker are removed by `scripts/spotted-cleanup.sh`.
+   - the old 384-d index and the smoke-test Worker have been removed.
 
 **Done.** D1 migration 0004 applied remotely, Vectorize index (now `spotted-vectors`) created (1024 d, cosine, metadata indexes `kind` and `video_id`), secret `TOKEN_ENC_KEY` set, Worker deployed.
 

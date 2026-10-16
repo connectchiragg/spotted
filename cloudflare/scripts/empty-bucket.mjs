@@ -1,5 +1,5 @@
-// Delete every object in an R2 bucket so the bucket itself can be deleted (used by
-// scripts/spotted-cleanup.sh). Usage: node scripts/empty-bucket.mjs <bucket-name>
+// Delete every object in an R2 bucket so the bucket itself can be deleted.
+// Usage: node scripts/empty-bucket.mjs <bucket-name>
 // Uses your wrangler login through a remote binding; prints only counts.
 import fs from 'node:fs';
 import os from 'node:os';
