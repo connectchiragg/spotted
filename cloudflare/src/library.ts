@@ -1,45 +1,56 @@
 /**
- * LibraryDO: one Durable Object (`LIBRARY.idFromName('library')`) that turns Google sources
- * into videos. Its alarm (no cron) does two jobs:
+ * LibraryDO: one Durable Object per user (`library` for the owner, `library:<user id>` for
+ * guests; actor.ts) that turns that user's Google sources into their videos. Its alarm (no
+ * cron) does two jobs:
  *   - Google Photos picker sessions: poll sessions.get at Google's pollInterval until the
  *     owner has picked (mediaItemsSet), then list the picked items and create one video per
  *     picked VIDEO (photos/<media item id>, so a re-pick is a no-op);
- *   - Google Drive: on first run list the chosen folder (videos modified in the last
+ *   - Google Drive (the owner only): on first run list the chosen folder (videos modified in the last
  *     DRIVE_LOOKBACK_MONTHS), then every DRIVE_POLL_MINUTES read changes.list from the stored
  *     page token: new files in the folder become videos, modified ones are re-processed.
  * Sources at or over MAX_SOURCE_MB are recorded as `skipped` and never downloaded. New videos
  * start staggered by IMPORT_STAGGER_S so a big pick does not burst the Gemini 15 RPM limit.
+ * A guest's picks beyond their video or byte limit are recorded as `skipped` (nothing copied).
  */
 import { DurableObject } from 'cloudflare:workers';
 import { videoStub } from './actor';
-import { Env, settings, Settings } from './env';
+import { Env, guestLimits, Limits, settings, Settings } from './env';
 import { durationMs, DriveFile, Google, GoogleError, PickedItem } from './google';
-import { decode as decodeVideo, nowIso, upsertSourceVideo, Video } from './store';
+import { libraryReason } from './quota';
+import { decode as decodeVideo, libraryUsage, nowIso, upsertSourceVideo, Video } from './store';
 import { googleClient } from './video';
 
 const DEFAULT_POLL_MS = 5_000;
 const BASE_URL_TTL_MS = 55 * 60_000; // Picker baseUrls live 60 minutes
 
-export interface LibraryDeps { db: D1Database; google: Google; videos: DurableObjectNamespace | null; settings: Settings }
+export interface LibraryDeps {
+  db: D1Database; google: Google; videos: DurableObjectNamespace | null; settings: Settings;
+  userId: string;
+  /** null for the owner (no limits). */
+  limits: Limits | null;
+}
 
 export class LibraryDO extends DurableObject<Env> {
   static testDeps: (() => LibraryDeps) | null = null;
 
-  private deps(): LibraryDeps | null {
+  private async deps(): Promise<LibraryDeps | null> {
     if (LibraryDO.testDeps) return LibraryDO.testDeps();
-    const google = googleClient(this.env);
+    const userId = (await this.ctx.storage.get<string>('user_id')) ?? 'owner'; // the original singleton predates user_id
+    const google = googleClient(this.env, userId);
     if (!this.env.DB || !google) return null;
-    return { db: this.env.DB, google, videos: this.env.VIDEO ?? null, settings: settings(this.env) };
+    const config = settings(this.env);
+    return { db: this.env.DB, google, videos: this.env.VIDEO ?? null, settings: config, userId, limits: userId === 'owner' ? null : guestLimits(config) };
   }
 
   /** Wake the alarm now (a new picker session, a new Drive folder, or a manual sync). */
-  async poke(): Promise<void> {
+  async poke(userId: string): Promise<void> {
+    await this.ctx.storage.put('user_id', userId);
     await this.ctx.storage.put('drive_due', 0);
     await this.ctx.storage.setAlarm(Date.now());
   }
 
   async alarm(): Promise<void> {
-    const deps = this.deps();
+    const deps = await this.deps();
     if (!deps) return;
     let next = Infinity;
     try {
@@ -62,7 +73,8 @@ export class LibraryDO extends DurableObject<Env> {
 
   /** Returns when to poll again (Infinity if no session is waiting). */
   private async pollPickerSessions(deps: LibraryDeps): Promise<number> {
-    const { results } = await deps.db.prepare("SELECT id, expire_time FROM picker_sessions WHERE status IN ('waiting', 'importing')").all<{ id: string; expire_time: string | null }>();
+    const { results } = await deps.db.prepare("SELECT id, expire_time FROM picker_sessions WHERE user_id=?1 AND status IN ('waiting', 'importing')")
+      .bind(deps.userId).all<{ id: string; expire_time: string | null }>();
     let next = Infinity;
     for (const row of results) {
       if (row.expire_time && Date.parse(row.expire_time) < Date.now()) {
@@ -98,19 +110,28 @@ export class LibraryDO extends DurableObject<Env> {
   async importPicked(deps: LibraryDeps, sessionId: string, items: PickedItem[]): Promise<{ imported: number; skipped: number }> {
     let imported = 0;
     let skipped = 0;
+    const usage = deps.limits ? await libraryUsage(deps.db, deps.userId) : null;
     for (const item of items) {
       const mime = item.mediaFile?.mimeType ?? '';
       if (item.type !== 'VIDEO' && !mime.startsWith('video/')) continue; // photos are ignored
       const size = await deps.google.photoVideoSize(item.mediaFile.baseUrl).catch(() => null);
       const tooBig = size !== null && size >= deps.settings.maxSourceBytes;
+      // A guest past their limit: the pick is recorded as skipped with the reason, nothing is copied.
+      const reason = !tooBig && usage && deps.limits ? libraryReason(usage, size, deps.limits) : null;
+      const overLimit = reason ? `Skipped: ${reason.detail}` : null;
       const { video, created } = await upsertSourceVideo(deps.db, {
-        source: 'photos', sourceId: item.id, filename: item.mediaFile.filename || `${item.id}.mp4`, contentType: mime || 'video/mp4', size,
+        userId: deps.userId, source: 'photos', sourceId: item.id, filename: item.mediaFile.filename || `${item.id}.mp4`, contentType: mime || 'video/mp4', size,
         meta: { session_id: sessionId, base_url: item.mediaFile.baseUrl, base_url_expires_at: new Date(Date.now() + BASE_URL_TTL_MS).toISOString(),
           created_time: item.createTime ?? null, width: item.mediaFile.mediaFileMetadata?.width ?? null, height: item.mediaFile.mediaFileMetadata?.height ?? null },
-        status: tooBig ? 'skipped' : 'pending', error: tooBig ? `Skipped: over ${Math.round(deps.settings.maxSourceBytes / 1e6)} MB` : null,
+        status: tooBig || overLimit ? 'skipped' : 'pending',
+        error: tooBig ? `Skipped: over ${Math.round(deps.settings.maxSourceBytes / 1e6)} MB` : overLimit,
       });
-      if (tooBig) { skipped++; continue; }
-      if (created) { imported++; await this.startVideo(deps, video); }
+      if (tooBig || overLimit) { skipped++; continue; }
+      if (created) {
+        imported++;
+        if (usage) { usage.videos++; usage.bytes += size ?? 0; }
+        await this.startVideo(deps, video);
+      }
       else if (video.status === 'failed') {
         // A re-pick refreshes the 60-minute download link of a video that failed to copy.
         await deps.db.prepare("UPDATE videos SET source_meta=?2, status='pending', error=NULL WHERE id=?1")
@@ -127,6 +148,7 @@ export class LibraryDO extends DurableObject<Env> {
 
   /** Returns when to sync again (Infinity when no folder is set). */
   private async syncDrive(deps: LibraryDeps): Promise<number> {
+    if (deps.userId !== 'owner') return Infinity;
     const sync = await deps.db.prepare('SELECT * FROM drive_sync WHERE id=1').first<any>();
     if (!sync) return Infinity;
     const interval = deps.settings.drivePollMinutes * 60_000;
@@ -158,11 +180,11 @@ export class LibraryDO extends DurableObject<Env> {
     const size = file.size ? Number(file.size) : null;
     const tooBig = size !== null && size >= deps.settings.maxSourceBytes;
     const input = {
-      source: 'drive' as const, sourceId: file.id, filename: file.name, contentType: file.mimeType, size,
+      userId: deps.userId, source: 'drive' as const, sourceId: file.id, filename: file.name, contentType: file.mimeType, size,
       meta: { modified_time: file.modifiedTime ?? null, duration_ms: file.videoMediaMetadata?.durationMillis ? Number(file.videoMediaMetadata.durationMillis) : null },
       status: (tooBig ? 'skipped' : 'pending') as 'skipped' | 'pending', error: tooBig ? `Skipped: over ${Math.round(deps.settings.maxSourceBytes / 1e6)} MB` : null,
     };
-    const existing = await deps.db.prepare("SELECT source_meta FROM videos WHERE source='drive' AND source_id=?1").bind(file.id).first<{ source_meta: string | null }>();
+    const existing = await deps.db.prepare("SELECT source_meta FROM videos WHERE user_id=?2 AND source='drive' AND source_id=?1").bind(file.id, deps.userId).first<{ source_meta: string | null }>();
     const changed = Boolean(fromChanges && existing && JSON.parse(existing.source_meta ?? '{}').modified_time !== (file.modifiedTime ?? null));
     const { video, created } = await upsertSourceVideo(deps.db, input, changed);
     if (tooBig) return;
@@ -175,18 +197,18 @@ export class LibraryDO extends DurableObject<Env> {
 
   /** A Drive file left the folder (removed, trashed or moved): archive its video, which hides it but deletes nothing. */
   private async archiveDrive(deps: LibraryDeps, fileId: string): Promise<void> {
-    await deps.db.prepare("UPDATE videos SET archived_at=COALESCE(archived_at, ?2) WHERE source='drive' AND source_id=?1").bind(fileId, nowIso()).run();
+    await deps.db.prepare("UPDATE videos SET archived_at=COALESCE(archived_at, ?2) WHERE user_id=?3 AND source='drive' AND source_id=?1").bind(fileId, nowIso(), deps.userId).run();
   }
 
   /** Changes that arrived while their video was processing (store.upsertSourceVideo): apply them now. */
   private async applyPendingRefreshes(deps: LibraryDeps): Promise<void> {
     const { results } = await deps.db.prepare(
-      "SELECT * FROM videos WHERE source='drive' AND status!='processing' AND json_extract(source_meta, '$.refresh_pending')=1",
-    ).all();
+      "SELECT * FROM videos WHERE user_id=?1 AND source='drive' AND status!='processing' AND json_extract(source_meta, '$.refresh_pending')=1",
+    ).bind(deps.userId).all();
     for (const row of results) {
       const video = decodeVideo(row)!;
       const { refresh_pending: _, ...meta } = video.source_meta ?? {};
-      const { video: fresh } = await upsertSourceVideo(deps.db, { source: 'drive', sourceId: video.source_id!, filename: video.filename,
+      const { video: fresh } = await upsertSourceVideo(deps.db, { userId: deps.userId, source: 'drive', sourceId: video.source_id!, filename: video.filename,
         contentType: video.content_type, size: video.expected_size, meta, status: 'pending', error: null }, true);
       await this.startVideo(deps, fresh, true);
     }

@@ -110,7 +110,8 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 
 .account-chip:hover,.account-chip[aria-expanded=true]{background:var(--surface-2);border-color:#4d5545}
 .avatar{flex:none;width:28px;height:28px;border-radius:50%;display:grid;place-items:center;background:var(--accent);color:var(--accent-ink);font-size:var(--fs-11);font-weight:750;letter-spacing:.3px}
 .avatar.pending{background:var(--surface-3);color:transparent;animation:shimmer-bg 1.4s ease-in-out infinite}
-.avatar.local{background:var(--surface-3);color:var(--text-2);border:1px dashed #5d6853}
+.avatar.has-img{background:var(--surface-3)}
+.avatar img{width:100%;height:100%;border-radius:50%;object-fit:cover;display:block}
 .avatar.large{width:40px;height:40px;font-size:var(--fs-14)}
 .account-name{font-size:var(--fs-13);color:var(--text)}
 .caret{flex:none;width:7px;height:7px;border-right:1.5px solid var(--text-3);border-bottom:1.5px solid var(--text-3);transform:translateY(-2px) rotate(45deg);margin-left:2px}
@@ -124,6 +125,22 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 
 .facts div{display:grid;grid-template-columns:72px 1fr;gap:var(--sp-2);font-size:var(--fs-12);line-height:1.5}
 .facts dt{color:var(--text-3)}
 .facts dd{margin:0;color:var(--text-2);overflow-wrap:anywhere}
+.usage{display:grid;gap:var(--sp-3);margin-bottom:var(--sp-3);padding-top:var(--sp-3);border-top:1px solid var(--line)}
+.usage-head{font-size:var(--fs-11);letter-spacing:1.3px;text-transform:uppercase;color:var(--text-3);font-weight:650}
+.fill.full{background:var(--warn)}
+
+/* ------------------------------------------------------------------ signed in / signed out */
+body[data-auth=pending] .app-only,body[data-auth=out] .app-only,body:not([data-auth=out]) .out-only{display:none!important}
+body:not([data-auth=in]){--header-h:64px}
+.landing-wrap{min-height:calc(100vh - var(--header-h));background:radial-gradient(1200px 420px at 40% -120px,#d6ff700a,transparent 70%)}
+.landing{max-width:1180px;margin:0 auto;padding:var(--sp-8) clamp(var(--sp-4),4vw,var(--sp-9)) var(--sp-9);display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:var(--sp-8);align-items:center}
+.landing .hero{padding:0}
+.landing .lead{margin-bottom:var(--sp-6)}
+.landing .fine{max-width:52ch;margin-top:var(--sp-5)}
+.btn-lg{min-height:44px;padding:0 var(--sp-5);font-size:var(--fs-14)}
+.demo{border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden;background:#000;aspect-ratio:16/9;box-shadow:var(--shadow-pop)}
+.demo video{display:block;width:100%;height:100%;object-fit:contain}
+@media (max-width:900px){.landing{grid-template-columns:minmax(0,1fr);gap:var(--sp-7);padding:var(--sp-6) var(--sp-4) var(--sp-8)}}
 
 /* ------------------------------------------------------------------ shell */
 .shell{display:grid;grid-template-columns:minmax(0,1fr) var(--sidebar-w);min-height:calc(100vh - var(--header-h))}
@@ -217,7 +234,8 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 
 .source-line p{font-size:var(--fs-12);color:var(--text-3);line-height:1.5}
 .source-actions{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-2);margin-top:var(--sp-2)}
 .source-actions .btn-primary{grid-column:1/-1}
-.source-actions .btn-sm:only-of-type{grid-column:1/-1}
+.source-actions .btn-sm:only-of-type,.source-actions:has(#drive-toggle[hidden]) #upload-pick{grid-column:1/-1}
+.source-note{margin-top:var(--sp-3)}
 .fine{font-size:var(--fs-11);color:var(--text-3);line-height:1.6;margin-top:var(--sp-3)}
 .subpanel{margin-top:var(--sp-3);padding-top:var(--sp-3);border-top:1px solid var(--line);display:grid;gap:var(--sp-3)}
 .field{display:grid;gap:6px;min-width:0}
@@ -388,8 +406,8 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 
 }
 </style>
 </head>
-<body>
-<a class="skip-link" href="#main">Skip to content</a>
+<body data-auth="pending">
+<a class="skip-link app-only" href="#main">Skip to content</a>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
   <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
@@ -408,11 +426,12 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 
   <symbol id="i-retry" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15.5-6.3L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.5 6.3L3 16M3 21v-5h5"/></symbol>
   <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></symbol>
   <symbol id="i-skip" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4h6v3"/></symbol>
 </svg>
 
 <header class="app-header">
   <a class="brand" href="/" aria-label="Spotted home"><span class="mark" aria-hidden="true"></span>spotted<span class="brand-tag">Video search</span></a>
-  <form class="search" id="search-form" role="search" aria-label="Search your footage">
+  <form class="search app-only" id="search-form" role="search" aria-label="Search your footage">
     <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
     <label for="search-input" class="sr-only">Describe a scene, an object or something said</label>
     <input id="search-input" type="search" placeholder="Describe a moment, e.g. “crocodile entering the water”" autocomplete="off" enterkeyhint="search" maxlength="500" aria-describedby="search-hint">
@@ -422,22 +441,37 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 
     <button class="btn btn-primary" id="search-button" type="submit" aria-label="Search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><span class="btn-label">Search</span></button>
   </form>
   <div class="header-right">
-    <span class="live" id="live" data-state="connecting" role="status" title="Connecting"><span class="dot" aria-hidden="true"></span><span class="live-text" id="live-text">Connecting…</span></span>
-    <button class="btn btn-ghost library-toggle" id="library-toggle" type="button" aria-controls="sidebar" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-library"/></svg><span class="lt-label">Library</span><span class="count-pill" id="library-count">–</span><span class="busy-dot" id="library-busy" hidden></span></button>
-    <div class="account" id="account">
+    <a class="btn btn-primary btn-sm out-only" href="/auth/login?next=/">Sign in</a>
+    <span class="live app-only" id="live" data-state="connecting" role="status" title="Connecting"><span class="dot" aria-hidden="true"></span><span class="live-text" id="live-text">Connecting…</span></span>
+    <button class="btn btn-ghost library-toggle app-only" id="library-toggle" type="button" aria-controls="sidebar" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-library"/></svg><span class="lt-label">Library</span><span class="count-pill" id="library-count">–</span><span class="busy-dot" id="library-busy" hidden></span></button>
+    <div class="account app-only" id="account">
       <button class="account-chip" id="account-button" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="account-menu" aria-label="Account">
         <span class="avatar pending" id="account-avatar" aria-hidden="true"></span><span class="account-name truncate" id="account-name">Signing in…</span><span class="caret" aria-hidden="true"></span>
       </button>
       <div class="popover" id="account-menu" role="group" aria-label="Account details" tabindex="-1" hidden>
         <div class="account-head"><span class="avatar large pending" id="menu-avatar" aria-hidden="true"></span><div class="account-id"><strong id="menu-name">Signing in…</strong><span id="menu-email"></span></div></div>
-        <dl class="facts"><div><dt>Access</dt><dd id="menu-access">Checking…</dd></div><div><dt>Google</dt><dd id="menu-google">Checking…</dd></div><div><dt>Updates</dt><dd id="menu-live">Connecting…</dd></div></dl>
-        <a class="btn btn-block btn-danger" id="account-signout" href="/cdn-cgi/access/logout" hidden>Sign out</a>
+        <dl class="facts"><div><dt>Account</dt><dd id="menu-access">Checking…</dd></div><div><dt>Photos</dt><dd id="menu-google">Checking…</dd></div><div><dt>Updates</dt><dd id="menu-live">Connecting…</dd></div></dl>
+        <div class="usage" id="menu-usage" hidden></div>
+        <button class="btn btn-block btn-danger" id="account-signout" type="button">Sign out</button>
       </div>
     </div>
   </div>
 </header>
 
-<div class="shell">
+<div class="landing-wrap out-only">
+  <section class="landing" id="landing" aria-labelledby="landing-title">
+    <div class="hero">
+      <div class="eyebrow">See beyond the footage</div>
+      <h1 id="landing-title">Every frame.<br><em>Within reach.</em></h1>
+      <p class="lead">Search your own videos by what happens in them: a scene, an object, or something said.</p>
+      <a class="btn btn-primary btn-lg" href="/auth/login?next=/">Sign in with Google</a>
+      <p class="fine">Guests get 20 videos, 500 MB and 30 searches a day. Videos are processed by Google Gemini and Cloudflare Workers AI. <a href="/privacy">Privacy policy</a></p>
+    </div>
+    <div class="demo"><video poster="https://haciensus.com/works/assets/media/spotted-use.jpg" src="https://haciensus.com/works/assets/media/spotted-demo.mp4" controls muted playsinline preload="metadata" aria-label="Spotted demo: searching videos by what happens in them"></video></div>
+  </section>
+</div>
+
+<div class="shell app-only">
   <main class="main" id="main" tabindex="-1">
     <div class="main-inner">
       <p class="sr-only" id="search-status" role="status" aria-live="polite"></p>
@@ -451,7 +485,7 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 
         </div>
       </section>
       <section id="results" aria-labelledby="results-title" hidden></section>
-      <p class="disclaimer">Answers, titles and tags are generated from the video. Check them against the frame before relying on them.</p>
+      <p class="disclaimer">Answers, titles and tags are generated from the video. Check them against the frame before relying on them. <a href="/privacy">Privacy</a></p>
     </div>
   </main>
 
@@ -460,13 +494,14 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 
     <div class="sidebar-inner">
       <section class="panel panel-pad" aria-labelledby="sources-title">
         <div class="section-head"><h2 id="sources-title">Add videos</h2></div>
-        <div class="source-line"><span class="source-icon" aria-hidden="true"><svg class="icon"><use href="#i-photos"/></svg></span><div><strong>Google Photos &amp; Drive</strong><p id="google-state">Checking the Google connection…</p></div></div>
+        <div class="source-line"><span class="source-icon" aria-hidden="true"><svg class="icon"><use href="#i-photos"/></svg></span><div><strong id="source-title">Google Photos</strong><p id="google-state">Checking the Google connection…</p></div></div>
         <div class="source-actions">
           <button class="btn btn-primary" id="google-connect" type="button" hidden>Connect Google</button>
           <button class="btn btn-primary" id="photos-import" type="button" hidden><svg class="icon" aria-hidden="true"><use href="#i-photos"/></svg>Import from Google Photos</button>
           <button class="btn btn-sm" id="upload-pick" type="button"><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg>Upload file</button>
           <button class="btn btn-sm" id="drive-toggle" type="button" aria-expanded="false" aria-controls="drive-form" hidden><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg><span class="truncate" id="drive-toggle-label">Drive folder</span></button>
         </div>
+        <p class="callout warn source-note" id="limit-note" role="status" hidden></p>
         <form class="subpanel" id="upload-form" hidden aria-label="Upload a video">
           <input id="file" class="sr-only" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" aria-label="Choose a video file" tabindex="-1">
           <div class="file-pick"><svg class="icon" aria-hidden="true"><use href="#i-film"/></svg><span class="truncate" id="file-name">No file chosen</span><span class="meta" id="file-size"></span></div>
@@ -479,7 +514,7 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 
           <p class="meta" id="drive-state"></p>
           <div class="row-actions"><button class="btn btn-sm" type="submit">Save folder</button></div>
         </form>
-        <p class="fine">MP4 or MOV. Videos over 100 MB or 10 minutes are skipped. Originals are kept 7 days. Up to 10 uploads and 100 searches a day.</p>
+        <p class="fine" id="source-fine">MP4 or MOV. Videos over 100 MB or 10 minutes are skipped. Originals are kept 7 days.</p>
       </section>
       <section class="import" id="import-status" aria-label="Google Photos import" aria-live="polite" hidden></section>
       <section aria-labelledby="library-title">
@@ -511,7 +546,8 @@ const $ = (id) => document.getElementById(id);
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const drawerMode = matchMedia('(max-width: 1023px)');
 let jobs = [], loaded = false, loadError = null, selectedId = null, filter = 'all', textFilter = '', refreshing = false, detailSignature = '', historySignature = '',
-  uploading = false, queryVersion = 0, refreshSequence = 0, selectedSearchJob = null, pendingConfirmation = null, google = null;
+  uploading = false, queryVersion = 0, refreshSequence = 0, selectedSearchJob = null, pendingConfirmation = null, google = null,
+  authed = false, account = null, refreshTimer = null; // account: the last GET /me while signed in
 const ACTIVE = ['uploading', 'pending', 'processing'];
 const LIST_LIMIT = 100; // the API's maximum page; search always covers the whole library
 const LABELS = { uploading: 'Uploading', pending: 'Queued', processing: 'Processing', completed: 'Ready', failed: 'Failed', skipped: 'Skipped', archived: 'Archived' };
@@ -540,8 +576,8 @@ function timeEl(value) { const t = el('time', '', relTime(value)); t.dateTime = 
 function refreshRelTimes() { for (const t of document.querySelectorAll('time[data-rel]')) { const v = relTime(t.dataset.rel); if (t.textContent !== v) t.textContent = v } }
 const mb = (n) => (n / 1e6).toFixed(n < 1e7 ? 1 : 0) + ' MB';
 const durationOf = (j) => j.duration_seconds ?? j.result?.duration_seconds ?? null;
-const storageGet = (k) => { try { return JSON.parse(localStorage.getItem(k) || 'null') } catch { return null } };
-const storageSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)) } catch {} };
+/** Quota sizes: "0 MB", "52 MB", "1.5 GB" (decimal, like mb()). */
+const size = (n) => n >= 1e9 ? (n / 1e9).toFixed(n % 1e9 ? 1 : 0) + ' GB' : Math.round(n / 1e6) + ' MB';
 const scrollBehavior = () => reduceMotion.matches ? 'auto' : 'smooth';
 
 /* ------------------------------------------------------------------ titles
@@ -635,9 +671,13 @@ function titleOf(j) {
 }
 
 /* ------------------------------------------------------------------ requests */
-const SESSION_EXPIRED = 'Your sign-in has expired. Reload the page to sign in again.';
+const SESSION_EXPIRED = 'Your sign-in has expired. Sign in again to continue.';
+const LOGIN_URL = '/auth/login?next=/';
 class ApiError extends Error { constructor(message, kind, status) { super(message); this.kind = kind; this.status = status } }
+/** Signed out, only GET /me goes to the network; a 401 from any other route switches to the signed-out screen.
+    Quota errors (429, or 413 for size) carry the server's own sentence in detail. */
 async function request(path, options) {
+  if (!authed && path !== '/me') throw new ApiError(SESSION_EXPIRED, 'auth', 401);
   let r;
   try { r = await fetch(path, { credentials: 'same-origin', ...options }) } catch (e) {
     const timeout = e?.name === 'TimeoutError';
@@ -645,11 +685,12 @@ async function request(path, options) {
   }
   const type = r.headers.get('content-type') || '';
   if (r.redirected && !type.includes('json')) throw new ApiError(SESSION_EXPIRED, 'auth', r.status);
+  if (r.status === 401) { if (path !== '/me') signedOut(); throw new ApiError(SESSION_EXPIRED, 'auth', 401) }
   if (!r.ok) {
     let message = 'Request failed (' + r.status + ').';
     if (type.includes('json')) { try { const b = await r.json(); message = typeof b.detail === 'string' ? b.detail : Array.isArray(b.detail) ? b.detail.map((d) => d.msg || JSON.stringify(d)).join('; ') : JSON.stringify(b.detail || b) } catch {} }
     else if (r.status === 401 || r.status === 403) throw new ApiError(SESSION_EXPIRED, 'auth', r.status);
-    throw new ApiError(message, r.status === 429 ? 'quota' : 'server', r.status);
+    throw new ApiError(message, r.status === 429 || r.status === 413 ? 'quota' : 'server', r.status);
   }
   if (!type.includes('json')) throw new ApiError(SESSION_EXPIRED, 'auth', r.status);
   return r.json();
@@ -772,7 +813,7 @@ function libraryError(e, inline) {
   const box = el('div', inline ? 'callout warn' : 'empty');
   box.append(el('span', '', e.kind === 'auth' ? SESSION_EXPIRED : inline ? 'Updates paused: ' + e.message + ' Showing the last loaded list.' : 'Couldn’t load your videos. ' + e.message));
   const b = button(e.kind === 'auth' ? 'Sign in again' : 'Retry now', 'btn btn-sm', e.kind === 'auth' ? 'lock' : 'retry');
-  b.onclick = () => e.kind === 'auth' ? location.reload() : refresh(true);
+  b.onclick = () => e.kind === 'auth' ? location.assign(LOGIN_URL) : refresh(true);
   box.append(b); return box;
 }
 
@@ -801,7 +842,7 @@ function renderHome() {
   const live = jobs.filter((j) => !j.archived_at), ready = live.filter((j) => j.status === 'completed');
   const firstRun = live.length === 0;
   const fromLibrary = librarySuggestions(); const sugg = fromLibrary.length ? fromLibrary : FALLBACK_SUGGESTIONS;
-  const sig = JSON.stringify([firstRun, sugg, google?.connection, google?.configured, ready.length]);
+  const sig = JSON.stringify([firstRun, sugg, google?.connection, google?.configured, google?.drive_available, ready.length]);
   if (renderHome.sig === sig) return; renderHome.sig = sig;
   $('hero-lead').textContent = firstRun ? 'Add a few videos, then describe what you remember. Spotted finds the moment, shows the frame and answers with citations.'
     : ready.length ? (ready.length === 1 ? 'Search your video by what happens in it' : 'Search ' + ready.length + ' videos by what happens in them') + ': a scene, an object or something said. Every answer cites the frame it came from.'
@@ -819,7 +860,7 @@ function renderHome() {
   else if (!configured) a1 = el('span', 'meta', 'Not set up on this server yet');
   else if (connected) { a1 = button('Import from Google Photos', 'btn btn-primary', 'photos'); a1.onclick = () => $('photos-import').click() }
   else { a1 = button(google.connection === 'reconnect_needed' ? 'Reconnect Google' : 'Connect Google', 'btn btn-primary'); a1.onclick = () => { location.href = '/oauth/google/start' } }
-  step(1, connected ? 'Import from Google Photos' : 'Connect Google Photos', connected ? 'Pick videos in the Google Photos window. Each one is copied, analysed and indexed.' : 'Give read-only access, then pick videos in Photos or watch a Drive folder.', a1);
+  step(1, connected ? 'Import from Google Photos' : 'Connect Google Photos', connected ? 'Pick videos in the Google Photos window. Each one is copied, analysed and indexed.' : google?.drive_available ? 'Give read-only access, then pick videos in Photos or watch a Drive folder.' : 'Give read-only access, then pick the videos you want in Google Photos.', a1);
   const a2 = button('Upload a file', configured ? 'btn' : 'btn btn-primary', 'upload'); a2.onclick = () => pickFile();
   step(2, 'Or upload a file', 'MP4 or MOV under 100 MB and 10 minutes. Analysis takes about a minute.', a2);
   step(3, 'Search in plain words', 'Ask for “the goal celebration” or “an ambulance”. You get the frame, the time and a cited answer.', null);
@@ -854,8 +895,8 @@ function stateBox(kind, iconName, title, text, actions = [], chips = []) {
 function untilMidnightUtc() { const n = new Date(); const m = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate() + 1); const left = m - n; const h = Math.floor(left / 3600000), min = Math.ceil(left % 3600000 / 60000); return h ? h + ' h ' + min + ' min' : min + ' min' }
 function searchError(query, e) {
   const retry = (cls = 'btn btn-primary') => { const b = button('Try again', cls, 'retry'); b.onclick = () => naturalSearch(query); return b };
-  if (e.kind === 'auth') { const b = button('Sign in again', 'btn btn-primary', 'lock'); b.onclick = () => location.reload(); return stateBox('error', 'lock', 'Your sign-in has expired', 'Cloudflare Access ended your session. Sign in again; your library is unchanged.', [b]) }
-  if (e.kind === 'quota') return stateBox('quota', 'clock', 'Daily search limit reached', e.message + (/midnight/i.test(e.message) ? ' That is in ' + untilMidnightUtc() + '.' : ' The limit resets at midnight UTC, in ' + untilMidnightUtc() + '.'), [retry('btn')]);
+  if (e.kind === 'auth') { const b = button('Sign in again', 'btn btn-primary', 'lock'); b.onclick = () => location.assign(LOGIN_URL); return stateBox('error', 'lock', 'Your sign-in has expired', 'Your session ended. Sign in again with Google; your library is unchanged.', [b]) }
+  if (e.kind === 'quota') return stateBox('quota', 'clock', 'You’ve used today’s searches', e.message + (/midnight/i.test(e.message) ? ' That is in ' + untilMidnightUtc() + '.' : ' Your searches reset at midnight UTC, in ' + untilMidnightUtc() + '.'), [retry('btn')]);
   if (e.kind === 'network') return stateBox('error', 'wifi', 'Can’t reach Spotted', 'Check your connection, then try again.', [retry()]);
   if (e.kind === 'timeout') return stateBox('error', 'clock', 'Search took too long', 'The server didn’t answer within a minute. Try again in a moment.', [retry()]);
   return stateBox('error', 'alert', 'Search failed', e.message, [retry()]);
@@ -898,7 +939,7 @@ async function naturalSearch(query) {
     if (version !== queryVersion) return;
     const r = $('results'); r.removeAttribute('aria-busy'); r.replaceChildren(resultsHeader(query, [e.kind === 'quota' ? 'Limit reached' : 'Not answered']), searchError(query, e));
     setSearchStatus('Search failed. ' + e.message);
-  } finally { if (version === queryVersion) $('search-button').disabled = false }
+  } finally { if (version === queryVersion) $('search-button').disabled = false; if (account?.limits) loadMe() }
 }
 /** The answer, with [n] and [1, 2] citations as buttons that scroll to and highlight card n. */
 function renderAnswer(node, text, items) {
@@ -1084,6 +1125,7 @@ function renderDetail() {
   const right = el('div', 'row-actions');
   if (j.download_url) { const a = el('a', 'btn btn-sm btn-ghost download'); a.href = j.download_url; a.target = '_blank'; a.rel = 'noopener'; a.title = 'Signed link, valid for up to a day'; a.append(icon('ext'), document.createTextNode('Open original')); right.append(a) }
   const archive = button(j.archived_at ? 'Restore' : 'Archive', 'btn btn-sm', j.archived_at ? 'retry' : 'archive'); archive.onclick = () => changeArchive(j, archive); right.append(archive);
+  const del = button('Delete', 'btn btn-sm btn-danger', 'trash'); del.setAttribute('aria-label', 'Delete ' + title + ' permanently'); del.onclick = () => deleteVideo(j, del); right.append(del);
   foot.append(right);
 }
 /** There is no retry endpoint; offer the way back in instead (pick again in Photos, or upload again). */
@@ -1102,6 +1144,17 @@ async function changeArchive(job, btn) {
     await refresh(true);
   } catch (e) { notice('Could not update the video: ' + e.message, { error: true }) } finally { btn.disabled = false }
 }
+/** DELETE /videos/:id removes the video, its frames and text for good (and frees guest quota). */
+async function deleteVideo(job, btn) {
+  if (!confirm('Delete “' + titleOf(job) + '” permanently? Its frames, transcript and tags are removed too. This can’t be undone.')) return;
+  btn.disabled = true;
+  try {
+    await request('/videos/' + encodeURIComponent(job.id), { method: 'DELETE' });
+    jobs = jobs.filter((item) => item.id !== job.id); const s = sockets.get(job.id); if (s) { s.stop(); sockets.delete(job.id) }
+    if (selectedId === job.id) closeDetail();
+    historySignature = ''; renderHistory(); notice('Video deleted.'); loadMe();
+  } catch (e) { notice('Could not delete the video: ' + e.message, { error: true }) } finally { btn.disabled = false }
+}
 async function openRelated(id, btn) {
   if (!id) return; btn.disabled = true;
   try { let related = jobs.find((j) => j.id === id); if (!related) { related = await request('/videos/' + encodeURIComponent(id)); jobs.push(related) } openVideo(related.id, null, sheetReturnFocus) }
@@ -1110,7 +1163,7 @@ async function openRelated(id, btn) {
 
 /* ------------------------------------------------------------------ data */
 async function refresh(force = false) {
-  if (refreshing && !force) return; refreshing = true; const sequence = ++refreshSequence;
+  if (!authed || (refreshing && !force)) return; refreshing = true; const sequence = ++refreshSequence;
   try {
     const data = await request('/videos?limit=' + LIST_LIMIT + '&offset=0&include_archived=true');
     if (sequence !== refreshSequence) return;
@@ -1126,7 +1179,7 @@ async function refresh(force = false) {
 }
 
 /* ------------------------------------------------------------------ upload */
-function pickFile() { if (drawerMode.matches) openDrawer(); $('file').click() }
+function pickFile() { if (atVideoLimit()) { notice(limitText(), { error: true }); return } if (drawerMode.matches) openDrawer(); $('file').click() }
 $('upload-pick').onclick = () => $('file').click();
 $('file').addEventListener('change', () => {
   const file = $('file').files[0]; if (!file) return;
@@ -1134,7 +1187,7 @@ $('file').addEventListener('change', () => {
   $('display-name').value = '';
   const tooBig = file.size >= 100e6;
   if (tooBig) notice('“' + file.name + '” is ' + mb(file.size) + '. Videos over 100 MB are skipped; choose a smaller file.', { error: true });
-  $('upload-button').disabled = tooBig || uploading || Boolean(pendingConfirmation);
+  $('upload-button').disabled = tooBig || uploading || Boolean(pendingConfirmation) || atVideoLimit();
   if (drawerMode.matches) openDrawer();
   $('display-name').focus();
 });
@@ -1158,7 +1211,7 @@ async function confirmUpload() {
   pendingConfirmation = null; $('retry-confirmation').hidden = true; showUploadJob(job);
   $('upload-form').reset(); $('upload-form').hidden = true;
   notice('Uploaded. Analysis continues in the background.', { action: { label: 'View', run: () => openVideo(job.id, null) } });
-  await refresh(true);
+  loadMe(); await refresh(true);
 }
 function uploadProgress(file, fraction) {
   const pct = Math.round(fraction * 100); $('upload-progress').hidden = false;
@@ -1168,7 +1221,7 @@ function uploadProgress(file, fraction) {
 function setUploadBusy(busy) {
   if (!busy) { $('upload-progress').hidden = true; $('upload-progress-fill').style.width = '0%' }
   uploading = busy; const blocked = busy || Boolean(pendingConfirmation);
-  $('upload-button').disabled = blocked; $('upload-cancel').disabled = busy; $('display-name').disabled = blocked; $('upload-pick').disabled = blocked; $('retry-confirmation').disabled = busy;
+  $('upload-button').disabled = blocked; $('upload-cancel').disabled = busy; $('display-name').disabled = blocked; $('upload-pick').disabled = blocked || atVideoLimit(); $('retry-confirmation').disabled = busy;
   $('upload-button').textContent = busy ? 'Uploading…' : 'Upload';
 }
 $('upload-form').addEventListener('submit', async (e) => {
@@ -1182,7 +1235,7 @@ $('upload-form').addEventListener('submit', async (e) => {
     else { $('upload-form').reset(); $('upload-form').hidden = true; notice('This upload was already received.') }
   } catch (err) {
     if (pendingConfirmation) { notice('Your video is uploaded, but starting the analysis did not finish. Retry confirmation; there is no need to upload again.', { error: true, sticky: true }); $('retry-confirmation').hidden = false }
-    else notice('Upload failed: ' + err.message, { error: true });
+    else { notice(err.kind === 'quota' ? err.message : 'Upload failed: ' + err.message, { error: true }); if (err.kind === 'quota') loadMe() }
   } finally { setUploadBusy(false) }
 });
 $('retry-confirmation').onclick = async () => {
@@ -1199,7 +1252,7 @@ $('lib-filter').addEventListener('input', (e) => { textFilter = e.target.value; 
    and the server replays what it missed. Reconnects back off exponentially; after 6 failures the
    UI falls back to 3 s polling. "ping" every 30 s is answered "pong" by the runtime. */
 let polling = !('WebSocket' in window), pollTimer = null; const sockets = new Map();
-function startPolling() { polling = true; for (const s of sockets.values()) s.stop(); sockets.clear(); if (!pollTimer) pollTimer = setInterval(() => refresh(), 3000); setConnection('polling', 'Connected · updates every 3 s') }
+function startPolling() { if (!authed) return; polling = true; for (const s of sockets.values()) s.stop(); sockets.clear(); if (!pollTimer) pollTimer = setInterval(() => refresh(), 3000); setConnection('polling', 'Connected · updates every 3 s') }
 function liveUpdate(m) {
   if (m.type !== 'event') return; const data = m.data || {};
   jobs = jobs.map((j) => j.id === data.id ? { ...j, ...data } : j); renderHistory(); renderDetail();
@@ -1216,23 +1269,25 @@ function openSocket(id) {
   connect(); return { stop() { stopped = true; clearTimeout(timer); clearInterval(ping); try { ws && ws.close(1000) } catch {} } };
 }
 function syncStreams() {
-  if (polling) return;
+  if (polling || !authed) return;
   const active = new Set(jobs.filter((j) => ACTIVE.includes(j.status) && !j.archived_at).slice(0, 5).map((j) => j.id));
   for (const [id, s] of sockets) if (!active.has(id)) { s.stop(); sockets.delete(id) }
   for (const id of active) if (!sockets.has(id)) sockets.set(id, openSocket(id));
 }
 
-/* ------------------------------------------------------------------ Google sources: connect (OAuth behind Access), Photos picker, Drive folder */
+/* ------------------------------------------------------------------ Google sources: connect (each user's own OAuth, needs a session), Photos picker,
+   Drive folder (owner only: GET /google/status says drive_available; without it nothing about Drive is shown) */
 async function loadGoogle() {
   try {
-    const g = await request('/google/status'); google = g; const connected = g.connection === 'connected';
+    const g = await request('/google/status'); google = g; const connected = g.connection === 'connected', drive = Boolean(g.drive_available);
     $('google-connect').hidden = connected || !g.configured; $('google-connect').textContent = g.connection === 'reconnect_needed' ? 'Reconnect Google' : 'Connect Google';
-    $('photos-import').hidden = !connected; $('drive-toggle').hidden = !connected; if (!connected) $('drive-form').hidden = true;
-    $('menu-google').textContent = !g.configured ? 'Not set up on this server' : g.connection === 'reconnect_needed' ? 'Reconnect needed' : connected ? 'Connected (Photos and Drive)' : 'Not connected';
-    $('google-state').textContent = !g.configured ? 'Google import isn’t set up on this server yet.' : g.connection === 'reconnect_needed' ? (g.error || 'Google access expired. Reconnect to keep importing.') : connected ? 'Connected. Pick videos in Photos, or watch a Drive folder.' : 'Connect to import from Photos or a Drive folder.';
+    $('photos-import').hidden = !connected; $('drive-toggle').hidden = !connected || !drive; if (!connected || !drive) $('drive-form').hidden = true;
+    $('source-title').textContent = drive ? 'Google Photos & Drive' : 'Google Photos';
+    $('menu-google').textContent = !g.configured ? 'Not set up on this server' : g.connection === 'reconnect_needed' ? 'Reconnect needed' : connected ? (drive ? 'Connected (Photos and Drive)' : 'Connected') : 'Not connected';
+    $('google-state').textContent = !g.configured ? 'Google import isn’t set up on this server yet.' : g.connection === 'reconnect_needed' ? (g.error || 'Google access expired. Reconnect to keep importing.') : connected ? (drive ? 'Connected. Pick videos in Photos, or watch a Drive folder.' : 'Connected. Pick the videos you want in Google Photos.') : drive ? 'Connect to import from Photos or a Drive folder.' : 'Connect your Google Photos to import the videos you pick.';
     const m = g.drive_poll_minutes; if (m) $('drive-poll').textContent = 'link or id · checked every ' + (m % 60 === 0 ? (m === 60 ? 'hour' : m / 60 + ' hours') : m + ' min');
-    if (g.drive) { const name = g.drive.folder_name || g.drive.folder_id; $('drive-folder').placeholder = name; $('drive-state').textContent = 'Watching “' + name + '” · ' + (g.drive.error ? 'Error: ' + g.drive.error : g.drive.last_sync_at ? 'last checked ' + relTime(g.drive.last_sync_at) : 'first sync pending'); $('drive-toggle-label').textContent = 'Drive: ' + name }
-    renderHome.sig = ''; renderHome(); detailSignature = ''; renderDetail();
+    if (g.drive && drive) { const name = g.drive.folder_name || g.drive.folder_id; $('drive-folder').placeholder = name; $('drive-state').textContent = 'Watching “' + name + '” · ' + (g.drive.error ? 'Error: ' + g.drive.error : g.drive.last_sync_at ? 'last checked ' + relTime(g.drive.last_sync_at) : 'first sync pending'); $('drive-toggle-label').textContent = 'Drive: ' + name }
+    renderHome.sig = ''; renderHome(); detailSignature = ''; renderDetail(); applyLimits();
   } catch (e) { $('google-state').textContent = 'Google status unavailable: ' + e.message; $('menu-google').textContent = 'Unavailable' }
 }
 $('google-connect').onclick = () => { location.href = '/oauth/google/start' };
@@ -1253,7 +1308,12 @@ function renderImport() {
   if (waiting) { title = 'Waiting for your pick in Google Photos'; sub = 'Choose videos in the Google Photos window, then press Done.' }
   else if (importing) { title = 'Importing your picked videos…'; sub = 'Checking sizes and adding them to your library.' }
   else if (finished) { title = s.status === 'expired' ? 'The Google Photos picker expired' : 'Import failed'; sub = s.status === 'expired' ? 'Nothing was picked in time. Start a new import.' : (s.error || 'Try the import again.') }
-  else { const n = s.imported || 0; title = active ? 'Processing ' + n + ' imported video' + (n === 1 ? '' : 's') : n ? 'Import complete' : 'Nothing new to import'; sub = [n ? done + ' of ' + n + ' ready' : '', s.skipped ? s.skipped + ' skipped (over 100 MB)' : '', !n && !s.skipped ? 'Those videos are already in your library, or none were picked.' : ''].filter(Boolean).join(' · ') }
+  else {
+    // skipped counts both oversized videos (they have skipped jobs) and, for guests, picks beyond the video limit (no job).
+    const n = s.imported || 0, skipped = s.skipped || 0, overLimit = atVideoLimit() ? Math.max(0, skipped - vids.filter((v) => v.status === 'skipped').length) : 0, tooBig = skipped - overLimit;
+    title = active ? 'Processing ' + n + ' imported video' + (n === 1 ? '' : 's') : n ? 'Import complete' : overLimit ? 'Video limit reached' : 'Nothing new to import';
+    sub = [n ? done + ' of ' + n + ' ready' : '', tooBig ? tooBig + ' skipped (over 100 MB)' : '', overLimit ? overLimit + ' not imported: you’ve reached your limit of ' + account.limits.videos.max + ' videos. Delete a video to add more.' : '', !n && !skipped ? 'Those videos are already in your library, or none were picked.' : ''].filter(Boolean).join(' · ');
+  }
   const head = el('div', 'import-head'); head.append(el('strong', '', title));
   if (!waiting && !importing && !active) { const x = el('button', 'link-btn', 'Dismiss'); x.type = 'button'; x.setAttribute('aria-label', 'Dismiss import status'); x.onclick = () => { importDismissed = s.id; renderImport() }; head.append(x) }
   box.append(head);
@@ -1271,16 +1331,17 @@ async function pollImport() {
     const r = await request('/photos/sessions/' + encodeURIComponent(importSession.id)); const was = importSession.status; importSession = r;
     if (r.video_ids.length && r.video_ids.some((id) => !jobs.some((j) => j.id === id))) await refresh(true);
     renderImport();
-    if (was !== r.status && !['waiting', 'importing'].includes(r.status)) { $('photos-import').disabled = false; loadGoogle() }
+    if (was !== r.status && !['waiting', 'importing'].includes(r.status)) { applyLimits(); loadGoogle(); await loadMe(); importSignature = ''; renderImport() }
   } catch (e) { if (e.kind === 'auth') { renderImport(); return } }
   if (importSession && ['waiting', 'importing'].includes(importSession.status)) importTimer = setTimeout(pollImport, 3000);
 }
-function trackImport(session) { importSession = session; importDismissed = null; importSignature = ''; renderImport(); $('photos-import').disabled = ['waiting', 'importing'].includes(session.status); if ($('photos-import').disabled) pollImport() }
+function importBusy() { return Boolean(importSession && ['waiting', 'importing'].includes(importSession.status)) }
+function trackImport(session) { importSession = session; importDismissed = null; importSignature = ''; renderImport(); applyLimits(); if (importBusy()) pollImport() }
 async function resumeImport() { try { const s = await request('/photos/sessions/latest'); if (!s) return; const recent = Date.now() - Date.parse(s.updated_at) < 30 * 60000; if (['waiting', 'importing'].includes(s.status) || recent || s.video_ids.some((id) => { const j = jobs.find((x) => x.id === id); return !j || ACTIVE.includes(j.status) })) trackImport(s) } catch {} }
 $('photos-import').onclick = async () => {
   const btn = $('photos-import'); btn.disabled = true; const win = window.open('about:blank', 'spotted-photos-picker', 'width=980,height=760');
   try { const s = await request('/photos/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); if (win) win.location.href = s.picker_uri; else window.open(s.picker_uri, '_blank', 'noopener'); trackImport({ ...s, imported: 0, skipped: 0, video_ids: [], updated_at: new Date().toISOString() }); if (drawerMode.matches) openDrawer() }
-  catch (e) { if (win) win.close(); btn.disabled = false; notice('Could not open Google Photos: ' + e.message, { error: true }) }
+  catch (e) { if (win) win.close(); applyLimits(); notice(e.kind === 'quota' ? e.message : 'Could not open Google Photos: ' + e.message, { error: true }); if (e.kind === 'quota') loadMe() }
 };
 $('drive-form').addEventListener('submit', async (e) => {
   e.preventDefault(); const folder = $('drive-folder').value.trim(); if (!folder) { $('drive-folder').focus(); return }
@@ -1290,45 +1351,68 @@ $('drive-form').addEventListener('submit', async (e) => {
 { const p = new URLSearchParams(location.search).get('google'); if (p) { const msg = { connected: 'Google connected.', denied: 'Google access was not granted.', expired: 'The Google sign-in took too long. Try again.', error: 'Google sign-in failed. Try again.' }[p]; if (msg) notice(msg, { error: p !== 'connected' }); history.replaceState(null, '', '/') } }
 
 /* ------------------------------------------------------------------ account
-   GET /me reads the Cloudflare Access identity on the server; the display name, if Access has one,
-   comes from /cdn-cgi/access/get-identity. Initials: from the name when known (first and last word),
-   otherwise only the first letter of the email's local part. The chip waits briefly for the name
-   before its first paint, and the last name seen for this email is cached (localStorage), so a
-   reload shows the same initials at once; a name that arrives later updates the chip in place.
-   Without Access (wrangler dev) it shows "Local dev". */
+   GET /me (always 200) says whether there is a session: {signed_in, user:{email, name, picture, role}, limits}.
+   limits is null for the owner (unlimited); guests get used/max for videos, bytes and today's searches.
+   The chip shows the Google picture once it loads, else initials: from the name when known (first and
+   last word), otherwise the first letter of the email's local part. */
 function initials(name, email) {
   const n = (name || '').trim();
   if (n) { const parts = n.split(/\s+/).filter(Boolean); return ((parts[0]?.[0] || '') + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase() || '?' }
   return ((email || '').split('@')[0]?.[0] || '?').toUpperCase();
 }
-let shownIdentity = null;
+/** Initials at once; the picture replaces them only after it loads (a broken image never shows). */
+function setAvatar(a, ini, picture) {
+  a.classList.remove('pending'); if (picture && a.querySelector('img')?.getAttribute('src') === picture) return;
+  a.textContent = ini; a.classList.remove('has-img'); if (!picture) return;
+  const img = el('img'); img.alt = ''; img.referrerPolicy = 'no-referrer'; img.decoding = 'async'; img.onload = () => { a.replaceChildren(img); a.classList.add('has-img') }; img.src = picture;
+}
+/** [text, {used, max}] for each limit the server sent: "3 of 20 videos", "52 MB of 500 MB", "4 of 30 searches today". */
+function usageLines(l) {
+  const q = (x) => x && Number.isFinite(Number(x.max)) ? { used: Number(x.used) || 0, max: Number(x.max) } : null;
+  const v = q(l?.videos), b = q(l?.bytes), s = q(l?.searches_today);
+  return [v && [v.used + ' of ' + v.max + ' videos', v], b && [size(b.used) + ' of ' + size(b.max), b], s && [s.used + ' of ' + s.max + ' searches today', s]].filter(Boolean);
+}
+function atVideoLimit() { const v = account?.limits?.videos; return Boolean(v && Number.isFinite(Number(v.max)) && Number(v.used) >= Number(v.max)) }
+function limitText() { return 'You’ve reached your limit of ' + account.limits.videos.max + ' videos. Delete a video to add more.' }
+/** Upload and Import are off at the video limit (Import also while a pick is in progress). */
+function applyLimits() {
+  const full = atVideoLimit(), l = account?.limits;
+  $('upload-pick').disabled = full || uploading || Boolean(pendingConfirmation); $('photos-import').disabled = full || importBusy();
+  $('limit-note').hidden = !full; $('limit-note').textContent = full ? limitText() : '';
+  const max = usageLines(l).map(([, x], i) => i === 0 ? x.max + ' videos' : i === 1 ? size(x.max) : x.max + ' searches a day');
+  $('source-fine').textContent = 'MP4 or MOV. Videos over 100 MB or 10 minutes are skipped. Originals are kept 7 days.' + (max.length ? ' Guest accounts get ' + max.join(', ').replace(/, ([^,]*)$/, ' and $1') + '.' : '');
+}
 function showAccount(me) {
-  const local = !me.email; const name = me.name || (local ? 'Local dev' : me.email); const ini = local ? 'LD' : initials(me.name, me.email);
-  const key = JSON.stringify([me.email, me.name || null]); if (shownIdentity === key) return; shownIdentity = key;
-  for (const id of ['account-avatar', 'menu-avatar']) { const a = $(id); a.textContent = ini; a.classList.remove('pending'); a.classList.toggle('local', local) }
-  $('account-name').textContent = name; $('account-button').title = local ? 'Not behind Cloudflare Access' : (me.name ? me.name + ' · ' : '') + me.email; $('account-button').setAttribute('aria-label', 'Account: ' + name);
-  $('menu-name').textContent = name; $('menu-email').textContent = local ? 'No Cloudflare Access identity on this server' : me.email; $('menu-email').hidden = Boolean(me.email && !me.name);
-  $('menu-access').textContent = local ? 'Not signed in (local development)' : 'Signed in with Google via Cloudflare Access'; $('account-signout').hidden = local; if (me.logout_url) $('account-signout').href = me.logout_url;
+  const u = me.user || {}; const name = u.name || u.email || 'Account'; const lines = usageLines(me.limits);
+  for (const id of ['account-avatar', 'menu-avatar']) setAvatar($(id), initials(u.name, u.email), u.picture);
+  $('account-name').textContent = name; $('account-button').title = [u.name, u.email].filter(Boolean).join(' · ') + (lines.length ? '\n' + lines.map((x) => x[0]).join(' · ') : ''); $('account-button').setAttribute('aria-label', 'Account: ' + name);
+  $('menu-name').textContent = name; $('menu-email').textContent = u.email || ''; $('menu-email').hidden = !u.name;
+  $('menu-access').textContent = 'Signed in with Google';
+  const box = $('menu-usage'); box.hidden = !me.limits || !lines.length; box.replaceChildren();
+  if (!box.hidden) { box.append(el('p', 'usage-head', 'Your usage')); for (const [text, x] of lines) { const p = progressBar(text, x.max ? Math.min(100, x.used / x.max * 100) : 100, 'Used ' + text); if (x.used >= x.max) p.querySelector('.fill').classList.add('full'); box.append(p) } }
+  applyLimits();
 }
+/** Re-read /me (after uploads, imports, deletes and searches) to refresh usage and the upload limit. */
 async function loadMe() {
-  try {
-    const me = await request('/me');
-    if (!me.email) { showAccount(me); return }
-    const cached = storageGet('spotted.identity');
-    const cachedName = cached?.email === me.email && typeof cached.name === 'string' && cached.name.trim() ? cached.name.trim() : null;
-    const identity = fetch('/cdn-cgi/access/get-identity', { credentials: 'same-origin', signal: AbortSignal.timeout(4000) })
-      .then((r) => r.ok && (r.headers.get('content-type') || '').includes('json') ? r.json() : null).catch(() => null);
-    const nameOf = (id) => id && id.email === me.email && typeof id.name === 'string' && id.name.trim() ? id.name.trim() : null;
-    let name = cachedName;
-    if (!name) name = nameOf(await Promise.race([identity, new Promise((r) => setTimeout(() => r(null), 800))]));
-    showAccount({ ...me, name });
-    const fresh = nameOf(await identity);
-    if (fresh) { storageSet('spotted.identity', { email: me.email, name: fresh }); if (fresh !== name) showAccount({ ...me, name: fresh }) }
-  } catch (e) { showAccount({ email: null }); $('account-name').textContent = e.kind === 'auth' ? 'Signed out' : 'Account'; $('menu-name').textContent = e.kind === 'auth' ? 'Signed out' : 'Account'; $('menu-access').textContent = e.message }
+  try { const me = await request('/me'); if (!me.signed_in) { signedOut(); return null } account = me; showAccount(me); return me } catch { return null }
 }
+/** The signed-out screen: stop every timer and socket so nothing calls the API, and drop the library from memory. */
+function signedOut() {
+  const was = authed; authed = false; account = null; document.body.dataset.auth = 'out';
+  clearInterval(refreshTimer); refreshTimer = null; clearInterval(pollTimer); pollTimer = null; clearTimeout(importTimer); importSession = null;
+  for (const s of sockets.values()) s.stop(); sockets.clear();
+  if (!$('account-menu').hidden) toggleAccount(false); if (!$('sheet').hidden) closeDetail(false); closeDrawer(false);
+  jobs = []; loaded = false; loadError = null; historySignature = ''; showHome();
+  if (was) notice('You’re signed out. Sign in again to see your library.', { action: { label: 'Sign in', run: () => location.assign(LOGIN_URL) } });
+}
+$('account-signout').onclick = async () => {
+  const b = $('account-signout'); b.disabled = true;
+  try { const r = await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' }); if (!r.ok && r.status !== 401) throw Error('the server answered ' + r.status + '.'); location.reload() }
+  catch (e) { b.disabled = false; notice('Could not sign out: ' + (e.message || 'check your connection.'), { error: true }) }
+};
 function toggleAccount(open) {
   const menu = $('account-menu'), btn = $('account-button'); open ??= menu.hidden; menu.hidden = !open; btn.setAttribute('aria-expanded', String(open));
-  if (open) ($('account-signout').hidden ? menu : $('account-signout')).focus();
+  if (open) $('account-signout').focus();
 }
 $('account-button').onclick = () => toggleAccount();
 $('account-menu').addEventListener('focusout', (e) => { if (e.relatedTarget && !$('account').contains(e.relatedTarget)) toggleAccount(false) });
@@ -1368,7 +1452,7 @@ $('search-input').addEventListener('input', () => { $('search-clear').hidden = !
 $('search-clear').onclick = () => { $('search-input').value = ''; showHome(); $('search-input').focus() };
 document.addEventListener('keydown', (e) => {
   const typing = e.target.closest?.('input,textarea,select,[contenteditable=true]');
-  if (e.key === '/' && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); if (!$('sheet').hidden) closeDetail(false); if ($('sidebar').classList.contains('open')) closeDrawer(false); if (!$('account-menu').hidden) toggleAccount(false); $('search-input').focus(); $('search-input').select(); return }
+  if (e.key === '/' && authed && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); if (!$('sheet').hidden) closeDetail(false); if ($('sidebar').classList.contains('open')) closeDrawer(false); if (!$('account-menu').hidden) toggleAccount(false); $('search-input').focus(); $('search-input').select(); return }
   if (e.key === 'Escape') {
     if (!$('account-menu').hidden) { toggleAccount(false); $('account-button').focus(); return }
     if (!$('sheet').hidden && !$('sheet').classList.contains('closing')) { closeDetail(); return }
@@ -1380,11 +1464,19 @@ document.addEventListener('keydown', (e) => {
 
 /* ------------------------------------------------------------------ start */
 { const narrow = matchMedia('(max-width: 900px)'); const setPlaceholder = () => { $('search-input').placeholder = narrow.matches ? 'Search footage' : 'Describe a moment, e.g. “crocodile entering the water”' }; setPlaceholder(); narrow.addEventListener('change', setPlaceholder) }
-renderHistory();
-loadMe();
-loadGoogle();
-refresh().then(resumeImport);
-if (polling) startPolling(); else setInterval(() => refresh(), 60000);
+/** GET /me first; the library, Google status, import and live updates load only with a session. */
+async function boot() {
+  let me;
+  try { me = await request('/me') } catch (e) {
+    if (e.kind === 'auth') { signedOut(); return }
+    notice('Could not reach Spotted. ' + e.message, { error: true, sticky: true, action: { label: 'Retry', run: boot } }); return;
+  }
+  if (!me?.signed_in) { signedOut(); return }
+  authed = true; account = me; document.body.dataset.auth = 'in'; showAccount(me);
+  renderHistory(); loadGoogle(); refresh().then(resumeImport);
+  if (polling) startPolling(); else refreshTimer = setInterval(() => refresh(), 60000);
+}
+boot();
 setInterval(updateProgressClocks, 1000);
 setInterval(refreshRelTimes, 30000);
 </script>

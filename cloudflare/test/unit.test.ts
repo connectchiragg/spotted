@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { byteRange, handle, HttpError, validateUploadIntent } from '../src/api';
+import { exchangeLogin, ownerEmails, safeNext } from '../src/auth';
 import { settings as readSettings } from '../src/env';
 import { changeScores, mad, mp4Duration, selectFrames, spriteTiles, spriteWindows, tileTime } from '../src/frames';
 import { Gemini, validateAnswer, validateDescriptions, validateSummary } from '../src/gemini';
@@ -352,20 +353,43 @@ describe('settings', () => {
   });
 });
 
-describe('routes without a database', () => {
-  it('serves health and reports missing configuration as 503', async () => {
+describe('routes without a session', () => {
+  it('serves health and the signed-out /me, and refuses everything else with 401', async () => {
     const deps = appDeps(null);
     expect(await (await handle(new Request('https://x/health'), deps)).json()).toEqual({ status: 'ok' });
-    expect((await handle(new Request('https://x/videos'), deps)).status).toBe(503);
-    expect((await handle(new Request('https://x/nope'), deps)).status).toBe(404);
-    expect((await handle(new Request('https://x/videos', { method: 'POST' }), deps)).status).toBe(410);
-    expect((await handle(new Request('https://x/oauth/google/start'), deps)).status).toBe(503);
+    expect(await (await handle(new Request('https://x/me'), deps)).json()).toEqual({ signed_in: false, user: null, limits: null });
+    for (const path of ['/videos', '/search?q=x', '/google/status', '/photos/sessions/latest', '/oauth/google/start', '/videos/abc/source', '/nope']) {
+      expect((await handle(new Request(`https://x${path}`), deps)).status, path).toBe(401);
+    }
+    expect((await handle(new Request('https://x/videos/abc', { method: 'DELETE' }), deps)).status).toBe(401);
+    expect((await handle(new Request('https://x/auth/login'), deps)).status).toBe(503);
   });
-  it('refuses cross-origin writes and enforces public-demo limits', async () => {
-    const deps = appDeps(null, { settings: { ...appDeps(null).settings, publicLimits: true } });
+  it('refuses cross-origin writes before anything else', async () => {
+    const deps = appDeps(null);
     expect((await handle(new Request('https://x/photos/sessions', { method: 'POST', headers: { Origin: 'https://evil.test' } }), deps)).status).toBe(403);
-    expect((await handle(new Request('https://x/videos/tag', { method: 'POST' }), deps)).status).toBe(403);
-    const big = new Request('https://x/query', { method: 'POST', headers: { 'content-length': '20000' }, body: 'x'.repeat(20000) });
-    expect((await handle(big, deps)).status).toBe(413);
+    expect((await handle(new Request('https://x/auth/logout', { method: 'POST', headers: { Origin: 'https://evil.test' } }), deps)).status).toBe(403);
+  });
+});
+
+describe('Google sign-in checks', () => {
+  const b64url = (o: unknown) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const idToken = (claims: Record<string, unknown>) => `h.${b64url(claims)}.sig`;
+  const cfg = { clientId: 'cid', clientSecret: 's', redirectUri: 'https://x/oauth/google/callback' };
+  const good = { iss: 'https://accounts.google.com', aud: 'cid', exp: Math.floor(Date.now() / 1000) + 600, sub: '42', email: 'Asha@Example.com', email_verified: true, name: 'Asha', picture: 'https://p/x.jpg' };
+  const tokenEndpoint = (claims: Record<string, unknown>) => (async () => Response.json({ id_token: idToken(claims) })) as unknown as typeof fetch;
+
+  it('accepts a verified Google identity and lowercases the email', async () => {
+    expect(await exchangeLogin(cfg, 'code', tokenEndpoint(good))).toEqual({ sub: '42', email: 'asha@example.com', name: 'Asha', picture: 'https://p/x.jpg' });
+  });
+  it('rejects another app\'s token, an expired one, a foreign issuer or an unverified email', async () => {
+    for (const bad of [{ aud: 'other' }, { exp: 1 }, { iss: 'https://evil.example' }, { email_verified: false }]) {
+      await expect(exchangeLogin(cfg, 'code', tokenEndpoint({ ...good, ...bad }))).rejects.toThrow();
+    }
+  });
+  it('keeps only same-site relative paths after sign-in', () => {
+    expect(['/', '/?q=cat', '//evil.example', 'https://evil.example', '/\\evil', null].map(safeNext)).toEqual(['/', '/?q=cat', '/', '/', '/', '/']);
+  });
+  it('maps every owner address to the owner', () => {
+    expect([...ownerEmails(' A@x.com, b@y.com ,')]).toEqual(['a@x.com', 'b@y.com']);
   });
 });

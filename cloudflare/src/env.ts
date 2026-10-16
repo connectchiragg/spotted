@@ -21,6 +21,8 @@ export interface Env {
 
   // Plain vars (wrangler.jsonc "vars").
   GOOGLE_CLIENT_ID?: string;
+  /** Comma-separated addresses that sign in as the owner (the original library, Drive, no limits). */
+  OWNER_EMAILS?: string;
   PUBLIC_ORIGIN?: string;
   /** More origins serving the app (comma-separated), e.g. a second custom domain during a rename. */
   PUBLIC_ORIGINS?: string;
@@ -48,6 +50,9 @@ export interface Env {
   PUBLIC_DEMO_LIMITS?: string;
   DAILY_UPLOAD_LIMIT?: string;
   DAILY_QUERY_LIMIT?: string;
+  GUEST_MAX_VIDEOS?: string;
+  GUEST_MAX_MB?: string;
+  GUEST_DAILY_SEARCHES?: string;
   IMPORT_STAGGER_S?: string;
   DRIVE_POLL_MINUTES?: string;
   DRIVE_LOOKBACK_MONTHS?: string;
@@ -79,12 +84,20 @@ export interface Settings {
   searchVectorMargin: number;
   duplicateThreshold: number;
   publicLimits: boolean;
+  /** Daily uploads and searches across all guests together (a cost ceiling). */
   dailyUploadLimit: number;
   dailyQueryLimit: number;
+  /** Per guest: videos and declared bytes in their library, and searches per UTC day. */
+  guestMaxVideos: number;
+  guestMaxBytes: number;
+  guestDailySearches: number;
   importStaggerSeconds: number;
   drivePollMinutes: number;
   driveLookbackMonths: number;
 }
+
+export interface Limits { maxVideos: number; maxBytes: number; dailySearches: number }
+export const guestLimits = (s: Settings): Limits => ({ maxVideos: s.guestMaxVideos, maxBytes: s.guestMaxBytes, dailySearches: s.guestDailySearches });
 
 /** Drive changes.list polling interval (owner decision: hourly). Override with the DRIVE_POLL_MINUTES var. */
 export const DEFAULT_DRIVE_POLL_MINUTES = 60;
@@ -120,6 +133,9 @@ export function settings(env: Env): Settings {
     publicLimits: (env.PUBLIC_DEMO_LIMITS || 'false').toLowerCase() === 'true',
     dailyUploadLimit: num(env.DAILY_UPLOAD_LIMIT, 10),
     dailyQueryLimit: num(env.DAILY_QUERY_LIMIT, 100),
+    guestMaxVideos: num(env.GUEST_MAX_VIDEOS, 20),
+    guestMaxBytes: num(env.GUEST_MAX_MB, 500) * 1000 * 1000,
+    guestDailySearches: num(env.GUEST_DAILY_SEARCHES, 30),
     importStaggerSeconds: num(env.IMPORT_STAGGER_S, 20),
     drivePollMinutes: num(env.DRIVE_POLL_MINUTES, DEFAULT_DRIVE_POLL_MINUTES),
     driveLookbackMonths: num(env.DRIVE_LOOKBACK_MONTHS, 24),

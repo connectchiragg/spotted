@@ -11,6 +11,7 @@ export interface VideoStub {
 
 export const videoStub = (ns: DurableObjectNamespace, videoId: string) => ns.get(ns.idFromName(videoId)) as unknown as VideoStub;
 
-/** Typed stub for the singleton LibraryDO (src/library.ts). */
-export interface LibraryStub { poke(): Promise<void> }
-export const libraryStub = (ns: DurableObjectNamespace) => ns.get(ns.idFromName('library')) as unknown as LibraryStub;
+/** Typed stub for a user's LibraryDO (src/library.ts). The owner's keeps its original name, 'library'. */
+export interface LibraryStub { poke(userId: string): Promise<void> }
+export const libraryName = (userId: string) => (userId === 'owner' ? 'library' : `library:${userId}`);
+export const libraryStub = (ns: DurableObjectNamespace, userId: string) => ns.get(ns.idFromName(libraryName(userId))) as unknown as LibraryStub;

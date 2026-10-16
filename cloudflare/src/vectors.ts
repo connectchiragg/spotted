@@ -1,12 +1,13 @@
 /**
  * Workers AI embeddings (default @cf/baai/bge-m3, 1024 dims, 1,075 neurons per M tokens) in
- * the Vectorize index `spotted-vectors` (cosine; metadata indexes on `kind` and `video_id`).
+ * the Vectorize index `spotted-vectors` (cosine; metadata indexes on `kind`, `video_id` and `user_id`).
+ * Every query filters on `user_id`: one user's search never sees another user's videos.
  * Three kinds of entry per video; the vector id encodes what it points at, so search needs
  * no metadata round trip (topK can stay at 100):
  *   s:<video>          kind=summary     summary + tags + labels and sounds (with ancestors) + the start of the transcript
  *   t:<video>:<n>      kind=transcript  a 45 s transcript window (15 s overlap)
  *   f:<video>:<i>      kind=frame       one selected frame's description
- * Every vector also carries {video_id, kind, t_start, t_end, source, source_id, thumb_key}.
+ * Every vector also carries {user_id, video_id, kind, t_start, t_end, source, source_id, thumb_key}.
  */
 import { Segment } from './gemini';
 import { expandLabels } from './labels';
@@ -78,12 +79,12 @@ export function nearestFrame(times: number[], t: number): number | null {
 }
 
 /** Embed a completed result and upsert its vectors. Returns the summary vector (duplicate check). */
-export async function indexResult(index: VectorizeIndex, embedder: Embedder, video: { id: string; source?: string; source_id?: string | null }, result: any): Promise<number[]> {
+export async function indexResult(index: VectorizeIndex, embedder: Embedder, video: { id: string; user_id?: string; source?: string; source_id?: string | null }, result: any): Promise<number[]> {
   const frames: { frame_index: number; description: string }[] = result.frame_descriptions ?? [];
   const times: number[] = result.sampled_timestamps ?? [];
   const windows: TranscriptWindow[] = result.transcript_windows ?? [];
   const vectors = await embedder.embed([summaryText(result), ...windows.map((w) => w.text), ...frames.map((f) => f.description)]);
-  const base = { video_id: video.id, source: video.source ?? 'upload', source_id: video.source_id ?? '', model: embedder.model };
+  const base = { user_id: video.user_id ?? 'owner', video_id: video.id, source: video.source ?? 'upload', source_id: video.source_id ?? '', model: embedder.model };
   const thumb = (i: number | null) => (i !== null && (result.thumbs ?? []).includes(i) ? thumbKey(video.id, i) : '');
   const duration = Number(result.duration_seconds) || 0;
   await index.upsert([
@@ -114,8 +115,8 @@ export function parseVectorId(id: string): { kind: 'summary' | 'transcript' | 'f
 }
 
 /** Advisory duplicate candidates by summary vector (never merges or deletes), best first. */
-export async function duplicateCandidates(index: VectorizeIndex, vector: number[], videoId: string, threshold: number) {
-  const { matches } = await index.query(vector, { topK: 10, filter: { kind: 'summary' } });
+export async function duplicateCandidates(index: VectorizeIndex, vector: number[], videoId: string, threshold: number, userId = 'owner') {
+  const { matches } = await index.query(vector, { topK: 10, filter: { kind: 'summary', user_id: userId } });
   return matches
     .map((m) => ({ id: m.id.slice(2), similarity: m.score }))
     .filter((m) => m.id !== videoId && m.similarity >= threshold)

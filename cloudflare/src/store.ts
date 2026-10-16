@@ -31,21 +31,22 @@ export function decode(row: any): Video | null {
     source_meta: row.source_meta ? JSON.parse(row.source_meta) : null };
 }
 
-export async function createVideo(db: D1Database, input: { filename: string; contentType: string; size: number; displayName?: string | null; idempotencyKey?: string | null }): Promise<Video> {
+export async function createVideo(db: D1Database, input: { userId: string; filename: string; contentType: string; size: number; displayName?: string | null; idempotencyKey?: string | null }): Promise<Video> {
   const id = crypto.randomUUID();
   const ts = nowIso();
   const key = input.idempotencyKey ?? null;
   // With a key, a concurrent duplicate request loses the unique index race and gets the winner's row.
   const row = await db.prepare(
-    `INSERT INTO videos (id, filename, display_name, object_key, content_type, expected_size, status, created_at, updated_at, idempotency_key)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'uploading', ?7, ?7, ?8)
-     ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING *`,
-  ).bind(id, input.filename, input.displayName ?? null, `videos/${id}/source`, input.contentType, input.size, ts, key).first();
-  if (!row && key) return (await getVideoByIdempotencyKey(db, key))!;
+    `INSERT INTO videos (id, filename, display_name, object_key, content_type, expected_size, status, created_at, updated_at, idempotency_key, user_id)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'uploading', ?7, ?7, ?8, ?9)
+     ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING *`,
+  ).bind(id, input.filename, input.displayName ?? null, `videos/${id}/source`, input.contentType, input.size, ts, key, input.userId).first();
+  if (!row && key) return (await getVideoByIdempotencyKey(db, input.userId, key))!;
   return decode(row)!;
 }
 
 export interface SourceVideoInput {
+  userId: string;
   source: 'photos' | 'drive';
   sourceId: string;
   filename: string;
@@ -58,7 +59,7 @@ export interface SourceVideoInput {
 }
 
 /**
- * One row per (source, source_id): importing the same Photos item or Drive file again returns
+ * One row per (user, source, source_id): importing the same Photos item or Drive file again returns
  * the existing row (created=false). A Drive file modified since gets `refresh` = true from the
  * caller, which re-queues it (new source_meta, status pending) unless it is processing.
  */
@@ -66,13 +67,14 @@ export async function upsertSourceVideo(db: D1Database, input: SourceVideoInput,
   const id = crypto.randomUUID();
   const ts = nowIso();
   const row = await db.prepare(
-    `INSERT INTO videos (id, filename, object_key, content_type, expected_size, status, error, uploaded, created_at, updated_at, source, source_id, source_meta)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?8, ?9, ?10, ?11)
-     ON CONFLICT (source, source_id) WHERE source_id IS NOT NULL DO NOTHING RETURNING *`,
+    `INSERT INTO videos (id, filename, object_key, content_type, expected_size, status, error, uploaded, created_at, updated_at, source, source_id, source_meta, user_id)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?8, ?9, ?10, ?11, ?12)
+     ON CONFLICT (user_id, source, source_id) WHERE source_id IS NOT NULL DO NOTHING RETURNING *`,
   ).bind(id, input.filename, `videos/${id}/source`, input.contentType, input.size, input.status, input.error ?? null, ts,
-    input.source, input.sourceId, JSON.stringify(input.meta)).first();
+    input.source, input.sourceId, JSON.stringify(input.meta), input.userId).first();
   if (row) return { video: decode(row)!, created: true };
-  const existing = decode(await db.prepare('SELECT * FROM videos WHERE source=?1 AND source_id=?2').bind(input.source, input.sourceId).first())!;
+  const existing = decode(await db.prepare('SELECT * FROM videos WHERE user_id=?1 AND source=?2 AND source_id=?3')
+    .bind(input.userId, input.source, input.sourceId).first())!;
   if (refresh && existing.status === 'processing') {
     // Restarting mid-step could race the running step; record the change and let the next sync apply it.
     await db.prepare('UPDATE videos SET source_meta=?2 WHERE id=?1').bind(existing.id, JSON.stringify({ ...input.meta, refresh_pending: true })).run();
@@ -86,12 +88,25 @@ export async function upsertSourceVideo(db: D1Database, input: SourceVideoInput,
   return { video: existing, created: false };
 }
 
-export async function getVideoByIdempotencyKey(db: D1Database, key: string): Promise<Video | null> {
-  return decode(await db.prepare('SELECT * FROM videos WHERE idempotency_key=?1').bind(key).first());
+export async function getVideoByIdempotencyKey(db: D1Database, userId: string, key: string): Promise<Video | null> {
+  return decode(await db.prepare('SELECT * FROM videos WHERE user_id=?1 AND idempotency_key=?2').bind(userId, key).first());
 }
 
+/** Any user's video: for the actors and internal paths only. Routes use ownVideo. */
 export async function getVideo(db: D1Database, id: string): Promise<Video | null> {
   return decode(await db.prepare('SELECT * FROM videos WHERE id=?1').bind(id).first());
+}
+
+/** The video if it belongs to `userId` (anyone else's id reads as not found). */
+export async function ownVideo(db: D1Database, id: string, userId: string): Promise<Video | null> {
+  return decode(await db.prepare('SELECT * FROM videos WHERE id=?1 AND user_id=?2').bind(id, userId).first());
+}
+
+/** What a user's library holds against their limits: videos that are or will be processed, and their declared bytes. */
+export async function libraryUsage(db: D1Database, userId: string): Promise<{ videos: number; bytes: number }> {
+  const row = await db.prepare(`SELECT COUNT(*) AS videos, COALESCE(SUM(expected_size), 0) AS bytes FROM videos
+    WHERE user_id=?1 AND status NOT IN ('failed', 'skipped')`).bind(userId).first<{ videos: number; bytes: number }>();
+  return { videos: Number(row?.videos ?? 0), bytes: Number(row?.bytes ?? 0) };
 }
 
 export async function getVideos(db: D1Database, ids: string[]): Promise<Video[]> {
@@ -100,9 +115,9 @@ export async function getVideos(db: D1Database, ids: string[]): Promise<Video[]>
   return results.map((r) => decode(r)!);
 }
 
-export async function listVideos(db: D1Database, opts: { limit: number; offset: number; tags?: string[] | null; includeArchived?: boolean }): Promise<Video[]> {
-  const where: string[] = [];
-  const binds: unknown[] = [];
+export async function listVideos(db: D1Database, opts: { userId: string; limit: number; offset: number; tags?: string[] | null; includeArchived?: boolean }): Promise<Video[]> {
+  const where: string[] = ['user_id=?1'];
+  const binds: unknown[] = [opts.userId];
   if (!opts.includeArchived) where.push('archived_at IS NULL');
   if (opts.tags?.length) {
     binds.push(JSON.stringify(opts.tags));
@@ -111,18 +126,18 @@ export async function listVideos(db: D1Database, opts: { limit: number; offset: 
   }
   binds.push(opts.limit, opts.offset);
   const { results } = await db.prepare(
-    `SELECT * FROM videos ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+    `SELECT * FROM videos WHERE ${where.join(' AND ')}
      ORDER BY created_at DESC, id DESC LIMIT ?${binds.length - 1} OFFSET ?${binds.length}`,
   ).bind(...binds).all();
   return results.map((r) => decode(r)!);
 }
 
-export async function archiveVideo(db: D1Database, id: string): Promise<boolean> {
-  return (await db.prepare('UPDATE videos SET archived_at=COALESCE(archived_at, ?2) WHERE id=?1').bind(id, nowIso()).run()).meta.changes === 1;
+export async function archiveVideo(db: D1Database, id: string, userId: string): Promise<boolean> {
+  return (await db.prepare('UPDATE videos SET archived_at=COALESCE(archived_at, ?3) WHERE id=?1 AND user_id=?2').bind(id, userId, nowIso()).run()).meta.changes === 1;
 }
 
-export async function restoreVideo(db: D1Database, id: string): Promise<boolean> {
-  return (await db.prepare('UPDATE videos SET archived_at=NULL WHERE id=?1').bind(id).run()).meta.changes === 1;
+export async function restoreVideo(db: D1Database, id: string, userId: string): Promise<boolean> {
+  return (await db.prepare('UPDATE videos SET archived_at=NULL WHERE id=?1 AND user_id=?2').bind(id, userId).run()).meta.changes === 1;
 }
 
 /** Mark the upload verified (uploading -> pending). True only for the call that made the change. */

@@ -1,24 +1,25 @@
 /**
- * Google OAuth (one owner account), Google Photos Picker API and Google Drive API over fetch.
+ * Google OAuth (one connection per user), Google Photos Picker API and Google Drive API over fetch.
  *
  * - OAuth: authorization-code flow with access_type=offline. The refresh token is encrypted
- *   with AES-GCM (key: TOKEN_ENC_KEY secret, 32 bytes hex) and stored in D1 `google_auth`;
+ *   with AES-GCM (key: TOKEN_ENC_KEY secret, 32 bytes hex) and stored in D1 `google_auth` (per user);
  *   it is never logged or returned by any route. Access tokens are minted on demand and
  *   cached in isolate memory until shortly before they expire.
  * - Photos Picker (https://developers.google.com/photos/picker): the Library API can no longer
  *   read a user's library, so the owner picks items in Google's picker: sessions.create ->
  *   pickerUri -> poll sessions.get until mediaItemsSet -> mediaItems.list -> download each
  *   video from baseUrl + "=dv" with the bearer token (baseUrls live 60 minutes).
- * - Drive: one folder, videos modified in the last 24 months, then changes.list from a stored
+ * - Drive (the owner only): one folder, videos modified in the last 24 months, then changes.list from a stored
  *   page token, polled hourly (DRIVE_POLL_MINUTES) by the LibraryDO alarm (no push web hook, so nothing
  *   needs to bypass Cloudflare Access).
  * - Testing-mode OAuth apps get refresh tokens that expire after 7 days: `invalid_grant`
  *   marks the connection "reconnect needed" (google_auth.status) and the UI offers Reconnect.
  */
-export const SCOPES = [
-  'https://www.googleapis.com/auth/photospicker.mediaitems.readonly',
-  'https://www.googleapis.com/auth/drive.readonly',
-];
+export const PHOTOS_SCOPE = 'https://www.googleapis.com/auth/photospicker.mediaitems.readonly';
+export const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
+/** Guests get the Photos picker only; Drive (a restricted scope) is the owner's. */
+export const scopesFor = (owner: boolean) => (owner ? [PHOTOS_SCOPE, DRIVE_SCOPE] : [PHOTOS_SCOPE]);
+export const SCOPES = scopesFor(true);
 const AUTH = 'https://accounts.google.com/o/oauth2/v2/auth';
 const TOKEN = 'https://oauth2.googleapis.com/token';
 const PICKER = 'https://photospicker.googleapis.com/v1';
@@ -60,10 +61,10 @@ export async function decryptSecret(sealed: string, keyHex: string, purpose = 'g
 
 export interface GoogleConfig { clientId: string; clientSecret: string; encKey: string; redirectUri: string }
 
-export function authUrl(cfg: GoogleConfig, state: string): string {
+export function authUrl(cfg: GoogleConfig, state: string, scopes: string[] = SCOPES, loginHint?: string): string {
   const u = new URL(AUTH);
-  u.search = new URLSearchParams({ client_id: cfg.clientId, redirect_uri: cfg.redirectUri, response_type: 'code', scope: SCOPES.join(' '),
-    access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true', state }).toString();
+  u.search = new URLSearchParams({ client_id: cfg.clientId, redirect_uri: cfg.redirectUri, response_type: 'code', scope: scopes.join(' '),
+    access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true', state, ...(loginHint ? { login_hint: loginHint } : {}) }).toString();
   return u.toString();
 }
 
@@ -89,13 +90,15 @@ export async function exchangeCode(cfg: GoogleConfig, code: string, fetcher: Fet
   return { refreshToken: json.refresh_token, scope: String(json.scope ?? '') };
 }
 
-/** The stored, encrypted refresh token. */
-export interface TokenStore { load(): Promise<string | null>; markInvalid(reason: string): Promise<void> }
+/** The stored, encrypted refresh token of one user. `key` scopes the access-token cache. */
+export interface TokenStore { key: string; load(): Promise<string | null>; markInvalid(reason: string): Promise<void> }
 
-export function d1TokenStore(db: D1Database): TokenStore {
+export function d1TokenStore(db: D1Database, userId: string): TokenStore {
   return {
-    load: async () => (await db.prepare("SELECT refresh_token_enc FROM google_auth WHERE id=1 AND status='connected'").first<{ refresh_token_enc: string }>())?.refresh_token_enc ?? null,
-    markInvalid: async (reason) => { await db.prepare("UPDATE google_auth SET status='reconnect_needed', error=?1, updated_at=?2 WHERE id=1").bind(reason, new Date().toISOString()).run(); },
+    key: userId,
+    load: async () => (await db.prepare("SELECT refresh_token_enc FROM google_auth WHERE user_id=?1 AND status='connected'").bind(userId)
+      .first<{ refresh_token_enc: string }>())?.refresh_token_enc ?? null,
+    markInvalid: async (reason) => { await db.prepare("UPDATE google_auth SET status='reconnect_needed', error=?2, updated_at=?3 WHERE user_id=?1").bind(userId, reason, new Date().toISOString()).run(); },
   };
 }
 
@@ -105,8 +108,14 @@ const cache = new Map<string, { token: string; until: number }>();
 export class Google {
   constructor(private cfg: GoogleConfig, private store: TokenStore, private fetcher: Fetcher = defaultFetch) {}
 
+  /** Access tokens are cached per user: one user's token must never serve another. */
+  private get cacheKey() { return `${this.cfg.clientId}:${this.store.key ?? ''}`; }
+
+  /** Forget this user's cached access token (on disconnect or reconnect). */
+  static forget(clientId: string, userId: string) { cache.delete(`${clientId}:${userId}`); }
+
   async accessToken(): Promise<string> {
-    const hit = cache.get(this.cfg.clientId);
+    const hit = cache.get(this.cacheKey);
     if (hit && hit.until > Date.now()) return hit.token;
     const sealed = await this.store.load();
     if (!sealed) throw new GoogleError('Google is not connected', 409, false);
@@ -122,7 +131,7 @@ export class Google {
       }
       throw classify(res.status, 'Token refresh', json);
     }
-    cache.set(this.cfg.clientId, { token: json.access_token, until: Date.now() + (Number(json.expires_in ?? 3600) - 120) * 1000 });
+    cache.set(this.cacheKey, { token: json.access_token, until: Date.now() + (Number(json.expires_in ?? 3600) - 120) * 1000 });
     return json.access_token;
   }
 
@@ -136,7 +145,7 @@ export class Google {
     }
     if (res.ok || pass.includes(res.status)) return res;
     const body = await res.json().catch(() => null);
-    if (res.status === 401) cache.delete(this.cfg.clientId);
+    if (res.status === 401) cache.delete(this.cacheKey);
     throw classify(res.status, what, body);
   }
 

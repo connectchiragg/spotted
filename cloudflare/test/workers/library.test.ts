@@ -41,9 +41,9 @@ function fakeGoogle(over: Partial<Record<keyof Google, any>> = {}) {
 describe('LibraryDO', () => {
   it('imports the picked videos once, skips photos and videos over 100 MB', async () => {
     const { google } = fakeGoogle();
-    LibraryDO.testDeps = () => ({ db, google, videos: null, settings });
+    LibraryDO.testDeps = () => ({ db, google, videos: null, settings, userId: 'owner', limits: null });
     await db.prepare("INSERT INTO picker_sessions (id, picker_uri, status, created_at, updated_at) VALUES ('s1', 'u', 'waiting', 'now', 'now')").run();
-    await lib.poke();
+    await lib.poke('owner');
     await settle(async () => (await count("SELECT count(*) AS n FROM picker_sessions WHERE id='s1' AND status='imported'")) === 1);
     const rows = (await db.prepare("SELECT source_id, status, error FROM videos WHERE source='photos' ORDER BY source_id").all()).results;
     expect(rows).toEqual([
@@ -54,17 +54,17 @@ describe('LibraryDO', () => {
     expect(await db.prepare("SELECT status, imported, skipped FROM picker_sessions WHERE id='s1'").first()).toEqual({ status: 'imported', imported: 2, skipped: 1 });
     // The same items picked again: no duplicates.
     await db.prepare("INSERT INTO picker_sessions (id, picker_uri, status, created_at, updated_at) VALUES ('s2', 'u', 'waiting', 'now', 'now')").run();
-    await lib.poke();
+    await lib.poke('owner');
     await settle(async () => (await count("SELECT count(*) AS n FROM picker_sessions WHERE id='s2' AND status='imported'")) === 1);
     expect(await count("SELECT count(*) AS n FROM videos WHERE source='photos'")).toBe(3);
   });
 
   it('keeps polling a session until items are set, at Google\'s interval', async () => {
     const { google } = fakeGoogle({ getPickerSession: async (id: string) => ({ id, pickerUri: 'u', mediaItemsSet: false, pollingConfig: { pollInterval: '7s' } }) });
-    LibraryDO.testDeps = () => ({ db, google, videos: null, settings });
+    LibraryDO.testDeps = () => ({ db, google, videos: null, settings, userId: 'owner', limits: null });
     await db.prepare("INSERT INTO picker_sessions (id, picker_uri, status, created_at, updated_at) VALUES ('s3', 'u', 'waiting', 'now', 'now')").run();
     const before = Date.now();
-    await lib.poke();
+    await lib.poke('owner');
     await settle(async () => true);
     await new Promise((r) => setTimeout(r, 100));
     const { runInDurableObject } = await import('cloudflare:test');
@@ -76,15 +76,15 @@ describe('LibraryDO', () => {
 
   it('syncs a Drive folder: initial listing, then changes (new and modified files in the folder only)', async () => {
     const { google } = fakeGoogle();
-    LibraryDO.testDeps = () => ({ db, google, videos: null, settings });
+    LibraryDO.testDeps = () => ({ db, google, videos: null, settings, userId: 'owner', limits: null });
     await db.prepare("INSERT INTO drive_sync (id, folder_id, folder_name, updated_at) VALUES (1, 'F', 'Videos', 'now')").run();
-    await lib.poke();
+    await lib.poke('owner');
     await settle(async () => (await count('SELECT count(*) AS n FROM drive_sync WHERE initial_done=1')) === 1);
     let rows = (await db.prepare("SELECT source_id, status FROM videos WHERE source='drive' ORDER BY source_id").all()).results;
     expect(rows).toEqual([{ source_id: 'd1', status: 'pending' }, { source_id: 'd2', status: 'skipped' }]);
     expect(await db.prepare('SELECT page_token, initial_done FROM drive_sync').first()).toEqual({ page_token: 'token-1', initial_done: 1 });
     await db.prepare("UPDATE videos SET status='completed' WHERE source_id='d1'").run();
-    await lib.poke(); // makes the next sync due now
+    await lib.poke('owner'); // makes the next sync due now
     await settle(async () => (await count("SELECT count(*) AS n FROM drive_sync WHERE page_token='token-2'")) === 1);
     rows = (await db.prepare("SELECT source_id, status, expected_size FROM videos WHERE source='drive' ORDER BY source_id").all()).results;
     expect(rows).toEqual([{ source_id: 'd1', status: 'pending', expected_size: 1200 }, { source_id: 'd2', status: 'skipped', expected_size: 200000000 },
@@ -96,11 +96,11 @@ describe('LibraryDO', () => {
   it('archives Drive files that were removed, trashed or moved out of the folder (nothing deleted)', async () => {
     const { google } = fakeGoogle({ driveChanges: async () => ({ files: [{ id: 'd2', name: 'huge.mp4', mimeType: 'video/mp4', modifiedTime: '2026-10-01T00:00:00Z', parents: ['OTHER'] }],
       removed: ['d1'], next: 'token-2' }) });
-    LibraryDO.testDeps = () => ({ db, google, videos: null, settings });
+    LibraryDO.testDeps = () => ({ db, google, videos: null, settings, userId: 'owner', limits: null });
     await db.prepare("INSERT INTO drive_sync (id, folder_id, folder_name, updated_at) VALUES (1, 'F', 'Videos', 'now')").run();
-    await lib.poke();
+    await lib.poke('owner');
     await settle(async () => (await count('SELECT count(*) AS n FROM drive_sync WHERE initial_done=1')) === 1);
-    await lib.poke();
+    await lib.poke('owner');
     await settle(async () => (await count("SELECT count(*) AS n FROM drive_sync WHERE page_token='token-2'")) === 1);
     const rows = (await db.prepare("SELECT source_id, archived_at IS NOT NULL AS archived FROM videos WHERE source='drive' ORDER BY source_id").all()).results;
     expect(rows).toEqual([{ source_id: 'd1', archived: 1 }, { source_id: 'd2', archived: 1 }]);
@@ -112,18 +112,18 @@ describe('LibraryDO', () => {
     const { google } = fakeGoogle({ driveChanges: async () => (++sync === 1
       ? { files: [{ id: 'd1', name: 'a.mp4', mimeType: 'video/mp4', size: '1200', modifiedTime: '2026-10-01T00:00:00Z', parents: ['F'] }], removed: [], next: 'token-2' }
       : { files: [], removed: [], next: 'token-3' }) });
-    LibraryDO.testDeps = () => ({ db, google, videos: null, settings });
+    LibraryDO.testDeps = () => ({ db, google, videos: null, settings, userId: 'owner', limits: null });
     await db.prepare("INSERT INTO drive_sync (id, folder_id, folder_name, updated_at) VALUES (1, 'F', 'Videos', 'now')").run();
-    await lib.poke();
+    await lib.poke('owner');
     await settle(async () => (await count('SELECT count(*) AS n FROM drive_sync WHERE initial_done=1')) === 1);
     await db.prepare("UPDATE videos SET status='processing' WHERE source_id='d1'").run();
-    await lib.poke();
+    await lib.poke('owner');
     await settle(async () => (await count("SELECT count(*) AS n FROM drive_sync WHERE page_token='token-2'")) === 1);
     const meta = async () => JSON.parse((await db.prepare("SELECT source_meta FROM videos WHERE source_id='d1'").first<any>()).source_meta);
     expect((await db.prepare("SELECT status FROM videos WHERE source_id='d1'").first<any>()).status).toBe('processing'); // not restarted mid-step
     expect(await meta()).toMatchObject({ modified_time: '2026-10-01T00:00:00Z', refresh_pending: true });
     await db.prepare("UPDATE videos SET status='completed', result='{}' WHERE source_id='d1'").run();
-    await lib.poke();
+    await lib.poke('owner');
     await settle(async () => (await count("SELECT count(*) AS n FROM drive_sync WHERE page_token='token-3'")) === 1);
     expect(await db.prepare("SELECT status, result FROM videos WHERE source_id='d1'").first()).toEqual({ status: 'pending', result: null });
     expect((await meta()).refresh_pending).toBeUndefined();

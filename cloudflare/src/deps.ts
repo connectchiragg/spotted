@@ -1,5 +1,6 @@
 /** Dependency wiring for the API Worker. Ingestion runs in the per-video VideoDO (src/video.ts). */
 import { AppDeps } from './api';
+import { ownerEmails } from './auth';
 import { Env, settings } from './env';
 import { Gemini } from './gemini';
 import { workersAiReranker } from './retrieval';
@@ -25,7 +26,9 @@ export function build(env: Env, waitUntil: (p: Promise<unknown>) => void): AppDe
     videos: env.VIDEO ?? null,
     library: env.LIBRARY ?? null,
     googleConfig: googleReady ? { clientId: env.GOOGLE_CLIENT_ID!, clientSecret: env.GOOGLE_CLIENT_SECRET!, encKey: env.TOKEN_ENC_KEY!, redirectUri: `${origin}/oauth/google/callback` } : null,
-    google: googleClient(env),
+    google: null,
+    googleFor: (userId) => googleClient(env, userId),
+    owners: ownerEmails(env.OWNER_EMAILS),
     origins: [origin, ...(env.PUBLIC_ORIGINS ?? '').split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean)],
     adminToken: env.ADMIN_TOKEN || null,
     waitUntil,

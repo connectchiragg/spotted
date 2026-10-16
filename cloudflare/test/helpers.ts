@@ -7,12 +7,25 @@ import { MediaPort, Transcriber } from '../src/media';
 import { Reranker } from '../src/retrieval';
 import { Presigner } from '../src/storage';
 import { Embedder } from '../src/vectors';
+import { createSession, SESSION_COOKIE } from '../src/auth';
+
+/** Sign a user in for tests: their users row and a live session. Returns the Cookie header value. */
+export async function signIn(db: D1Database, user: { id: string; email: string; role?: 'owner' | 'guest' } = { id: 'owner', email: 'owner@example.com', role: 'owner' }): Promise<string> {
+  const ts = new Date().toISOString();
+  await db.prepare(`INSERT INTO users (id, email, name, picture, role, created_at, last_seen_at) VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?4)
+    ON CONFLICT (id) DO UPDATE SET role=excluded.role`).bind(user.id, user.email, user.role ?? (user.id === 'owner' ? 'owner' : 'guest'), ts).run();
+  return `${SESSION_COOKIE}=${await createSession(db, user.id, user.email)}`;
+}
+
+/** A Request carrying a session cookie. */
+export const authed = (cookie: string) => (url: string, init: RequestInit = {}) =>
+  new Request(url, { ...init, headers: { ...(init.headers as Record<string, string> ?? {}), cookie } });
 
 export const settings: Settings = {
   geminiModel: 'gemini-test', embeddingModel: '@cf/test-embed', rerankModel: '@cf/test-rerank', whisperModel: '@cf/test-whisper',
   maxSourceBytes: 100 * 1000 * 1000, maxVideoSeconds: 600, maxFrames: 16, frameMaxSide: 1024, candidateInterval: 1, minFrameGap: 2, maxFrameGap: 30,
   changeThreshold: 12, describeBatch: 2, whisperDirectMaxBytes: 20 * 1000 * 1000, searchMinScore: 0.02, searchSoftMinScore: 0.008, searchMinSimilarity: 0.53, searchVectorMargin: 0.07, duplicateThreshold: 0.97,
-  publicLimits: false, dailyUploadLimit: 10, dailyQueryLimit: 100, importStaggerSeconds: 0, drivePollMinutes: 60, driveLookbackMonths: 24,
+  publicLimits: false, dailyUploadLimit: 10, dailyQueryLimit: 100, guestMaxVideos: 20, guestMaxBytes: 500 * 1000 * 1000, guestDailySearches: 30, importStaggerSeconds: 0, drivePollMinutes: 60, driveLookbackMonths: 24,
 };
 
 /** Deterministic bag-of-words embedder: shared words -> high cosine. */

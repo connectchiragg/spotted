@@ -12,7 +12,7 @@ import { PROMPT_VERSION } from '../../src/gemini';
 import { Google, GoogleError } from '../../src/google';
 import * as store from '../../src/store';
 import { EvictionError, IngestState, MAX_ATTEMPTS, MAX_QUOTA_WINDOW_MS, VideoDO } from '../../src/video';
-import { appDeps, fakeBucket, fakeEmbedder, fakeGemini, FakeGeminiOptions, fakeMedia, FakeMediaOptions, fakeMp4, FakeObject, fakeTranscriber, fakeVectorize, settings } from '../helpers';
+import { appDeps, fakeBucket, fakeEmbedder, fakeGemini, FakeGeminiOptions, fakeMedia, FakeMediaOptions, fakeMp4, FakeObject, fakeTranscriber, fakeVectorize, settings, signIn } from '../helpers';
 
 const db: D1Database = env.DB;
 const ns = env.VIDEO as DurableObjectNamespace;
@@ -28,10 +28,10 @@ async function setup(opts: SetupOptions = {}) {
   const objects: Record<string, FakeObject> = {};
   let video: store.Video;
   if (opts.source) {
-    ({ video } = await store.upsertSourceVideo(db, { source: opts.source, sourceId: `src-${crypto.randomUUID()}`, filename: 'clip.mp4', contentType: 'video/mp4',
+    ({ video } = await store.upsertSourceVideo(db, { userId: 'owner', source: opts.source, sourceId: `src-${crypto.randomUUID()}`, filename: 'clip.mp4', contentType: 'video/mp4',
       size: null, meta: { session_id: 's1', base_url: 'https://photos.test/b', base_url_expires_at: new Date(Date.now() + 3600_000).toISOString() }, status: 'pending' }));
   } else {
-    video = await store.createVideo(db, { filename: 'clip.mp4', contentType: 'video/mp4', size: opts.size ?? 4096 });
+    video = await store.createVideo(db, { userId: 'owner', filename: 'clip.mp4', contentType: 'video/mp4', size: opts.size ?? 4096 });
     expect(await store.markUploaded(db, video.id)).toBe(true);
     const bytes = fakeMp4(opts.seconds ?? 30, 4096);
     objects[video.object_key] = { size: opts.size ?? bytes.length, contentType: 'video/mp4', bytes };
@@ -127,7 +127,7 @@ describe('VideoDO: the frame + transcript pipeline', () => {
       expect(s).toMatchObject({ step: 'describe', attempts: 0, quota_waits: wait, quota_model: settings.geminiModel });
       expect(s.next_retry_at! - Date.now()).toBeGreaterThan(110_000); // RetryInfo 120 s
       if (wait === 1) {
-        const api = await worker.fetch(`https://spotted.test/videos/${t.video.id}`);
+        const api = await worker.fetch(`https://spotted.test/videos/${t.video.id}`, { headers: { cookie: await signIn(db) } });
         expect((await api.json<any>()).progress).toMatchObject({ stage: 'Waiting to retry', percent: 70 });
       }
       await t.skipWait();
@@ -195,7 +195,7 @@ describe('VideoDO: the frame + transcript pipeline', () => {
     expect((await t.drive())!.step).toBe('done');
     expect(t.objects[t.video.object_key].size).toBe(bytes.length);
     expect((await store.getVideo(db, t.video.id))!).toMatchObject({ status: 'completed', uploaded: 1, expected_size: bytes.length, source: 'photos' });
-    expect(t.vectors.store.get(`s:${t.video.id}`)!.metadata).toMatchObject({ source: 'photos', source_id: t.video.source_id });
+    expect(t.vectors.store.get(`s:${t.video.id}`)!.metadata).toMatchObject({ user_id: 'owner', source: 'photos', source_id: t.video.source_id });
     // The copy reported byte progress as a visible 'progress' event (bytes_total from Content-Length).
     const progress = await runInDurableObject<VideoDO, any[]>(t.stub, (_o, s) =>
       s.storage.sql.exec("SELECT data FROM events WHERE type='progress'").toArray().map((r: any) => JSON.parse(r.data).progress));
@@ -287,7 +287,7 @@ describe('VideoDO: the frame + transcript pipeline', () => {
     await u.stub.start(u.video.id);
     await u.drive();
     await db.prepare('DELETE FROM videos WHERE id=?1').bind(u.video.id).run();
-    expect((await worker.fetch(`https://spotted.test/videos/${u.video.id}`)).status).toBe(404);
+    expect((await worker.fetch(`https://spotted.test/videos/${u.video.id}`, { headers: { cookie: await signIn(db) } })).status).toBe(404);
     expect(await u.state()).toBeNull();
   });
 });
@@ -295,7 +295,7 @@ describe('VideoDO: the frame + transcript pipeline', () => {
 // ------------------------------------------------------------------ WebSockets
 
 async function open(videoId: string) {
-  const res = await worker.fetch(`https://spotted.test/videos/${videoId}/ws`, { headers: { Upgrade: 'websocket' } });
+  const res = await worker.fetch(`https://spotted.test/videos/${videoId}/ws`, { headers: { Upgrade: 'websocket', cookie: await signIn(db) } });
   expect(res.status).toBe(101);
   const ws = res.webSocket!;
   const messages: any[] = [];
@@ -371,7 +371,7 @@ describe('VideoDO: hibernatable WebSocket status', () => {
     e.ws.send('ping');
     await e.until(() => pongs.length > 0);
     expect(pongs).toEqual(['pong']);
-    expect((await worker.fetch(`https://spotted.test/videos/${t.video.id}/ws`)).status).toBe(426);
+    expect((await worker.fetch(`https://spotted.test/videos/${t.video.id}/ws`, { headers: { cookie: await signIn(db) } })).status).toBe(426);
     e.ws.close(1000);
   });
 });

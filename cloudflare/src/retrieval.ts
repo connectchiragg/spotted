@@ -174,8 +174,8 @@ export function rankVideos(groups: { job: Job; passages: (Passage & { rerank: nu
 
 export interface SearchDeps { db: D1Database; index: VectorizeIndex; reranker: Reranker }
 
-export async function search(deps: SearchDeps, queryVector: number[], query: string, thresholds: Thresholds): Promise<Ranked[]> {
-  const { matches } = await deps.index.query(queryVector, { topK: 100 });
+export async function search(deps: SearchDeps, queryVector: number[], query: string, thresholds: Thresholds, userId = 'owner'): Promise<Ranked[]> {
+  const { matches } = await deps.index.query(queryVector, { topK: 100, filter: { user_id: userId } });
   const byVideo = new Map<string, { kind: Citation['kind']; n: number; score: number }[]>();
   for (const m of matches) {
     const p = parseVectorId(m.id);
@@ -188,14 +188,14 @@ export async function search(deps: SearchDeps, queryVector: number[], query: str
   // CANDIDATE_VIDEOS, or they use up slots and push real matches out.
   const ranks = new Map([...byVideo.keys()].map((id, i) => [id, i]));
   const videos = (await getVideos(deps.db, [...byVideo.keys()]))
-    .filter((v) => v.status === 'completed' && !v.archived_at && v.result)
+    .filter((v) => v.status === 'completed' && !v.archived_at && v.result && (v.user_id ?? 'owner') === userId) // the D1 row decides, not only the filter
     .sort((a, b) => ranks.get(a.id)! - ranks.get(b.id)!)
     .slice(0, CANDIDATE_VIDEOS);
   const qLabels = queryLabels(query);
   // Label hits are looked up directly, not only among the nearest vectors: as the library grows, a
   // labelled video can rank below the vector cut for a broad query ("animals"). They join with
   // their summary as the only passage (cosine 0; a label hit is accepted without it).
-  const extra = (await labelMatches(deps.db, qLabels, LABEL_CANDIDATES)).filter((v) => !videos.some((x) => x.id === v.id));
+  const extra = (await labelMatches(deps.db, qLabels, LABEL_CANDIDATES, userId)).filter((v) => !videos.some((x) => x.id === v.id));
   const groups = [
     ...videos.map((job) => ({ job, passages: byVideo.get(job.id)!.map((h) => passageOf(job, h.kind, h.n, h.score)).filter((p): p is Passage => Boolean(p && p.text)) })),
     ...extra.map((job) => ({ job, passages: [passageOf(job, 'summary', 0, 0)].filter((p): p is Passage => Boolean(p && p.text)) })),
@@ -207,12 +207,12 @@ export async function search(deps: SearchDeps, queryVector: number[], query: str
 }
 
 /** Completed, unarchived videos whose labels or sounds imply every query label (newest first). */
-export async function labelMatches(db: D1Database, names: string[], limit: number): Promise<Job[]> {
+export async function labelMatches(db: D1Database, names: string[], limit: number, userId = 'owner'): Promise<Job[]> {
   if (!names.length) return [];
   const has = "(EXISTS (SELECT 1 FROM json_each(COALESCE(json_extract(result, '$.labels'), '[]')) WHERE value IN (SELECT value FROM json_each(?{n})))"
     + " OR EXISTS (SELECT 1 FROM json_each(COALESCE(json_extract(result, '$.sounds'), '[]')) WHERE value IN (SELECT value FROM json_each(?{n}))))";
-  const where = names.map((_, i) => has.replaceAll('{n}', String(i + 1))).join(' AND ');
-  const { results } = await db.prepare(`SELECT * FROM videos WHERE status='completed' AND archived_at IS NULL AND result IS NOT NULL AND ${where}
-    ORDER BY created_at DESC LIMIT ${Math.floor(limit)}`).bind(...names.map((n) => JSON.stringify(descendantsOf(n)))).all();
+  const where = names.map((_, i) => has.replaceAll('{n}', String(i + 2))).join(' AND ');
+  const { results } = await db.prepare(`SELECT * FROM videos WHERE user_id=?1 AND status='completed' AND archived_at IS NULL AND result IS NOT NULL AND ${where}
+    ORDER BY created_at DESC LIMIT ${Math.floor(limit)}`).bind(userId, ...names.map((n) => JSON.stringify(descendantsOf(n)))).all();
   return results.map((r) => decodeVideo(r)!);
 }

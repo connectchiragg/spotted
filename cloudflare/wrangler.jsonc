@@ -65,6 +65,7 @@
   "vars": {
     "PUBLIC_ORIGIN": "https://spotted.haciensus.com",
     "GOOGLE_CLIENT_ID": "157133842980-16181ouhjshhpjcjgjpa3hf8nf1imik0.apps.googleusercontent.com",
+    "OWNER_EMAILS": "connect.chirag.g@gmail.com,iamkrishna.krishna@gmail.com,chiraggoel289@gmail.com",
     "R2_ACCOUNT_ID": "0187f7c38bf35a8abcc4e9f9abfa213e",
     "R2_BUCKET_NAME": "spotted-videos",
     "GEMINI_MODEL": "gemini-3.1-flash-lite",
@@ -89,8 +90,11 @@
     "SEARCH_VECTOR_MARGIN": "0.07",
     "DUPLICATE_SIMILARITY_THRESHOLD": "0.97",
     "PUBLIC_DEMO_LIMITS": "true",
-    "DAILY_UPLOAD_LIMIT": "10",
-    "DAILY_QUERY_LIMIT": "100",
+    "DAILY_UPLOAD_LIMIT": "200",
+    "DAILY_QUERY_LIMIT": "2000",
+    "GUEST_MAX_VIDEOS": "20",
+    "GUEST_MAX_MB": "500",
+    "GUEST_DAILY_SEARCHES": "30",
     "IMPORT_STAGGER_S": "20",
     "DRIVE_POLL_MINUTES": "60",
     "DRIVE_LOOKBACK_MONTHS": "24"

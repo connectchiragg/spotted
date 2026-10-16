@@ -112,6 +112,8 @@ export interface VideoDeps {
   gemini: Gemini;
   embedder: Embedder;
   google: Google | null;
+  /** The Google client of a video's owner (production); tests inject `google` instead. */
+  googleFor?: (userId: string) => Google | null;
   settings: Settings;
 }
 
@@ -382,7 +384,8 @@ export class VideoDO extends DurableObject<Env> {
       if (existing.size >= max) throw new SkipError(overLimit(max));
       return this.fetched(deps, state, video, existing.size);
     }
-    if (!deps.google) throw new PermanentError('Google is not configured');
+    const google = deps.googleFor ? deps.googleFor(video.user_id ?? 'owner') : deps.google;
+    if (!google) throw new PermanentError('Google is not configured');
     state = await this.key(state, 'fetch');
     const meta = video.source_meta ?? {};
     let response: Response;
@@ -391,16 +394,16 @@ export class VideoDO extends DurableObject<Env> {
       if (!baseUrl || (meta.base_url_expires_at && Date.parse(meta.base_url_expires_at) < Date.now())) {
         // Picker baseUrls live 60 minutes; the session can hand out fresh ones while it lasts.
         // A definitive answer (session expired or gone) means "pick again"; a transient error retries.
-        const items = await deps.google.listPickedItems(meta.session_id).catch((error) => {
+        const items = await google.listPickedItems(meta.session_id).catch((error) => {
           if (error instanceof GoogleError && !error.retryable) return [];
           throw error;
         });
         baseUrl = items.find((i) => i.id === video.source_id)?.mediaFile.baseUrl ?? '';
         if (!baseUrl) throw new PermanentError('The Google Photos link expired; pick the video again');
       }
-      response = await deps.google.downloadPhotoVideo(baseUrl);
+      response = await google.downloadPhotoVideo(baseUrl);
     } else if (video.source === 'drive') {
-      response = await deps.google.downloadDriveFile(video.source_id!);
+      response = await google.downloadDriveFile(video.source_id!);
     } else {
       throw new PermanentError('Uploaded video is missing from storage');
     }
@@ -638,7 +641,7 @@ export class VideoDO extends DurableObject<Env> {
     if (!state.indexed) {
       const result = await this.resultOf(deps, state);
       const vector = await indexResult(deps.index, deps.embedder, video, result);
-      const possible_duplicate = await this.duplicate(deps, video.id, vector);
+      const possible_duplicate = await this.duplicate(deps, video, vector);
       state = await this.save({ ...state, indexed: { possible_duplicate } });
       this.hook(state, 'index:recorded');
     }
@@ -662,11 +665,12 @@ export class VideoDO extends DurableObject<Env> {
     };
   }
 
-  private async duplicate(deps: VideoDeps, videoId: string, vector: number[]) {
+  private async duplicate(deps: VideoDeps, video: Video, vector: number[]) {
+    const videoId = video.id;
     try {
-      for (const candidate of await duplicateCandidates(deps.index, vector, videoId, deps.settings.duplicateThreshold)) {
+      for (const candidate of await duplicateCandidates(deps.index, vector, videoId, deps.settings.duplicateThreshold, video.user_id ?? 'owner')) {
         const other = await getVideo(deps.db, candidate.id);
-        if (other && other.status === 'completed' && !other.archived_at) {
+        if (other && other.status === 'completed' && !other.archived_at && (other.user_id ?? 'owner') === (video.user_id ?? 'owner')) {
           return { request_id: other.id, filename: other.filename, display_name: other.display_name, similarity: Math.round(candidate.similarity * 1e4) / 1e4 };
         }
       }
@@ -814,16 +818,17 @@ export class VideoDO extends DurableObject<Env> {
     return {
       db: env.DB, bucket: env.VIDEOS, index: env.VECTORIZE, media: mediaBinding(env.MEDIA, env.VIDEOS),
       transcriber: workersAiWhisper(env.AI, config.whisperModel), gemini: new Gemini(env.GEMINI_API_KEY, config.geminiModel),
-      embedder: workersAiEmbedder(env.AI, config.embeddingModel), google: googleClient(env), settings: config,
+      embedder: workersAiEmbedder(env.AI, config.embeddingModel), google: null, googleFor: (userId) => googleClient(env, userId), settings: config,
     };
   }
 }
 
-export function googleClient(env: Env): Google | null {
+/** The Google client of one user (their own connection, refresh token and token cache). */
+export function googleClient(env: Env, userId: string): Google | null {
   if (!env.DB || !env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.TOKEN_ENC_KEY) return null;
   const origin = env.PUBLIC_ORIGIN || 'https://spotted.haciensus.com';
   return new Google({ clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET, encKey: env.TOKEN_ENC_KEY,
-    redirectUri: `${origin}/oauth/google/callback` }, d1TokenStore(env.DB));
+    redirectUri: `${origin}/oauth/google/callback` }, d1TokenStore(env.DB, userId));
 }
 
 const overLimit = (max: number) => `Skipped: over ${Math.round(max / 1e6)} MB (the frame extractor's input limit)`;
