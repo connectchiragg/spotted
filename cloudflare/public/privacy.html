@@ -70,12 +70,13 @@ footer{max-width:720px;margin:0 auto;padding:var(--sp-5) var(--sp-6) var(--sp-8)
     <li><strong>Your Google account basics:</strong> your name, email address and profile picture, received when you sign in with Google. They identify your account and appear in the account menu.</li>
     <li><strong>Videos you add:</strong> files you upload, and videos you pick in Google Photos.</li>
     <li><strong>What is derived from them:</strong> key frames, captions and summaries, transcripts of speech, and tags, which make your videos searchable.</li>
+    <li><strong>Your API key, if you add one:</strong> the Gemini, OpenAI, Anthropic or OpenRouter key you paste in Settings. It is stored encrypted, used only for AI calls on your own videos and searches, never shown again (only its last 4 characters), and deleted when you remove it.</li>
     <li><strong>Usage counts:</strong> how many videos and how much storage you use, and how many searches you run each day, so that limits can be applied.</li>
   </ul>
 
   <h2>Who processes it</h2>
   <ul>
-    <li><strong>Google Gemini</strong> describes frames, writes captions and summaries, and composes answers to your searches.</li>
+    <li><strong>The AI provider of the API key you add</strong> (Google Gemini, OpenAI, Anthropic, or OpenRouter and the model you choose there) describes frames, writes captions and summaries, and composes answers to your searches, under that provider's terms for your account.</li>
     <li><strong>Cloudflare</strong> runs and stores Spotted: Workers (the app), R2 (video and frame storage), D1 (the database), Vectorize (the search index) and Workers AI (including Whisper, for transcripts).</li>
   </ul>
   <p>These providers process data only to provide Spotted's features.</p>

@@ -25,7 +25,7 @@
 <meta name="twitter:description" content="Describe a moment and get the exact frame, with an answer that cites it.">
 <meta name="twitter:image" content="https://spotted.haciensus.com/og.jpg">
 <meta name="twitter:image:alt" content="Spotted finding an ambulance in the background of a football clip at 0:10">
-<script type="application/ld+json">[{"@context": "https://schema.org", "@type": "WebApplication", "name": "Spotted", "url": "https://spotted.haciensus.com/", "description": "AI video search for your own videos: describe a moment and get the exact frame, cited.", "applicationCategory": "MultimediaApplication", "operatingSystem": "Web browser", "image": "https://spotted.haciensus.com/og.jpg", "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}, "author": {"@type": "Person", "name": "Chirag Goel", "url": "https://haciensus.com/"}, "sameAs": ["https://github.com/connectchiragg/spotted"]}, {"@context": "https://schema.org", "@type": "VideoObject", "name": "Spotted: search your videos by what happens in them", "description": "Searching a video library for “ambulance” finds one in the background of a football clip, at 0:10, with an answer that cites the frame.", "thumbnailUrl": "https://spotted.haciensus.com/og.jpg", "uploadDate": "2026-10-16", "duration": "PT27S", "contentUrl": "https://haciensus.com/works/assets/media/spotted-demo.mp4"}, {"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": [{"@type": "Question", "name": "What is Spotted?", "acceptedAnswer": {"@type": "Answer", "text": "Spotted is an AI video search app for your own videos. You describe a moment, such as a scene, an object or something said, and it finds the exact frame and timestamp, with a short answer that cites where it saw it."}}, {"@type": "Question", "name": "How do I add videos?", "acceptedAnswer": {"@type": "Answer", "text": "Sign in with Google, then pick videos in Google Photos with Google's own picker, or upload MP4 or MOV files. Spotted only sees the videos you pick."}}, {"@type": "Question", "name": "Can other people see my videos?", "acceptedAnswer": {"@type": "Answer", "text": "No. Every person has a private library. Nobody else can see, search or play your videos, and you can delete any video at any time."}}, {"@type": "Question", "name": "Is Spotted free?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Each account can add 20 videos (up to 500 MB) and run 30 searches a day, free."}}, {"@type": "Question", "name": "How does the search work?", "acceptedAnswer": {"@type": "Answer", "text": "Spotted samples frames from each video and describes them with Google Gemini, transcribes speech with Whisper, then combines vector search, a reranker and a label hierarchy, so a football match does not match “birthday party”."}}]}]</script>
+<script type="application/ld+json">[{"@context": "https://schema.org", "@type": "WebApplication", "name": "Spotted", "url": "https://spotted.haciensus.com/", "description": "AI video search for your own videos: describe a moment and get the exact frame, cited.", "applicationCategory": "MultimediaApplication", "operatingSystem": "Web browser", "image": "https://spotted.haciensus.com/og.jpg", "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}, "author": {"@type": "Person", "name": "Chirag Goel", "url": "https://haciensus.com/"}, "sameAs": ["https://github.com/connectchiragg/spotted"]}, {"@context": "https://schema.org", "@type": "VideoObject", "name": "Spotted: search your videos by what happens in them", "description": "Searching a video library for “ambulance” finds one in the background of a football clip, at 0:10, with an answer that cites the frame.", "thumbnailUrl": "https://spotted.haciensus.com/og.jpg", "uploadDate": "2026-10-16", "duration": "PT27S", "contentUrl": "https://haciensus.com/works/assets/media/spotted-demo.mp4"}, {"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": [{"@type": "Question", "name": "What is Spotted?", "acceptedAnswer": {"@type": "Answer", "text": "Spotted is an AI video search app for your own videos. You describe a moment, such as a scene, an object or something said, and it finds the exact frame and timestamp, with a short answer that cites where it saw it."}}, {"@type": "Question", "name": "How do I add videos?", "acceptedAnswer": {"@type": "Answer", "text": "Sign in with Google, then pick videos in Google Photos with Google's own picker, or upload MP4 or MOV files. Spotted only sees the videos you pick."}}, {"@type": "Question", "name": "Can other people see my videos?", "acceptedAnswer": {"@type": "Answer", "text": "No. Every person has a private library. Nobody else can see, search or play your videos, and you can delete any video at any time."}}, {"@type": "Question", "name": "Is Spotted free?", "acceptedAnswer": {"@type": "Answer", "text": "Spotted is free to use with your own Gemini, OpenAI, Anthropic or OpenRouter API key, which pays for the analysis. Each account can add 10 videos of up to 3 minutes (300 MB in total) and run 30 searches a day."}}, {"@type": "Question", "name": "How does the search work?", "acceptedAnswer": {"@type": "Answer", "text": "Spotted samples frames from each video and describes them with the model you choose, transcribes speech with Whisper, then combines vector search, a reranker and a label hierarchy, so a football match does not match “birthday party”."}}]}]</script>
 <meta name="theme-color" content="#0f100f">
 <meta name="color-scheme" content="dark">
 <link rel="icon" href="/favicon.ico" sizes="any">
@@ -151,6 +151,17 @@ kbd{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 
 .usage{display:grid;gap:var(--sp-3);margin-bottom:var(--sp-3);padding-top:var(--sp-3);border-top:1px solid var(--line)}
 .usage-head{font-size:var(--fs-11);letter-spacing:1.3px;text-transform:uppercase;color:var(--text-3);font-weight:650}
 .fill.full{background:var(--warn)}
+.popover{max-height:calc(100vh - 80px);overflow:auto}
+.keybox{display:grid;gap:var(--sp-3);margin-bottom:var(--sp-3);padding-top:var(--sp-3);border-top:1px solid var(--line)}
+.key-state{font-size:var(--fs-12);color:var(--text-2);line-height:1.6;overflow-wrap:anywhere}
+.key-state .mono{color:var(--text)}
+.key-actions{display:flex;gap:var(--sp-2);flex-wrap:wrap}
+.key-form{display:grid;gap:var(--sp-3)}
+.key-form .fine{margin-top:0}
+.key-msg{font-size:var(--fs-12);line-height:1.5;color:var(--text-2)}
+.key-msg[data-tone=bad]{color:var(--danger)}
+.key-msg[data-tone=good]{color:var(--accent)}
+.key-msg:empty{display:none}
 
 /* ------------------------------------------------------------------ signed in / signed out */
 body[data-auth=pending] .app-only,body[data-auth=out] .app-only,body:not([data-auth=out]) .out-only{display:none!important}
@@ -484,6 +495,23 @@ body:not([data-auth=in]){--header-h:64px}
         <div class="account-head"><span class="avatar large pending" id="menu-avatar" aria-hidden="true"></span><div class="account-id"><strong id="menu-name">Signing in…</strong><span id="menu-email"></span></div></div>
         <dl class="facts"><div><dt>Account</dt><dd id="menu-access">Checking…</dd></div><div><dt>Photos</dt><dd id="menu-google">Checking…</dd></div><div><dt>Updates</dt><dd id="menu-live">Connecting…</dd></div></dl>
         <div class="usage" id="menu-usage" hidden></div>
+        <section class="keybox" id="key-box" aria-labelledby="key-head" hidden>
+          <p class="usage-head" id="key-head">API key</p>
+          <p class="key-state" id="key-state"></p>
+          <div class="key-actions" id="key-actions" hidden>
+            <button class="btn btn-sm" id="key-test" type="button">Test</button>
+            <button class="btn btn-sm" id="key-replace" type="button">Replace</button>
+            <button class="btn btn-sm btn-ghost btn-danger" id="key-remove" type="button">Remove</button>
+          </div>
+          <form class="key-form" id="key-form" hidden aria-label="Add your API key">
+            <label class="field" for="key-provider"><span>Provider</span><select class="input" id="key-provider"></select></label>
+            <label class="field" for="key-model"><span>Model <small>optional</small></span><input class="input" id="key-model" type="text" maxlength="120" autocomplete="off" spellcheck="false"></label>
+            <label class="field" for="key-value"><span>API key</span><input class="input" id="key-value" type="password" maxlength="400" autocomplete="off" spellcheck="false" placeholder="Paste your key"></label>
+            <p class="fine" id="key-hint"></p>
+            <div class="row-actions"><button class="btn btn-sm btn-ghost" id="key-cancel" type="button">Cancel</button><button class="btn btn-sm btn-primary" id="key-save" type="submit">Save key</button></div>
+          </form>
+          <p class="key-msg" id="key-msg" role="status" aria-live="polite"></p>
+        </section>
         <button class="btn btn-block btn-danger" id="account-signout" type="button">Sign out</button>
       </div>
     </div>
@@ -497,7 +525,7 @@ body:not([data-auth=in]){--header-h:64px}
       <h1 id="landing-title">Every frame.<br><em>Within reach.</em></h1>
       <p class="lead">Search your own videos by what happens in them: a scene, an object, or something said.</p>
       <a class="btn btn-primary btn-lg" href="/auth/login?next=/">Sign in with Google</a>
-      <p class="fine">Guests get 20 videos, 500 MB and 30 searches a day. Videos are processed by Google Gemini and Cloudflare Workers AI. <a href="/privacy">Privacy policy</a></p>
+      <p class="fine">Bring your own Gemini, OpenAI, Anthropic or OpenRouter API key. Guests get 10 videos of up to 3 minutes, 300 MB and 30 searches a day. Videos are processed by your chosen model and Cloudflare Workers AI. <a href="/privacy">Privacy policy</a></p>
     </div>
     <div class="demo"><video poster="https://haciensus.com/works/assets/media/spotted-use.jpg" src="https://haciensus.com/works/assets/media/spotted-demo.mp4" controls muted playsinline preload="metadata" aria-label="Spotted demo: searching videos by what happens in them"></video></div>
   </section>
@@ -509,7 +537,7 @@ body:not([data-auth=in]){--header-h:64px}
       <li><strong>Search in plain words.</strong> Ask for &ldquo;the goal celebration&rdquo; or &ldquo;an ambulance&rdquo;. You get the frame, the timestamp and a short answer that cites it.</li>
     </ol>
     <h2 id="faq-title">Questions</h2>
-    <div class="faq"><details class="faq-item"><summary>What is Spotted?</summary><p>Spotted is an AI video search app for your own videos. You describe a moment, such as a scene, an object or something said, and it finds the exact frame and timestamp, with a short answer that cites where it saw it.</p></details><details class="faq-item"><summary>How do I add videos?</summary><p>Sign in with Google, then pick videos in Google Photos with Google's own picker, or upload MP4 or MOV files. Spotted only sees the videos you pick.</p></details><details class="faq-item"><summary>Can other people see my videos?</summary><p>No. Every person has a private library. Nobody else can see, search or play your videos, and you can delete any video at any time.</p></details><details class="faq-item"><summary>Is Spotted free?</summary><p>Yes. Each account can add 20 videos (up to 500 MB) and run 30 searches a day, free.</p></details><details class="faq-item"><summary>How does the search work?</summary><p>Spotted samples frames from each video and describes them with Google Gemini, transcribes speech with Whisper, then combines vector search, a reranker and a label hierarchy, so a football match does not match “birthday party”.</p></details></div>
+    <div class="faq"><details class="faq-item"><summary>What is Spotted?</summary><p>Spotted is an AI video search app for your own videos. You describe a moment, such as a scene, an object or something said, and it finds the exact frame and timestamp, with a short answer that cites where it saw it.</p></details><details class="faq-item"><summary>How do I add videos?</summary><p>Sign in with Google, then pick videos in Google Photos with Google's own picker, or upload MP4 or MOV files. Spotted only sees the videos you pick.</p></details><details class="faq-item"><summary>Can other people see my videos?</summary><p>No. Every person has a private library. Nobody else can see, search or play your videos, and you can delete any video at any time.</p></details><details class="faq-item"><summary>Is Spotted free?</summary><p>Spotted is free to use with your own Gemini, OpenAI, Anthropic or OpenRouter API key, which pays for the analysis. Each account can add 10 videos of up to 3 minutes (300 MB in total) and run 30 searches a day.</p></details><details class="faq-item"><summary>How does the search work?</summary><p>Spotted samples frames from each video and describes them with the model you choose, transcribes speech with Whisper, then combines vector search, a reranker and a label hierarchy, so a football match does not match “birthday party”.</p></details></div>
     <p class="fine">Built by <a href="https://haciensus.com/">Chirag Goel</a> on Cloudflare Workers, D1, Vectorize, R2 and Workers AI, with Google Gemini. <a href="https://github.com/connectchiragg/spotted">Source code</a> · <a href="/privacy">Privacy policy</a></p>
   </section>
 </div>
@@ -545,6 +573,7 @@ body:not([data-auth=in]){--header-h:64px}
           <button class="btn btn-sm" id="drive-toggle" type="button" aria-expanded="false" aria-controls="drive-form" hidden><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg><span class="truncate" id="drive-toggle-label">Drive folder</span></button>
         </div>
         <p class="callout warn source-note" id="limit-note" role="status" hidden></p>
+        <div class="callout neutral source-note" id="key-note" role="status" hidden><strong>Add your API key in Settings to analyse videos.</strong><span>Spotted runs on your own Gemini, OpenAI, Anthropic or OpenRouter key. Until then, new videos wait and search shows matches without a written answer.</span><button class="btn btn-sm" id="key-note-open" type="button">Add API key</button></div>
         <form class="subpanel" id="upload-form" hidden aria-label="Upload a video">
           <input id="file" class="sr-only" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" aria-label="Choose a video file" tabindex="-1">
           <div class="file-pick"><svg class="icon" aria-hidden="true"><use href="#i-film"/></svg><span class="truncate" id="file-name">No file chosen</span><span class="meta" id="file-size"></span></div>
@@ -786,8 +815,10 @@ function setConnection(state, text) { const live = $('live'); live.dataset.state
 
 /* ------------------------------------------------------------------ status helpers */
 function statusKey(j) { return j.archived_at ? 'archived' : j.status }
-function badge(j) { const key = statusKey(j); const b = el('span', 'badge ' + key, LABELS[key] || cap(key)); if (j.status === 'pending' && j.progress?.stage === 'Waiting to retry' && !j.archived_at) b.textContent = 'Retrying'; return b }
-function skipReason(j) { const e = String(j.error || ''); return /10 min|duration|minutes/i.test(e) ? 'Longer than 10 minutes' : /100 MB|too large|over \d+/i.test(e) ? 'Over 100 MB' : e.replace(/^Skipped:\s*/, '') || 'Skipped' }
+function badge(j) { const key = statusKey(j); const b = el('span', 'badge ' + key, LABELS[key] || cap(key)); if (j.status === 'pending' && j.progress?.stage === 'Waiting to retry' && !j.archived_at) b.textContent = 'Retrying'; if (needsKey(j) && !j.archived_at) b.textContent = 'Needs key'; return b }
+function needsKey(j) { return j.status === 'pending' && j.progress?.stage === 'Waiting for your API key' }
+function maxMinutes() { const s = Number(account?.limits?.max_video_seconds); return Number.isFinite(s) && s > 0 ? Math.min(10, Math.round(s / 60)) : 10 }
+function skipReason(j) { const e = String(j.error || ''); const m = /longer than (\d+) minutes/i.exec(e); return m ? 'Longer than ' + m[1] + ' minutes' : /10 min|duration|minutes/i.test(e) ? 'Longer than 10 minutes' : /100 MB|too large|over \d+/i.test(e) ? 'Over 100 MB' : e.replace(/^Skipped:\s*/, '') || 'Skipped' }
 function thumbUrl(j, i) { return '/videos/' + encodeURIComponent(j.id) + '/thumbs/' + i }
 function firstThumb(j) { return j.result?.thumbs?.length && !j.archived_at ? j.result.thumbs[0] : null }
 
@@ -967,7 +998,7 @@ async function naturalSearch(query) {
       setSearchStatus('No matches for ' + query + '.');
       return;
     }
-    const meta = [items.length + ' matching video' + (items.length === 1 ? '' : 's'), data.answer_source === 'gemini' && data.answer_model ? 'Answer by ' + data.answer_model : 'Retrieved evidence only', secs];
+    const meta = [items.length + ' matching video' + (items.length === 1 ? '' : 's'), data.answer_source !== 'retrieval' && data.answer_model ? 'Answer by ' + data.answer_model : 'Retrieved evidence only', secs];
     r.append(resultsHeader(query, meta));
     const answer = el('section', 'answer'); answer.setAttribute('aria-label', 'Answer');
     answer.append(el('div', 'answer-label', 'Answer'));
@@ -1128,7 +1159,8 @@ function renderDetail() {
   const p = !j.archived_at && progressView(j);
   if (p) { const b = el('section', 'block'); b.append(el('h3', '', 'Analysis in progress'), p, el('p', 'player-note', j.status === 'processing' ? 'Finding key frames, transcribing speech and describing each scene. This updates live.' : j.status === 'uploading' ? 'Your video is being saved. You can keep browsing.' : 'Queued for analysis. Imports start 20 seconds apart.')); root.append(b) }
   if (j.status === 'failed') { const c = el('div', 'callout danger'); c.append(el('strong', '', 'Processing failed'), el('span', '', j.error || 'This video could not be processed.')); const again = retryActionFor(j); if (again) c.append(again); root.append(c) }
-  if (j.status === 'skipped') { const c = el('div', 'callout neutral'); c.append(el('strong', '', 'Skipped · ' + skipReason(j)), el('span', '', 'Spotted analyses videos under 100 MB and 10 minutes. Trim or compress it, then import or upload it again.')); root.append(c) }
+  if (needsKey(j) && !j.archived_at) { const c = el('div', 'callout warn'); c.append(el('strong', '', 'Waiting for your API key'), el('span', '', j.error || 'Add your API key in Settings to analyse videos.')); const b = button('Open API key settings'); b.onclick = (e) => openKeySettings(e); c.append(b); root.append(c) }
+  if (j.status === 'skipped') { const c = el('div', 'callout neutral'); c.append(el('strong', '', 'Skipped · ' + skipReason(j)), el('span', '', 'Spotted analyses videos under 100 MB and ' + maxMinutes() + ' minutes. Trim or compress it, then import or upload it again.')); root.append(c) }
   if (j.archived_at) { const c = el('div', 'callout neutral'); c.append(el('strong', '', 'Archived ' + relTime(j.archived_at)), el('span', '', 'Hidden from the library and from search. Restore it to search it again.')); root.append(c) }
   if (j.possible_duplicate) { const dup = j.possible_duplicate; const c = el('div', 'callout warn'); c.append(el('strong', '', 'Possible duplicate'), el('span', '', 'Very similar content is in another video. Review it before deciding what to keep.')); const b = button('View ' + (dup.display_name || cleanFilename(dup.filename) || 'the similar video'), 'btn btn-sm'); b.onclick = () => openRelated(dup.request_id, b); c.append(b); root.append(c) }
   if (j.result) {
@@ -1423,7 +1455,8 @@ function applyLimits() {
   $('upload-pick').disabled = full || uploading || Boolean(pendingConfirmation); $('photos-import').disabled = full || importBusy();
   $('limit-note').hidden = !full; $('limit-note').textContent = full ? limitText() : '';
   const max = usageLines(l).map(([, x], i) => i === 0 ? x.max + ' videos' : i === 1 ? size(x.max) : x.max + ' searches a day');
-  $('source-fine').textContent = 'MP4 or MOV. Videos over 100 MB or 10 minutes are skipped. Originals are kept 7 days.' + (max.length ? ' Guest accounts get ' + max.join(', ').replace(/, ([^,]*)$/, ' and $1') + '.' : '');
+  $('key-note').hidden = !account?.llm || account.llm.source !== 'own' || account.llm.ready;
+  $('source-fine').textContent = 'MP4 or MOV. Videos over 100 MB or ' + maxMinutes() + ' minutes are skipped. Originals are kept 7 days.' + (account?.llm?.source === 'own' && account.llm.ready && !account.llm.audio ? ' With this provider, sound tags are skipped (frames and speech still work).' : '') + (max.length ? ' Guest accounts get ' + max.join(', ').replace(/, ([^,]*)$/, ' and $1') + '.' : '');
 }
 function showAccount(me) {
   const u = me.user || {}; const name = u.name || u.email || 'Account'; const lines = usageLines(me.limits);
@@ -1432,16 +1465,80 @@ function showAccount(me) {
   $('menu-name').textContent = name; $('menu-email').textContent = u.email || ''; $('menu-email').hidden = !u.name;
   $('menu-access').textContent = 'Signed in with Google';
   const box = $('menu-usage'); box.hidden = !me.limits || !lines.length; box.replaceChildren();
+  renderKey();
   if (!box.hidden) { box.append(el('p', 'usage-head', 'Your usage')); for (const [text, x] of lines) { const p = progressBar(text, x.max ? Math.min(100, x.used / x.max * 100) : 100, 'Used ' + text); if (x.used >= x.max) p.querySelector('.fill').classList.add('full'); box.append(p) } }
   applyLimits();
 }
+/* ------------------------------------------------------------------ API key
+   GET /settings/llm: {owner, server_key, key: {provider, model, last4, status, error} | null, providers}.
+   The key itself never comes back: after saving, only the provider, model and last 4 characters show.
+   PUT validates the key with one small call before storing it; Test repeats that call. */
+let llmSettings = null, keyEditing = false;
+const providerOf = (id) => llmSettings?.providers?.find((p) => p.id === id);
+function keyMessage(text, tone) { const m = $('key-msg'); m.textContent = text || ''; if (tone) m.dataset.tone = tone; else delete m.dataset.tone }
+function keyHint() {
+  const p = providerOf($('key-provider').value); if (!p) return;
+  $('key-model').placeholder = p.default_model;
+  $('key-hint').textContent = 'Get a key at ' + p.key_hint + '. Leave the model empty for ' + p.default_model + '.' + (p.audio ? '' : ' This provider can’t hear audio, so sound tags are skipped; frames and the speech transcript still work.') + ' Your key is encrypted on the server and never shown again.';
+}
+function renderKey() {
+  const box = $('key-box'), owner = account?.user?.role === 'owner' || account?.llm?.source === 'server';
+  box.hidden = !account?.llm; if (box.hidden) return;
+  const k = llmSettings?.key, state = $('key-state');
+  state.replaceChildren();
+  if (owner) { state.textContent = account.llm.ready ? 'Your library uses the server’s Gemini key.' : 'The server’s Gemini key is not set.'; $('key-actions').hidden = true; $('key-form').hidden = true; return }
+  if (k) {
+    const p = providerOf(k.provider); state.append((p?.label || k.provider) + ' · ', el('span', 'mono', k.model), ' · key ending ', el('span', 'mono', '…' + k.last4));
+    if (k.status === 'invalid') state.append(el('br'), el('span', 'key-msg', 'The provider rejected this key. Replace it to continue.'));
+  } else if (!keyEditing) state.textContent = 'Add your own API key to analyse videos and get written answers. It pays for the AI calls on your videos.';
+  if (llmSettings && !llmSettings.available) state.textContent = 'API keys can’t be stored on this server yet.';
+  $('key-actions').hidden = !k || keyEditing; $('key-form').hidden = !keyEditing && Boolean(k) || (llmSettings && !llmSettings.available);
+  if (!$('key-form').hidden && !$('key-provider').options.length && llmSettings) {
+    for (const p of llmSettings.providers) { const o = el('option', '', p.label); o.value = p.id; $('key-provider').append(o) }
+    $('key-provider').value = k?.provider || 'gemini'; keyHint();
+  }
+  $('key-cancel').hidden = !k;
+}
+async function loadKey() {
+  if (!account?.llm || account.llm.source !== 'own') { renderKey(); return }
+  try { llmSettings = await request('/settings/llm') } catch (e) { keyMessage(e.message, 'bad') }
+  renderKey();
+}
+function openKeySettings(e) {
+  e?.stopPropagation(); // the document click handler would close the menu again
+  if ($('sheet') && !$('sheet').hidden) closeDetail(false); if ($('sidebar').classList.contains('open')) closeDrawer(false);
+  toggleAccount(true); if (!llmSettings?.key) keyEditing = true; renderKey();
+  $('key-box').scrollIntoView({ block: 'nearest' }); (llmSettings?.key ? $('key-test') : $('key-value')).focus();
+}
+$('key-provider').onchange = () => { $('key-model').value = ''; keyHint() };
+$('key-replace').onclick = () => { keyEditing = true; keyMessage(''); $('key-value').value = ''; $('key-model').value = llmSettings?.key?.model || ''; if (llmSettings?.key) $('key-provider').value = llmSettings.key.provider; renderKey(); keyHint(); $('key-value').focus() };
+$('key-cancel').onclick = () => { keyEditing = false; $('key-value').value = ''; keyMessage(''); renderKey(); $('key-replace').focus() };
+$('key-form').onsubmit = async (e) => {
+  e.preventDefault(); const save = $('key-save'); save.disabled = true; keyMessage('Checking the key with ' + (providerOf($('key-provider').value)?.label || 'the provider') + '…');
+  try {
+    const body = { provider: $('key-provider').value, model: $('key-model').value.trim() || undefined, key: $('key-value').value.trim() || undefined };
+    llmSettings = await request('/settings/llm', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    $('key-value').value = ''; keyEditing = false; keyMessage('Saved. Waiting videos will start now.', 'good');
+    await loadMe(); refresh(true);
+  } catch (err) { keyMessage(err.message, 'bad') } finally { save.disabled = false; renderKey() }
+};
+$('key-test').onclick = async () => {
+  const b = $('key-test'); b.disabled = true; keyMessage('Testing…');
+  try { const r = await request('/settings/llm/test', { method: 'POST' }); llmSettings = r.settings; keyMessage(r.detail, r.ok ? 'good' : 'bad'); if (!r.ok) await loadMe() } catch (err) { keyMessage(err.message, 'bad') } finally { b.disabled = false; renderKey() }
+};
+$('key-remove').onclick = async () => {
+  if (!confirm('Remove your API key? New videos will wait until you add one.')) return;
+  try { llmSettings = await request('/settings/llm', { method: 'DELETE' }); keyEditing = false; keyMessage('Key removed.'); await loadMe() } catch (err) { keyMessage(err.message, 'bad') } finally { renderKey() }
+};
+$('key-note-open').onclick = (e) => openKeySettings(e);
+
 /** Re-read /me (after uploads, imports, deletes and searches) to refresh usage and the upload limit. */
 async function loadMe() {
   try { const me = await request('/me'); if (!me.signed_in) { signedOut(); return null } account = me; showAccount(me); return me } catch { return null }
 }
 /** The signed-out screen: stop every timer and socket so nothing calls the API, and drop the library from memory. */
 function signedOut() {
-  const was = authed; authed = false; account = null; document.body.dataset.auth = 'out';
+  const was = authed; authed = false; account = null; llmSettings = null; keyEditing = false; document.body.dataset.auth = 'out';
   clearInterval(refreshTimer); refreshTimer = null; clearInterval(pollTimer); pollTimer = null; clearTimeout(importTimer); importSession = null;
   for (const s of sockets.values()) s.stop(); sockets.clear();
   if (!$('account-menu').hidden) toggleAccount(false); if (!$('sheet').hidden) closeDetail(false); closeDrawer(false);
@@ -1515,7 +1612,7 @@ async function boot() {
     notice('Could not reach Spotted. ' + e.message, { error: true, sticky: true, action: { label: 'Retry', run: boot } }); return;
   }
   if (!me?.signed_in) { signedOut(); return }
-  authed = true; account = me; document.body.dataset.auth = 'in'; showAccount(me);
+  authed = true; account = me; document.body.dataset.auth = 'in'; showAccount(me); loadKey();
   renderHistory(); loadGoogle(); refresh().then(resumeImport);
   if (polling) startPolling(); else refreshTimer = setInterval(() => refresh(), 60000);
 }
