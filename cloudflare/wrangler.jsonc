@@ -59,8 +59,9 @@
     { "binding": "VIDEOS", "bucket_name": "spotted-videos" }
   ],
 
-  // Gemini 3.1 Flash Lite free tier on the key's project: 15 RPM, 500 RPD, shared by frame
-  // descriptions (2 calls per 16-frame video), summaries (1 per video) and /query (1 each).
+  // The owner's Gemini 3.1 Flash Lite free tier (GEMINI_API_KEY, the owner's library only): 15 RPM,
+  // 500 RPD, shared by frame descriptions (2 calls per 16-frame video), summaries (1 per video) and
+  // the owner's /query answers (1 each).
   // Imports start IMPORT_STAGGER_S apart to stay under 15 RPM; 429s wait without failing.
   "vars": {
     "PUBLIC_ORIGIN": "https://spotted.haciensus.com",
@@ -90,17 +91,24 @@
     "SEARCH_VECTOR_MARGIN": "0.07",
     "DUPLICATE_SIMILARITY_THRESHOLD": "0.97",
     "PUBLIC_DEMO_LIMITS": "true",
-    "DAILY_UPLOAD_LIMIT": "200",
-    "DAILY_QUERY_LIMIT": "2000",
-    "GUEST_MAX_VIDEOS": "20",
-    "GUEST_MAX_MB": "500",
+    // Guests bring their own LLM key, so their Gemini/OpenAI/Anthropic calls cost the owner nothing.
+    // Whisper, embeddings, reranking, Vectorize and R2 are the owner's free allowances, so these caps
+    // keep ~10 active guests inside them (docs/cloudflare-port.md §11): at most 30 new guest videos
+    // of up to 3 minutes a day ≈ 4.2k of Workers AI's 10k free neurons; 300 guest searches a day
+    // ≈ 0.9k neurons and 9k Vectorize queries a month.
+    "DAILY_UPLOAD_LIMIT": "30",
+    "DAILY_QUERY_LIMIT": "300",
+    "GUEST_MAX_VIDEOS": "10",
+    "GUEST_MAX_MB": "300",
+    "GUEST_DAILY_VIDEOS": "5",
+    "GUEST_MAX_VIDEO_SECONDS": "180",
     "GUEST_DAILY_SEARCHES": "30",
     "IMPORT_STAGGER_S": "20",
     "DRIVE_POLL_MINUTES": "60",
     "DRIVE_LOOKBACK_MONTHS": "24"
   },
-  // Secrets (set with `wrangler secret put`, never committed): GEMINI_API_KEY, ADMIN_TOKEN,
-  // TOKEN_ENC_KEY, GOOGLE_CLIENT_SECRET. Optional: R2_ACCESS_KEY_ID + R2_SECRET_ACCESS_KEY switch
+  // Secrets (set with `wrangler secret put`, never committed): GEMINI_API_KEY (the owner's only),
+  // ADMIN_TOKEN, TOKEN_ENC_KEY (also seals guests' own LLM keys), GOOGLE_CLIENT_SECRET. Optional: R2_ACCESS_KEY_ID + R2_SECRET_ACCESS_KEY switch
   // uploads and playback from the Worker routes to presigned R2 URLs.
 
   "observability": { "enabled": true },

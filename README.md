@@ -15,6 +15,11 @@ An independent project, running entirely on Cloudflare's free tier.
 ## What it does
 
 - **Sign in with Google:** each person has their own library; nobody can see, search or play anyone else's videos.
+- **Bring your own API key:** guests add a Gemini, OpenAI, Anthropic or OpenRouter key in the account menu, and that key pays for the AI on their videos and searches.
+  - It is stored encrypted and never shown again; the menu shows the provider, the model and the last 4 characters, with Test, Replace and Remove.
+  - Without a key, a guest can sign in and browse. New videos wait ("Add your API key in Settings to analyse videos"), and search shows matches without a written answer.
+  - Only Gemini hears audio, so with the other providers sound tags are skipped; frames and the speech transcript still work.
+  - The owner's library uses the server's Gemini key, which is never used for anyone else.
 - **Bring videos in:**
   - Pick videos in **Google Photos** (Google's own picker; Spotted only sees what you pick);
   - watch a **Google Drive** folder (checked hourly; the owner only);
@@ -39,13 +44,14 @@ Google Photos / Drive / upload
     probe                         duration from the MP4 header
     select + frames               Media Transformations spritesheets → up to 16 changed frames
     transcribe                    Workers AI whisper-large-v3-turbo
-    describe + summarize          Gemini 3.1 Flash Lite: a paragraph per frame, a summary, tags,
-                                  labels from a fixed hierarchy, sound tags (first 60 s of audio)
+    describe + summarize          the owner's Gemini 3.1 Flash Lite, or the guest's own key: a paragraph
+                                  per frame, a summary, tags, labels from a fixed hierarchy, sound tags
+                                  (first 60 s of audio; Gemini only)
     index                         Workers AI bge-m3 → Vectorize (summary, speech windows, frames)
         │
         ▼
   Search: bge-m3 nearest 100 → group by video → bge-reranker-base (each passage with its video's
-          context) + label hierarchy → up to 3 videos → Gemini answer with validated [n] citations
+          context) + label hierarchy → up to 3 videos → LLM answer with validated [n] citations
 ```
 
 | Piece | Cloudflare service |
@@ -86,20 +92,23 @@ npx wrangler dev  # local; AI, Vectorize and Media need a Cloudflare login
   - `video.ts`: the pipeline;
   - `library.ts`, `google.ts`: Google Photos and Drive;
   - `retrieval.ts`, `labels.ts`, `vectors.ts`: search;
-  - `gemini.ts`: prompts and validation.
+  - `gemini.ts`: prompts and validation, shared by every provider;
+  - `llm.ts`, `keys.ts`: the providers and each person's encrypted key.
 - **UI:** `cloudflare/public/index.html`.
 - **Deploy:** `cd cloudflare && npm run deploy`. The custom domain is configured in the Cloudflare dashboard. `OWNER_EMAILS` in `wrangler.jsonc` lists the addresses that sign in as the owner.
-- **Secrets** (`wrangler secret put`, never committed): `GEMINI_API_KEY`, `ADMIN_TOKEN`, `TOKEN_ENC_KEY`, `GOOGLE_CLIENT_SECRET`. Uploads and playback go through the Worker (`PUT /videos/:id/upload`, `GET /videos/:id/source`); an optional R2 API token (`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) switches them to presigned URLs.
+- **Secrets** (`wrangler secret put`, never committed): `GEMINI_API_KEY` (the owner's library only), `ADMIN_TOKEN`, `TOKEN_ENC_KEY` (encrypts Google tokens and people's API keys), `GOOGLE_CLIENT_SECRET`. Uploads and playback go through the Worker (`PUT /videos/:id/upload`, `GET /videos/:id/source`); an optional R2 API token (`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) switches them to presigned URLs.
 - **Operations:** people delete their own videos (`DELETE /videos/:id`); the admin can delete any (`DELETE /admin/videos/:id`); owner setup steps, the free-tier budget and incident notes are all in [docs/cloudflare-port.md](docs/cloudflare-port.md).
 
 ## Limits
 
 - **Size and quotas:**
   - 100 MB and 10 minutes per video;
-  - guests: 20 videos, 500 MB and 30 searches per UTC day (the owner has no limits);
-  - all guests together: 200 uploads and 2,000 searches per UTC day, a cost ceiling.
+  - guests: 10 videos, 300 MB, videos up to 3 minutes, 5 new videos and 30 searches per UTC day (the owner has no limits);
+  - all guests together: 30 new videos and 300 searches per UTC day. With ~10 active guests this keeps Whisper, embeddings, Vectorize and R2 inside Cloudflare's free allowances ([numbers](docs/cloudflare-port.md#11-bring-your-own-llm-key-and-the-free-tier)).
+- **Models:**
+  - Guests' AI calls are billed by their own provider, under that provider's limits.
+  - The owner's Gemini free tier allows 15 requests/minute and 500/day (about 2–3 per video). Imports start 20 s apart, and a quota hit waits instead of failing.
 - **Google:**
-  - Gemini's free tier allows 15 requests/minute and 500/day (about 2–3 per video). Imports start 20 s apart, and a quota hit waits instead of failing.
   - The Google OAuth app is published, but Google's review of the Photos permission is pending: until it passes, connecting Google Photos shows an "unverified app" warning and is capped at 100 users. Sign-in and uploads are unaffected.
 - **Storage:** originals are deleted after 7 days (frames, results and search remain), so playback of older videos stops.
 - **Search:**

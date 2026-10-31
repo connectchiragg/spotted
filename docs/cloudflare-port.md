@@ -645,3 +645,57 @@ One file, no build step, no external scripts; the API is unchanged.
 - **WebSocket:** upgrades must come from the same origin.
 - **UI:** generated titles are cached per render.
 
+
+## 11. Bring your own LLM key, and the free tier
+
+Branch `byok` (2026-10-31). Owner decisions: guests bring their own key for Gemini, OpenAI, Anthropic or OpenRouter, and other users must cost the owner nothing.
+
+### 11.1 Design
+
+- **Providers** (`src/llm.ts`): one small `LlmClient` with `describeFrames`, `summarize`, `answer` and `ping`. The prompts, request content (`describeParts`, `summaryParts`) and validation stay in `src/gemini.ts`, so every provider gets the same prompts and the same checks; each class only shapes its HTTP request. Gemini's request is byte-for-byte the old one.
+
+  | Provider | Endpoint | Default model | Audio |
+  |---|---|---|---|
+  | Gemini | `generateContent`, `x-goog-api-key` | `gemini-3.1-flash-lite` | yes (sound tags) |
+  | OpenAI | `/v1/chat/completions`, images as `data:` URLs, `response_format: json_object` | `gpt-6-luna` | no |
+  | Anthropic | `/v1/messages`, `anthropic-version: 2026-10-21`, base64 image blocks, no sampling params | `claude-haiku-5-5` | no |
+  | OpenRouter | `/api/v1/chat/completions` (OpenAI shape), `HTTP-Referer` and `X-Title` | `google/gemini-3.1-flash-lite` | no |
+
+  Defaults checked on 2026-10-31: OpenAI's model page (gpt-6-luna: text and image input, Chat Completions), Anthropic's model table, OpenRouter's `/api/v1/models` (image input; `response_format` supported).
+- **Keys** (`src/keys.ts`, D1 `llm_keys`, migration 0006): AES-GCM with `TOKEN_ENC_KEY`, the same code as the Google refresh tokens, with associated data `llm-api-key:<user id>`, so a sealed key opens only for its own user. Routes return the provider, model, last 4 characters and status, never the key. Keys are never logged; provider error messages never include them.
+- **Routes:** `GET /settings/llm`; `PUT /settings/llm {provider, model?, key?}` checks the key with one small call (`ping`) before storing it, and keeps the stored key when only the model changes; `POST /settings/llm/test` repeats the check; `DELETE /settings/llm`. `GET /me` adds `llm: {source, ready, provider, model, audio}`.
+- **Who pays** (`llmFor`):
+  - the owner: the server `GEMINI_API_KEY`, as before;
+  - a guest with a key: their own key;
+  - a guest without one: nothing. The video waits **before its first step**, so no copy, Whisper or LLM call happens; it shows "Add your API key in Settings to analyse videos" (`needs_key`, no alarm), and `/query` answers from retrieval only.
+- **Resume.** Saving a key calls `VideoDO.resume` on the guest's pending videos (it also voids a quota wait on the old key). A key the provider rejects during analysis (401/403) is marked `invalid` and the video waits for a new key instead of failing.
+- **Audio.** Non-Gemini providers take no audio: the sound clip is never cut (one Media call saved) and `sounds` is empty. The UI hint says so.
+
+### 11.2 Cloudflare plan
+
+Checked read-only on 2026-10-31 (`wrangler whoami`, API GETs, GraphQL analytics). **The plan could not be read:** the wrangler OAuth token has no billing scope (`/accounts/:id/subscriptions` and `/user/subscriptions` answer "Authentication error"), and nothing readable differs between Free and Paid (all three Workers report `usage_model: standard`; both Durable Object classes are SQLite-backed). The owner can check it in the dashboard under Workers & Pages → Plans. The limits below are sized so the answer doesn't matter for Workers AI, Vectorize, D1 and Durable Objects: on Free they would fail rather than bill, on Paid they stay within the included amounts.
+
+Actual use in the last week was tiny: at most 402 Worker requests a day, about 2 Workers AI neurons in total, at most 150 D1 rows read a day, and 59 vectors stored.
+
+### 11.3 Free-tier budget for ~10 active guests
+
+New guest limits (`wrangler.jsonc`): 10 videos, 300 MB, videos up to 3 minutes (`GUEST_MAX_VIDEO_SECONDS`), 5 new videos a day each (`GUEST_DAILY_VIDEOS`, uploads and Photos picks), 30 searches a day each; all guests together 30 new videos (`DAILY_UPLOAD_LIMIT`, now also counting Photos picks) and 300 searches (`DAILY_QUERY_LIMIT`) a day. Before: 20 videos, 500 MB, 10 minutes, no daily video cap, and 200 uploads / 2,000 searches for everyone.
+
+| Resource | Free allowance | Guests at the caps (worst case) | Fits? |
+|---|---|---|---|
+| Workers AI | 10,000 neurons/day (Free and Paid; Paid bills $0.011/1k above) | Whisper 30 videos × 3 min × 46.63 = 4,197; bge-m3 ~160; reranker 300 searches × ~10k tokens × 283/M ≈ 850 → **≈ 5,200/day** | yes, ~4,800 left for the owner (~100 audio-minutes). Before: 200 × 10 min would be 93k |
+| Vectorize stored | 5M dimensions (Paid 10M) | 10 guests × 10 videos × ≤ 23 vectors × 1024 = **2.36M** | yes |
+| Vectorize queried | 30M dimensions/month (Paid 50M); (queries + stored vectors) × 1024 | (9,000 searches + 900 duplicate checks + ~2,400 stored) × 1024 ≈ **12.6M/month** | yes. Before: 60k searches/month ≈ 64M |
+| R2 | 10 GB-month, 1M Class A, 10M Class B per month | ≤ 3 GB of originals (deleted after 7 days) + thumbnails; ~30 Class A per video ≈ 27k/month | yes |
+| D1 | 5M rows read, 100k written per day | ~60 writes per video, a few reads per search | yes |
+| Durable Objects | 100k requests, 13,000 GB-s, 100k rows written per day | ~40 storage writes and 1–3 alarms per video | yes |
+| Media Transformations (binding) | the bindings page says binding operations are **not billed during the open beta**; the same page's billing section says they are billed per operation (5,000 free a month, $0.50 per 1,000; audio = 1 per output second) | per 3-min guest video: ~3 spritesheets + ≤ 16 frames + up to 180 audio ops (only videos over 10 MB) + 60 for the Gemini sound clip | **not if billing starts**: 30 videos/day could reach several thousand ops a day. Unverifiable today; the conflicting docs are the open risk |
+
+R2 is billed per use above its free tier on any plan, which is why guest storage dropped to 300 MB each.
+
+### 11.4 Owner steps (not done; nothing was deployed or changed in the account)
+
+1. `cd cloudflare && npm run db:migrate` (applies `0006_llm_keys.sql` to `spotted-db`).
+2. No new secret: `TOKEN_ENC_KEY` already exists and now also seals guests' keys. Do not rotate it without re-encrypting, or stored keys stop opening (those guests' videos then wait for a new key).
+3. `npm run deploy`. Guest videos already pending will wait for a key on their next alarm.
+4. Check the Workers plan in the dashboard (11.2).
