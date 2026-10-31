@@ -41,7 +41,7 @@ async function setup(opts: SetupOptions = {}) {
   const whisper = fakeTranscriber();
   const vectors = fakeVectorize();
   const bucket = fakeBucket(objects);
-  VideoDO.testDeps.set(video.id, () => ({ db, bucket, index: vectors.index, media: media.port, transcriber: whisper.transcriber, gemini: gemini.gemini,
+  VideoDO.testDeps.set(video.id, () => ({ db, bucket, index: vectors.index, media: media.port, transcriber: whisper.transcriber, llm: gemini.gemini,
     embedder: fakeEmbedder(), google: (opts.google ?? null) as Google | null, settings }));
   const stub = ns.get(ns.idFromName(video.id)) as any;
   const state = (): Promise<IngestState | null> => stub.getState();

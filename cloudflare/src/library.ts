@@ -17,10 +17,14 @@ import { videoStub } from './actor';
 import { Env, guestLimits, Limits, settings, Settings } from './env';
 import { durationMs, DriveFile, Google, GoogleError, PickedItem } from './google';
 import { libraryReason } from './quota';
+import { dailyVideosText, reserve } from './api';
 import { decode as decodeVideo, libraryUsage, nowIso, upsertSourceVideo, Video } from './store';
 import { googleClient } from './video';
 
 const DEFAULT_POLL_MS = 5_000;
+/** Skipped only because of a daily limit: picking it again on a later day imports it. */
+const dailySkipped = (v: { status: string; error: string | null }) => v.status === 'skipped' && /after midnight UTC/.test(v.error ?? '');
+
 const BASE_URL_TTL_MS = 55 * 60_000; // Picker baseUrls live 60 minutes
 
 export interface LibraryDeps {
@@ -117,8 +121,9 @@ export class LibraryDO extends DurableObject<Env> {
       const size = await deps.google.photoVideoSize(item.mediaFile.baseUrl).catch(() => null);
       const tooBig = size !== null && size >= deps.settings.maxSourceBytes;
       // A guest past their limit: the pick is recorded as skipped with the reason, nothing is copied.
-      const reason = !tooBig && usage && deps.limits ? libraryReason(usage, size, deps.limits) : null;
-      const overLimit = reason ? `Skipped: ${reason.detail}` : null;
+      let reason = !tooBig && usage && deps.limits ? libraryReason(usage, size, deps.limits)?.detail ?? null : null;
+      if (!tooBig && !reason && deps.limits) reason = await this.dailyReason(deps, item.id);
+      const overLimit = reason ? `Skipped: ${reason}` : null;
       const { video, created } = await upsertSourceVideo(deps.db, {
         userId: deps.userId, source: 'photos', sourceId: item.id, filename: item.mediaFile.filename || `${item.id}.mp4`, contentType: mime || 'video/mp4', size,
         meta: { session_id: sessionId, base_url: item.mediaFile.baseUrl, base_url_expires_at: new Date(Date.now() + BASE_URL_TTL_MS).toISOString(),
@@ -132,7 +137,7 @@ export class LibraryDO extends DurableObject<Env> {
         if (usage) { usage.videos++; usage.bytes += size ?? 0; }
         await this.startVideo(deps, video);
       }
-      else if (video.status === 'failed') {
+      else if (video.status === 'failed' || dailySkipped(video)) {
         // A re-pick refreshes the 60-minute download link of a video that failed to copy.
         await deps.db.prepare("UPDATE videos SET source_meta=?2, status='pending', error=NULL WHERE id=?1")
           .bind(video.id, JSON.stringify({ ...(video.source_meta ?? {}), session_id: sessionId, base_url: item.mediaFile.baseUrl,
@@ -142,6 +147,20 @@ export class LibraryDO extends DurableObject<Env> {
       }
     }
     return { imported, skipped };
+  }
+
+  /**
+   * A guest's daily new-video budget (their own, and the shared ceiling for all guests): Whisper and
+   * embeddings run on the owner's free Workers AI allowance. A re-pick of a known video is free.
+   */
+  private async dailyReason(deps: LibraryDeps, sourceId: string): Promise<string | null> {
+    const known = await deps.db.prepare("SELECT status, error FROM videos WHERE user_id=?1 AND source='photos' AND source_id=?2").bind(deps.userId, sourceId).first<{ status: string; error: string | null }>();
+    if (known && !dailySkipped(known)) return null;
+    if (!(await reserve(deps.db, `video:${deps.userId}`, deps.settings.guestDailyVideos))) return dailyVideosText(deps.settings);
+    if (deps.settings.publicLimits && !(await reserve(deps.db, 'upload', deps.settings.dailyUploadLimit))) {
+      return 'Spotted has reached its daily limit of new videos for everyone. Please return after midnight UTC.';
+    }
+    return null;
   }
 
   // ------------------------------------------------------------ Google Drive

@@ -5,7 +5,9 @@
 import { libraryStub, videoStub } from './actor';
 import { clearedCookie, createSession, currentUser, endSession, exchangeLogin, loginUrl, OWNER_ID, randomToken, safeNext, sessionCookie, upsertUser, User } from './auth';
 import { guestLimits, Settings } from './env';
-import { Gemini, validateAnswer } from './gemini';
+import { Gemini, TaggerError, validateAnswer } from './gemini';
+import { cleanKey, cleanModel, deleteKey, keyInfo, markKey, openKey, saveKey, storedLlm } from './keys';
+import { isProvider, Llm, makeLlm, Provider, PROVIDERS } from './llm';
 import { authUrl, encryptSecret, exchangeCode, Google, GoogleConfig, GoogleError, scopesFor } from './google';
 import { normalizeQuery, Reranker, search as rankedSearch, thresholdsOf } from './retrieval';
 import { libraryReason } from './quota';
@@ -19,11 +21,15 @@ export interface AppDeps {
   bucket: R2Bucket | null;
   index: VectorizeIndex | null;
   presigner: Presigner | null;
+  /** The owner's Gemini client (server GEMINI_API_KEY). Never used for guests. */
   gemini: Gemini | null;
+  /** TOKEN_ENC_KEY: seals people's own LLM keys. Without it guests cannot add one. */
+  encKey?: string | null;
+  /** Tests: the fetch that people's own LLM clients use. */
+  llmFetch?: typeof fetch;
   embedder: Embedder | null;
   reranker?: Reranker | null;
   settings: Settings;
-  geminiConfigured: boolean;
   assets?: Fetcher;
   /** VideoDO namespace: one actor per video runs ingestion and serves its WebSocket. */
   videos?: DurableObjectNamespace | null;
@@ -200,9 +206,6 @@ export async function publicBudget(request: Request, path: string, deps: AppDeps
   if (request.method === 'POST' && (path === '/videos' || path === '/videos/tag')) {
     return json({ detail: 'Use the direct upload flow in the Spotted interface.' }, 403);
   }
-  if (request.method === 'POST' && path === '/videos/uploads' && !deps.geminiConfigured) {
-    return json({ detail: 'Video analysis is being configured. Please try uploading later.' }, 503);
-  }
   // /search is budgeted too: unlike EC2's local model, each search spends Workers AI neurons.
   const operation = request.method === 'POST' && path === '/videos/uploads' ? 'upload'
     : (request.method === 'POST' && path === '/query') || (request.method === 'GET' && path === '/search') ? 'query' : null;
@@ -228,6 +231,8 @@ export async function publicBudget(request: Request, path: string, deps: AppDeps
 
 // ---------------------------------------------------------------- handlers
 
+export const dailyVideosText = (s: Settings) => `You've added today's ${s.guestDailyVideos} videos. You can add more after midnight UTC.`;
+
 async function createUpload(request: Request, deps: AppDeps, user: User) {
   const db = need(deps.db, 'Database is not configured');
   const presigner = deps.presigner;
@@ -241,6 +246,7 @@ async function createUpload(request: Request, deps: AppDeps, user: User) {
   if (!existing && user.role !== 'owner') {
     const reason = libraryReason(await store.libraryUsage(db, user.id), body.size_bytes, guestLimits(deps.settings));
     if (reason) throw new HttpError(reason.status, reason.detail);
+    if (!(await reserve(db, `video:${user.id}`, deps.settings.guestDailyVideos, undefined, key))) throw new HttpError(429, dailyVideosText(deps.settings));
   }
   const job = existing ?? await store.createVideo(db, { userId: user.id, filename: body.filename, contentType: body.content_type, size: body.size_bytes, displayName: body.display_name, idempotencyKey: key });
   let url: string;
@@ -488,12 +494,18 @@ async function queryVideos(request: Request, deps: AppDeps, user: User) {
       evidence: { kind: evidence.kind, at: clock(evidence.timestamp_seconds), text: String(evidence.description ?? '').slice(0, 1500) } };
   });
   response.answer = `Found ${items.length} matching video(s). Review the evidence below.`;
+  const llm = await userLlm(deps, user).catch(() => null);
+  if (!llm) {
+    // A guest without their own key: retrieval only, never the owner's key.
+    if (user.id !== OWNER_ID) response.answer_warning = 'Add your API key in Settings to get a written answer. Showing retrieved matches.';
+    else response.answer_warning = 'Answer generation was unavailable; showing retrieved matches.';
+    return json(response);
+  }
   try {
-    const gemini = need(deps.gemini, 'no model');
-    const { value, usage } = await gemini.answer(q, candidates);
+    const { value, usage } = await llm.answer(q, candidates);
     response.answer = validateAnswer(value, items.length);
-    response.answer_source = 'gemini';
-    response.answer_model = gemini.modelName;
+    response.answer_source = llm.provider === 'gemini' && user.id === OWNER_ID ? 'gemini' : 'llm';
+    response.answer_model = llm.modelName;
     if (usage) response.answer_usage = { prompt_tokens: usage.promptTokenCount ?? null, output_tokens: usage.candidatesTokenCount ?? null,
       thought_tokens: usage.thoughtsTokenCount ?? null, total_tokens: usage.totalTokenCount ?? null };
   } catch {
@@ -667,9 +679,101 @@ async function me(request: Request, deps: AppDeps, user: User | null) {
     const day = new Date().toISOString().slice(0, 10);
     const searches = await deps.db.prepare('SELECT count FROM usage_counters WHERE day=?1 AND operation=?2').bind(day, `query:${user.id}`).first<{ count: number }>();
     limits = { videos: { used: usage.videos, max: lim.maxVideos }, bytes: { used: usage.bytes, max: lim.maxBytes },
-      searches_today: { used: Number(searches?.count ?? 0), max: lim.dailySearches } };
+      searches_today: { used: Number(searches?.count ?? 0), max: lim.dailySearches },
+      videos_today: { used: Number((await deps.db.prepare('SELECT count FROM usage_counters WHERE day=?1 AND operation=?2').bind(day, `video:${user.id}`).first<{ count: number }>())?.count ?? 0), max: deps.settings.guestDailyVideos }, max_video_seconds: deps.settings.guestMaxVideoSeconds };
   }
-  return json({ signed_in: true, user, limits });
+  // Whether this person's videos can be analysed: the owner's run on the server key, a guest's on their own.
+  const key = user.id !== OWNER_ID && deps.db ? await keyInfo(deps.db, user.id) : null;
+  const llm = user.id === OWNER_ID ? { source: 'server', ready: Boolean(deps.gemini) }
+    : { source: 'own', ready: Boolean(key && key.status !== 'invalid'), provider: key?.provider ?? null, model: key?.model ?? null, audio: key ? PROVIDERS[key.provider as Provider]?.audio ?? false : false };
+  return json({ signed_in: true, user, limits, llm });
+}
+
+// ---------------------------------------------------------------- bring your own LLM key
+
+/** The LLM a person's searches and videos use: the owner -> the server key; a guest -> their own key, or null. */
+export async function userLlm(deps: AppDeps, user: User, anyStatus = false): Promise<Llm | null> {
+  if (user.id === OWNER_ID) return deps.gemini;
+  if (!deps.db) return null;
+  return storedLlm({ db: deps.db, encKey: deps.encKey ?? null, serverKey: null, serverModel: '', fetcher: deps.llmFetch, referer: deps.origins?.[0] }, user.id, anyStatus);
+}
+
+/** What the settings panel shows. The key itself never leaves the server: provider, model and last 4 only. */
+async function llmSettings(deps: AppDeps, user: User) {
+  const owner = user.id === OWNER_ID;
+  return {
+    owner, server_key: owner ? Boolean(deps.gemini) : false, server_model: owner ? deps.gemini?.modelName ?? null : null,
+    available: Boolean(deps.encKey), key: !owner && deps.db ? await keyInfo(deps.db, user.id) : null,
+    providers: Object.values(PROVIDERS).map((p) => ({ id: p.id, label: p.label, default_model: p.defaultModel, audio: p.audio, key_hint: p.keyHint })),
+  };
+}
+
+/** A failed key check as a message for the person (never containing the key). */
+function keyProblem(error: unknown, label: string): string {
+  if (error instanceof TaggerError) {
+    if (error.auth) return `${label} rejected this key.`;
+    if (error.quota) return `${label} says this key is out of quota or rate-limited. Check its billing or limits, then try again.`;
+    if (error.status === 503 && /model is not available/.test(error.message)) return `${label} doesn't offer that model to this key. Check the model name.`;
+    if (error.retryable) return `${label} could not be reached. Try again in a minute.`;
+    return `${label} did not accept the test request. Check the key and the model name.`;
+  }
+  return `${label} did not accept the test request. Check the key and the model name.`;
+}
+
+/** Wake this person's videos that wait for a key (or wait on the old key's quota). */
+async function resumeVideos(deps: AppDeps, userId: string) {
+  if (!deps.db || !deps.videos) return;
+  const { results } = await deps.db.prepare("SELECT id FROM videos WHERE user_id=?1 AND status IN ('pending','processing') LIMIT 100").bind(userId).all<{ id: string }>();
+  for (const { id } of results) await videoStub(deps.videos, id).resume(id).catch((e: Error) => console.warn('resume failed', id, e?.message));
+}
+
+/** PUT /settings/llm {provider, model?, key?}: check the key with one cheap call, then store it sealed. */
+async function putLlmKey(request: Request, deps: AppDeps, user: User) {
+  if (user.id === OWNER_ID) throw new HttpError(409, "The owner's library uses the server's Gemini key.");
+  const db = need(deps.db, 'Database is not configured');
+  const encKey = need(deps.encKey, 'API keys cannot be stored on this server yet');
+  const body = await readJson(request);
+  const provider = body?.provider;
+  if (!isProvider(provider)) throw new HttpError(422, 'Choose a provider: Gemini, OpenAI, Anthropic or OpenRouter');
+  const model = cleanModel(body.model, provider);
+  if (!model) throw new HttpError(422, 'That model name has characters a model id never has');
+  let key = body.key === undefined || body.key === '' ? null : cleanKey(body.key);
+  if (body.key !== undefined && body.key !== '' && !key) throw new HttpError(422, 'That does not look like an API key');
+  if (!key) {
+    // Changing only the model keeps the stored key, if it is for the same provider.
+    const stored = await openKey(db, encKey, user.id);
+    if (!stored || stored.provider !== provider) throw new HttpError(422, 'Paste your API key');
+    key = stored.key;
+  }
+  const label = PROVIDERS[provider].label;
+  try {
+    await makeLlm(provider, key, model, deps.llmFetch, deps.origins?.[0]).ping();
+  } catch (error) {
+    throw new HttpError(422, keyProblem(error, label));
+  }
+  await saveKey(db, encKey, user.id, provider, model, key);
+  deps.waitUntil(resumeVideos(deps, user.id));
+  return json(await llmSettings(deps, user));
+}
+
+/** POST /settings/llm/test: the same one-call check on the stored key; records the result. */
+async function testLlmKey(deps: AppDeps, user: User) {
+  if (user.id === OWNER_ID) throw new HttpError(409, "The owner's library uses the server's Gemini key.");
+  const db = need(deps.db, 'Database is not configured');
+  const llm = await userLlm(deps, user, true);
+  if (!llm) throw new HttpError(404, 'No API key saved');
+  const label = PROVIDERS[llm.provider].label;
+  try {
+    await llm.ping();
+  } catch (error) {
+    const message = keyProblem(error, label);
+    if (error instanceof TaggerError && error.auth) await markKey(db, user.id, 'invalid', message);
+    return json({ ok: false, detail: message, settings: await llmSettings(deps, user) });
+  }
+  const wasInvalid = (await keyInfo(db, user.id))?.status === 'invalid';
+  await markKey(db, user.id, 'ok', null);
+  if (wasInvalid) deps.waitUntil(resumeVideos(deps, user.id));
+  return json({ ok: true, detail: `${label} accepted the key.`, settings: await llmSettings(deps, user) });
 }
 
 /** PUT /drive/folder {"folder": "<id or URL>"}: sync this folder (replaces any previous one). The owner only. */
@@ -789,6 +893,15 @@ export async function handle(request: Request, deps: AppDeps): Promise<Response>
       if (deps.library) await libraryStub(deps.library, user.id).poke(user.id);
       return json({ status: 'syncing' }, 202);
     }
+    if (path === '/settings/llm') {
+      if (method === 'GET') return json(await llmSettings(deps, user));
+      if (method === 'PUT') return await putLlmKey(request, deps, user);
+      if (method === 'DELETE') {
+        if (deps.db) await deleteKey(deps.db, user.id);
+        return json(await llmSettings(deps, user));
+      }
+    }
+    if (method === 'POST' && path === '/settings/llm/test') return await testLlmKey(deps, user);
     const limited = await publicBudget(request, path, deps, user);
     if (limited) return limited;
 

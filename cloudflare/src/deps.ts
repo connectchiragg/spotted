@@ -17,11 +17,12 @@ export function build(env: Env, waitUntil: (p: Promise<unknown>) => void): AppDe
     bucket: env.VIDEOS ?? null,
     index: env.VECTORIZE ?? null,
     presigner: r2Presigner(env),
+    // The owner's key only; guests' searches use their own key (keys.ts) or answer from retrieval alone.
     gemini: env.GEMINI_API_KEY ? new Gemini(env.GEMINI_API_KEY, config.geminiModel) : null,
+    encKey: env.TOKEN_ENC_KEY || null,
     embedder: env.AI ? workersAiEmbedder(env.AI, config.embeddingModel) : null,
     reranker: env.AI ? workersAiReranker(env.AI, config.rerankModel) : null,
     settings: config,
-    geminiConfigured: Boolean(env.GEMINI_API_KEY),
     assets: env.ASSETS,
     videos: env.VIDEO ?? null,
     library: env.LIBRARY ?? null,

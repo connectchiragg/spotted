@@ -10,9 +10,12 @@
  *       frames     the chosen frames at up to 1024 px -> R2 (also the thumbnails)
  *       transcribe Workers AI Whisper (the video directly, or 60 s M4A chunks); the first
  *                  SOUND_MAX_S of audio is kept in R2 for the summarize call's sound tags
- *       describe   Gemini on batches of frames -> one paragraph per frame
- *       summarize  Gemini on the paragraphs + transcript + that audio -> summary, tags, vocabulary
+ *       describe   the LLM on batches of frames -> one paragraph per frame
+ *       summarize  the LLM on the paragraphs + transcript + that audio -> summary, tags, vocabulary
  *                  labels and sound tags (src/labels.ts)
+ *     The LLM is the owner's server Gemini key for the owner's videos, and the guest's own key
+ *     (src/keys.ts) for a guest's. A guest without a key waits before the first step
+ *     (needs_key, no alarm) until saving a key calls resume().
  *       index      bge-m3 vectors (summary, transcript windows, frames) -> Vectorize
  *   - it PUSHES status to the video's viewers over hibernatable WebSockets
  *     (GET /videos/:id/ws), so an idle viewer costs no DO duration.
@@ -34,7 +37,9 @@ import { DurableObject } from 'cloudflare:workers';
 import { videoState } from './api';
 import { Env, settings, Settings } from './env';
 import { changeScores, Candidate, mp4Duration, Pick, selectFrames, spriteTiles, spriteWindows, tileTime } from './frames';
-import { FrameDescription, Gemini, PROMPT_VERSION, Segment, Tag, TaggerError, TokenUsage } from './gemini';
+import { FrameDescription, PROMPT_VERSION, Segment, Tag, TaggerError, TokenUsage } from './gemini';
+import { KEY_REJECTED, llmFor, markKey, NEEDS_KEY } from './keys';
+import { Llm } from './llm';
 import { d1TokenStore, Google, GoogleError } from './google';
 import { MediaError, mediaBinding, MediaPort, Transcriber, workersAiWhisper } from './media';
 import { getVideo, nowIso, Video } from './store';
@@ -93,7 +98,9 @@ export interface IngestState {
   transcribed: boolean;
   described: number; // frames described so far
   summarized: boolean;
-  /** The SOUND_MAX_S M4A for sound tags: stored in R2, or none (no audio track). Absent on older states. */
+  /** A guest's video waits for their own API key (none saved, or the provider rejected it). No alarm is set. */
+  needs_key?: boolean;
+  /** The SOUND_MAX_S M4A for sound tags: stored in R2, or none (no audio track, or a provider that takes no audio). */
   sound?: 'stored' | 'none';
   usage: { gemini_calls: number; prompt_tokens: number; output_tokens: number };
   indexed: { possible_duplicate: unknown } | null;
@@ -109,7 +116,12 @@ export interface VideoDeps {
   index: VectorizeIndex;
   media: MediaPort;
   transcriber: Transcriber;
-  gemini: Gemini;
+  /** The LLM for describe/summarize (tests inject it; production resolves it per run with llmFor). */
+  llm?: Llm | null;
+  /** Production: the video owner's LLM (the owner -> the server key, a guest -> their own key, or null). */
+  llmFor?: (userId: string) => Promise<Llm | null>;
+  /** Set while running a guest's video on their own key: the guest's user id. */
+  keyUser?: string | null;
   embedder: Embedder;
   google: Google | null;
   /** The Google client of a video's owner (production); tests inject `google` instead. */
@@ -170,6 +182,7 @@ export class VideoDO extends DurableObject<Env> {
       return state;
     }
     if (state.video_id !== videoId) throw new Error('Video id does not match this object');
+    if (state.needs_key) return state; // waits for the guest's key: resume() wakes it, a status read must not
     if (!this.terminal(state) && this.staleQuotaWait(state)) {
       state = await this.save({ ...state, next_retry_at: null, quota_model: null });
       await this.ctx.storage.setAlarm(Date.now());
@@ -200,6 +213,21 @@ export class VideoDO extends DurableObject<Env> {
     const state = await this.start(videoId, notBefore);
     if (old) await this.ctx.storage.put('state', { ...state, version: old + 1 }); // keep versions increasing for viewers
     return (await this.load())!;
+  }
+
+  /**
+   * The owner of this video saved (or fixed) their API key: run now. Clears a wait for a key and
+   * a quota wait on the old key. Idempotent; finished videos are left alone.
+   */
+  async resume(videoId: string): Promise<boolean> {
+    if (await this.isPurged()) return false;
+    const state = await this.load();
+    if (!state || state.video_id !== videoId || this.terminal(state)) return false;
+    if (!state.needs_key && !state.next_retry_at) return false;
+    await this.commit({ ...state, needs_key: false, next_retry_at: null, quota_model: null, quota_waits: 0, quota_since: null, last_error: null,
+      progress: { stage: 'Queued', percent: state.progress?.percent ?? 5, eta_seconds: null } }, 'status', {});
+    await this.ctx.storage.setAlarm(Date.now());
+    return true;
   }
 
   private currentModel(videoId: string): string | null {
@@ -283,16 +311,32 @@ export class VideoDO extends DurableObject<Env> {
         console.log('VideoDO: purged orphaned actor', state.video_id);
         return;
       }
+      let deps: VideoDeps | null = null;
       while (state && !this.terminal(state)) {
+        if (state.needs_key) return; // resume() re-arms
         if (state.next_retry_at && state.next_retry_at > Date.now() && !this.staleQuotaWait(state)) {
           await this.ctx.storage.setAlarm(state.next_retry_at);
           return;
         }
-        const deps = this.deps(state.video_id);
         if (!deps) {
-          console.warn('VideoDO: ingestion bindings or GEMINI_API_KEY missing; retrying in 10 min', state.video_id);
-          await this.ctx.storage.setAlarm(Date.now() + 600_000);
-          return;
+          const base = this.deps(state.video_id);
+          if (!base) {
+            console.warn('VideoDO: ingestion bindings missing; retrying in 10 min', state.video_id);
+            await this.ctx.storage.setAlarm(Date.now() + 600_000);
+            return;
+          }
+          // Whose LLM pays: the owner's server key for the owner, the guest's own key for a guest.
+          const resolved = await this.llmOf(base, state);
+          if (!resolved.llm) {
+            if (!resolved.keyUser) {
+              console.warn('VideoDO: GEMINI_API_KEY missing; retrying in 10 min', state.video_id);
+              await this.ctx.storage.setAlarm(Date.now() + 600_000);
+              return;
+            }
+            await this.waitForKey(base, state, NEEDS_KEY); // nothing runs (no copy, no Whisper) until the guest adds a key
+            return;
+          }
+          deps = { ...base, llm: resolved.llm, keyUser: resolved.keyUser };
         }
         const next = await this.runStep(deps, state);
         if (next === 'wait') return; // the step set its own alarm
@@ -327,6 +371,11 @@ export class VideoDO extends DurableObject<Env> {
       if (error instanceof EvictionError || error instanceof PurgedError) throw error;
       state = (await this.load()) ?? state; // keep per-item progress saved before the error
       if (error instanceof SkipError) return this.finish(deps, state, 'skipped', error.message);
+      if (error instanceof TaggerError && error.auth && deps.keyUser) {
+        // The guest's own key was rejected: mark it, and wait for them to fix it (not a failure).
+        await markKey(deps.db, deps.keyUser, 'invalid', KEY_REJECTED).catch(() => {});
+        return this.waitForKey(deps, { ...state, attempts: Math.max(0, state.attempts - 1) }, KEY_REJECTED);
+      }
       const { message, permanent, quota, retryAfter, model } = describeError(error, state, deps);
       if (quota) {
         // A rate/quota limit is not a failure: refund this try (it was counted before the call so
@@ -349,6 +398,22 @@ export class VideoDO extends DurableObject<Env> {
       progress: { stage: 'Waiting to retry', percent: state.progress?.percent ?? 0, eta_seconds: Math.round(delay / 1000) } },
     'status', { retry_at: new Date(retryAt).toISOString() }, deps);
     await this.ctx.storage.setAlarm(retryAt);
+    return 'wait';
+  }
+
+  /** Who pays for this video's LLM calls; `keyUser` is set for a guest (whose own key it must be). */
+  private async llmOf(deps: VideoDeps, state: IngestState): Promise<{ llm: Llm | null; keyUser: string | null }> {
+    if (!deps.llmFor) return { llm: deps.llm ?? null, keyUser: deps.keyUser ?? null };
+    const userId = (await getVideo(deps.db, state.video_id))?.user_id ?? 'owner';
+    return { llm: await deps.llmFor(userId), keyUser: userId === 'owner' ? null : userId };
+  }
+
+  /** A visible wait for the guest's API key: no alarm; resume() (on saving a key) continues. */
+  private async waitForKey(deps: VideoDeps, state: IngestState, message: string): Promise<'wait'> {
+    await this.ctx.storage.deleteAlarm();
+    if (state.needs_key && state.last_error === message) return 'wait';
+    await this.commit({ ...state, needs_key: true, next_retry_at: null, last_error: message,
+      progress: { stage: 'Waiting for your API key', percent: state.progress?.percent ?? 5, eta_seconds: null } }, 'status', { needs_key: true }, deps);
     return 'wait';
   }
 
@@ -502,7 +567,9 @@ export class VideoDO extends DurableObject<Env> {
       if (hint > 0) duration = hint;
     }
     if (duration === null || !(duration > 0)) throw new PermanentError('Could not read the video duration; use MP4 or MOV');
-    if (duration > deps.settings.maxVideoSeconds) throw new SkipError(`Video is longer than ${Math.round(deps.settings.maxVideoSeconds / 60)} minutes; skipped`);
+    // Guests: a shorter cap, so Whisper on their videos stays inside the free Workers AI allowance.
+    const maxSeconds = (video.user_id ?? 'owner') === 'owner' ? deps.settings.maxVideoSeconds : Math.min(deps.settings.maxVideoSeconds, deps.settings.guestMaxVideoSeconds);
+    if (duration > maxSeconds) throw new SkipError(`Video is longer than ${Math.round(maxSeconds / 60)} minutes; skipped`);
     await deps.db.prepare('UPDATE videos SET duration_seconds=?2 WHERE id=?1').bind(video.id, duration).run();
     return this.advance(deps, { ...state, bytes: head.size, duration }, 'probe', 'select');
   }
@@ -564,7 +631,7 @@ export class VideoDO extends DurableObject<Env> {
             if (error instanceof MediaError && /9412/.test(error.message)) break;
             throw error;
           }
-          if (c === 0 && !state.sound) state = await this.keepSound(deps, state, audio);
+          if (c === 0 && !state.sound && this.hearsAudio(deps)) state = await this.keepSound(deps, state, audio);
           const part = (await deps.transcriber.transcribe(audio, 'audio/mp4')).map((s) => ({ ...s, start: s.start + start, end: s.end + start }));
           segments = [...segments, ...part];
           await this.ctx.storage.put('transcript', segments);
@@ -574,6 +641,7 @@ export class VideoDO extends DurableObject<Env> {
       state = await this.save({ ...state, transcribed: true });
       this.hook(state, 'transcribe:recorded');
     }
+    if (!state.sound && !this.hearsAudio(deps)) state = await this.save({ ...state, sound: 'none' }); // no sound tags for this provider
     if (!state.sound) {
       // Small videos went to Whisper whole: cut the sound-tag audio now (one Media call).
       state = await this.key(state, 'sound');
@@ -585,6 +653,11 @@ export class VideoDO extends DurableObject<Env> {
       }
     }
     return this.advance(deps, state, 'transcribe', 'describe');
+  }
+
+  /** Only Gemini hears audio; other providers get no soundtrack (and no Media call is spent on one). */
+  private hearsAudio(deps: VideoDeps): boolean {
+    return deps.llm ? deps.llm.audio : true;
   }
 
   /** Record the sound-tag audio in R2 before anything else uses it. */
@@ -607,7 +680,7 @@ export class VideoDO extends DurableObject<Env> {
         if (!o) throw new PermanentError('A stored frame is missing');
         return { index: p.index, t: p.t, jpeg: new Uint8Array(await o.arrayBuffer()), transcript: speechNear(transcript, p.t) };
       }));
-      const { descriptions: got, usage } = await deps.gemini.describeFrames(inputs, descriptions.at(-1)?.description ?? null);
+      const { descriptions: got, usage } = await deps.llm!.describeFrames(inputs, descriptions.at(-1)?.description ?? null);
       descriptions = [...descriptions, ...got];
       await this.ctx.storage.put('descriptions', descriptions); // the paid-for result, before moving on
       state = await this.save({ ...state, described: descriptions.length, usage: addUsage(state.usage, usage),
@@ -626,7 +699,7 @@ export class VideoDO extends DurableObject<Env> {
       // The soundtrack is optional: a state from before sound tags, or an expired object, sends none.
       const sound = state.sound === 'stored' ? await deps.bucket.get(soundKey(state.video_id)) : null;
       const audio = sound ? new Uint8Array(await sound.arrayBuffer()) : null;
-      const out = await deps.gemini.summarize(descriptions.map((d) => ({ ...d, t: times.get(d.frame_index) ?? 0 })), transcript, state.duration!, audio);
+      const out = await deps.llm!.summarize(descriptions.map((d) => ({ ...d, t: times.get(d.frame_index) ?? 0 })), transcript, state.duration!, audio);
       await this.ctx.storage.put('summary', { summary: out.summary, tags: out.tags, labels: out.labels, sounds: out.sounds });
       state = await this.save({ ...state, summarized: true, usage: addUsage(state.usage, out.usage) });
       this.hook(state, 'summarize:recorded');
@@ -659,7 +732,7 @@ export class VideoDO extends DurableObject<Env> {
       sampled_timestamps: picks.map((p) => p.t), frame_scores: picks.map((p) => p.score), thumbs: state.frames_done.slice().sort((a, b) => a - b),
       transcript: transcript.slice(0, 2000), transcript_windows: transcriptWindows(transcript, state.duration ?? 0),
       duration_seconds: state.duration, candidates_scanned: state.candidates,
-      model: deps.settings.geminiModel, transcription_model: deps.transcriber.model, embedding_model: deps.embedder.model,
+      model: deps.llm?.modelName ?? deps.settings.geminiModel, ...(deps.llm && deps.llm.provider !== 'gemini' ? { llm_provider: deps.llm.provider } : {}), transcription_model: deps.transcriber.model, embedding_model: deps.embedder.model,
       prompt_version: PROMPT_VERSION, usage: state.usage,
       ...(state.indexed ? { possible_duplicate: state.indexed.possible_duplicate } : {}),
     };
@@ -721,7 +794,7 @@ export class VideoDO extends DurableObject<Env> {
   /** Mirror the state into D1 `videos`; a write carrying an older state_version never lands. */
   private async syncD1(db: D1Database, state: IngestState, deps?: VideoDeps) {
     const status = state.step === 'done' ? 'completed' : state.step === 'failed' ? 'failed' : state.step === 'skipped' ? 'skipped'
-      : state.next_retry_at || state.version <= 1 ? 'pending' : 'processing';
+      : state.needs_key || state.next_retry_at || state.version <= 1 ? 'pending' : 'processing';
     const result = state.step === 'done' && deps ? JSON.stringify(await this.resultOf(deps, state)) : null;
     await db.prepare(
       `UPDATE videos SET status=?1, error=?2, attempts=MAX(attempts, ?3), progress=?4, result=COALESCE(?5, result),
@@ -813,11 +886,13 @@ export class VideoDO extends DurableObject<Env> {
     const injected = VideoDO.testDeps.get(videoId);
     if (injected) return injected();
     const env = this.env;
-    if (!env.DB || !env.VIDEOS || !env.VECTORIZE || !env.AI || !env.MEDIA || !env.GEMINI_API_KEY) return null;
+    if (!env.DB || !env.VIDEOS || !env.VECTORIZE || !env.AI || !env.MEDIA) return null;
     const config = settings(env);
+    const db = env.DB;
+    const ctx = { db, encKey: env.TOKEN_ENC_KEY || null, serverKey: env.GEMINI_API_KEY || null, serverModel: config.geminiModel, referer: env.PUBLIC_ORIGIN };
     return {
-      db: env.DB, bucket: env.VIDEOS, index: env.VECTORIZE, media: mediaBinding(env.MEDIA, env.VIDEOS),
-      transcriber: workersAiWhisper(env.AI, config.whisperModel), gemini: new Gemini(env.GEMINI_API_KEY, config.geminiModel),
+      db, bucket: env.VIDEOS, index: env.VECTORIZE, media: mediaBinding(env.MEDIA, env.VIDEOS),
+      transcriber: workersAiWhisper(env.AI, config.whisperModel), llmFor: (userId) => llmFor(ctx, userId),
       embedder: workersAiEmbedder(env.AI, config.embeddingModel), google: null, googleFor: (userId) => googleClient(env, userId), settings: config,
     };
   }
@@ -845,7 +920,9 @@ function addUsage(total: IngestState['usage'], usage: TokenUsage | null): Ingest
 /** Classify any step error: permanent or retryable, and whether it is a provider quota (429). */
 function describeError(error: unknown, state: IngestState, deps: VideoDeps) {
   if (error instanceof TaggerError) {
-    return { message: error.message, permanent: !error.retryable, quota: error.quota, retryAfter: error.retryAfterSeconds, model: deps.settings.geminiModel };
+    // A guest's quota wait is tagged 'own:' so a change of the server's GEMINI_MODEL never voids it.
+    const model = deps.keyUser ? `own:${deps.llm?.provider}:${deps.llm?.modelName}` : deps.llm?.modelName ?? deps.settings.geminiModel;
+    return { message: error.message, permanent: !error.retryable, quota: error.quota, retryAfter: error.retryAfterSeconds, model };
   }
   if (error instanceof GoogleError) {
     return { message: error.message, permanent: !error.retryable, quota: error.quota, retryAfter: error.retryAfterSeconds, model: 'google' };

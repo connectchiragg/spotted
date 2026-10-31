@@ -3,6 +3,8 @@ export interface VideoStub {
   start(videoId: string, notBefore?: number): Promise<{ version: number; step: string; next_retry_at?: number | null }>;
   restart(videoId: string, notBefore?: number): Promise<{ version: number; step: string }>;
   reindex(videoId: string): Promise<boolean>;
+  /** The video's owner saved an API key: run now if it was waiting for one (or on the old key's quota). */
+  resume(videoId: string): Promise<boolean>;
   purge(videoId: string): Promise<{ gemini_files_deleted: string[] }>;
   purgeIfOrphan(videoId: string): Promise<boolean>;
   getState(): Promise<Record<string, any> | null>;

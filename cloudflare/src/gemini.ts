@@ -1,5 +1,6 @@
 /**
- * Gemini (default gemini-3.1-flash-lite, free tier 15 RPM / 500 RPD) over plain fetch, on
+ * The LLM calls, shared by every provider (src/llm.ts adds OpenAI, Anthropic and OpenRouter), and
+ * Gemini itself (default gemini-3.1-flash-lite, free tier 15 RPM / 500 RPD) over plain fetch, on
  * IMAGES: the Worker extracts frames itself (Media Transformations), so Gemini never sees
  * the video file. Three calls:
  *   describeFrames  a batch of up to DESCRIBE_BATCH JPEGs -> one detailed paragraph per frame
@@ -17,7 +18,9 @@ export const PROMPT_VERSION = 'cf-frames-v4-labels';
 export class TaggerError extends Error {
   /** A 429 rate/quota limit: waited out without using up the step's failure attempts. */
   quota = false;
-  /** retryAfterSeconds: Gemini's RetryInfo.retryDelay on 429, when given. */
+  /** The provider rejected the API key (401/403). */
+  auth = false;
+  /** retryAfterSeconds: Gemini's RetryInfo.retryDelay (or a Retry-After header) on 429, when given. */
   constructor(message: string, public status = 502, public retryable = false, public retryAfterSeconds: number | null = null) {
     super(message);
   }
@@ -32,6 +35,7 @@ export function retryDelaySeconds(body: any): number | null {
   return null;
 }
 
+/** Token counts, in Gemini's names; other providers map theirs onto these. */
 export interface TokenUsage {
   promptTokenCount?: number;
   candidatesTokenCount?: number;
@@ -48,17 +52,18 @@ function fail(message: string): never {
   throw new TaggerError(message, 502, false);
 }
 
-function classify(status: number): TaggerError {
-  if (status === 504) return new TaggerError('Gemini request timed out', 504, true);
-  if ([500, 502, 503].includes(status)) return new TaggerError('Gemini is temporarily unavailable; retry later', 503, true);
+/** An HTTP status from any provider as a TaggerError. `label` names the provider in the message. */
+export function classify(status: number, label = 'Gemini'): TaggerError {
+  if (status === 504) return new TaggerError(`${label} request timed out`, 504, true);
+  if ([500, 502, 503, 529].includes(status)) return new TaggerError(`${label} is temporarily unavailable; retry later`, 503, true);
   // Quota/rate limits are waited out; the caller backs off by retryDelay.
-  if (status === 429) return Object.assign(new TaggerError('Gemini quota exceeded; analysis will retry later', 503, true), { quota: true });
-  if (status === 401 || status === 403) return new TaggerError('Gemini rejected the configured API credentials', 503, false);
-  if (status === 404) return new TaggerError('Configured Gemini model is not available', 503, false);
-  return new TaggerError('Gemini request failed; check model availability and provider status', 502, false);
+  if (status === 429) return Object.assign(new TaggerError(`${label} quota exceeded; analysis will retry later`, 503, true), { quota: true });
+  if (status === 401 || status === 403) return Object.assign(new TaggerError(`${label} rejected the configured API credentials`, 503, false), { auth: true });
+  if (status === 404) return new TaggerError(`Configured ${label} model is not available`, 503, false);
+  return new TaggerError(`${label} request failed; check model availability and provider status`, 502, false);
 }
 
-function base64(bytes: Uint8Array): string {
+export function base64(bytes: Uint8Array): string {
   let s = '';
   for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(s);
@@ -140,81 +145,132 @@ export function validateSummary(raw: any, frameCount: number): SummaryResult {
   return { summary, tags: [...merged.values()], labels, sounds: validateLabels(raw.sounds, 'sound', 12) };
 }
 
-export class Gemini {
-  // The default wraps the global fetch: calling it as `this.fetcher(...)` would bind `this` to
-  // the Gemini instance, which workerd rejects with "Illegal invocation".
-  constructor(private apiKey: string, private model: string, private fetcher: typeof fetch = (input, init) => fetch(input, init)) {}
+/** Provider-neutral request content: text, a JPEG frame, or M4A audio (only providers with `audio` get audio). */
+export type Part = { text: string } | { image: Uint8Array } | { audio: Uint8Array };
+
+/** The describe call's content: the previous paragraph, then each frame's timestamp, nearby speech and JPEG. */
+export function describeParts(frames: FrameInput[], previous: string | null): Part[] {
+  const parts: Part[] = [];
+  if (previous) parts.push({ text: `Description of the frame just before this batch (for "what changed"): ${previous}` });
+  for (const f of frames) {
+    parts.push({ text: `Frame index ${f.index} at ${f.t.toFixed(1)} s.${f.transcript ? ` Speech near this moment: "${f.transcript.slice(0, 400)}"` : ''}` });
+    parts.push({ image: f.jpeg });
+  }
+  return parts;
+}
+
+/** The summary call's content: frame paragraphs + transcript, and the soundtrack when given. */
+export function summaryParts(frames: (FrameDescription & { t: number })[], transcript: Segment[], duration: number, audio: Uint8Array | null): Part[] {
+  const speech = transcript.map((s) => `[${s.start.toFixed(0)}s] ${s.text.trim()}`).join('\n').slice(0, 20000);
+  const visual = frames.map((f) => `Frame ${f.frame_index} at ${f.t.toFixed(1)} s: ${f.description}`).join('\n\n');
+  const parts: Part[] = [{ text: `Video duration: ${duration.toFixed(1)} s.\n\nFRAMES:\n${visual}\n\nTRANSCRIPT:\n${speech || '(no speech detected)'}` }];
+  if (audio?.length) parts.push({ text: 'SOUNDTRACK (audio from the start of the video):' }, { audio });
+  return parts;
+}
+
+/** The one-call key check: the cheapest request that proves the key and the model work. */
+export const PING_PROMPT = 'Reply with the JSON {"ok":true} and nothing else.';
+
+/** Model output as JSON; tolerates a ```json fence or text around one object (non-Gemini providers). */
+export function parseJson(text: string, label = 'Gemini'): any {
+  try {
+    return JSON.parse(text);
+  } catch { /* try the outermost object below */ }
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    try { return JSON.parse(text.slice(start, end + 1)); } catch { /* malformed */ }
+  }
+  return fail(`${label} returned malformed JSON`);
+}
+
+/**
+ * An LLM provider: the prompts, request content and validation are shared (this file); each
+ * provider only turns (system prompt, parts) into its own HTTP request and reads the text back.
+ */
+export abstract class LlmClient {
+  abstract readonly provider: 'gemini' | 'openai' | 'anthropic' | 'openrouter';
+  /** "Gemini", "OpenAI", ...: used in error messages people see. */
+  abstract readonly label: string;
+  /** Whether the provider hears audio (sound tags). Only Gemini does. */
+  abstract readonly audio: boolean;
+  constructor(protected apiKey: string, protected model: string, protected fetcher: typeof fetch = (input, init) => fetch(input, init)) {}
 
   get modelName() { return this.model; }
 
-  private async generate(body: unknown): Promise<{ text: string; usage: TokenUsage | null }> {
+  /** One request: system prompt + user parts -> the reply text (JSON asked for) and token usage. */
+  protected abstract generate(system: string, parts: Part[]): Promise<{ text: string; usage: TokenUsage | null }>;
+
+  /** POST with the provider's errors mapped to TaggerError (429 -> quota wait, 401/403 -> auth). */
+  protected async post(url: string, headers: Record<string, string>, body: unknown): Promise<any> {
     let response: Response;
     try {
-      response = await this.fetcher(`${API}/v1beta/models/${encodeURIComponent(this.model)}:generateContent`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': this.apiKey }, body: JSON.stringify(body),
-      });
+      response = await this.fetcher(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
     } catch (error) {
-      console.warn('gemini fetch failed', (error as Error)?.message);
-      throw new TaggerError('Could not connect to Gemini', 502, true);
+      console.warn(`${this.provider} fetch failed`, (error as Error)?.message); // never the key
+      throw new TaggerError(`Could not connect to ${this.label}`, 502, true);
     }
     if (!response.ok) {
-      const error = classify(response.status);
-      if (response.status === 429) error.retryAfterSeconds = retryDelaySeconds(await response.json().catch(() => null));
-      else await response.body?.cancel();
+      const error = classify(response.status, this.label);
+      if (response.status === 429) {
+        const header = Number(response.headers.get('retry-after'));
+        error.retryAfterSeconds = retryDelaySeconds(await response.json().catch(() => null)) ?? (Number.isFinite(header) && header > 0 ? Math.ceil(header) : null);
+      } else await response.body?.cancel();
       throw error;
     }
-    const json: any = await response.json();
-    const text = json?.candidates?.[0]?.content?.parts?.map((p: any) => p.text ?? '').join('') ?? '';
-    if (!text) throw new TaggerError('Gemini returned no response; it may have blocked the request', 502, false);
-    return { text, usage: json?.usageMetadata ?? null };
-  }
-
-  private static parse(text: string): any {
-    try {
-      return JSON.parse(text);
-    } catch {
-      return fail('Gemini returned malformed JSON');
-    }
-  }
-
-  static describeRequest(frames: FrameInput[], previous: string | null) {
-    const parts: any[] = [];
-    if (previous) parts.push({ text: `Description of the frame just before this batch (for "what changed"): ${previous}` });
-    for (const f of frames) {
-      parts.push({ text: `Frame index ${f.index} at ${f.t.toFixed(1)} s.${f.transcript ? ` Speech near this moment: "${f.transcript.slice(0, 400)}"` : ''}` });
-      parts.push({ inlineData: { mimeType: 'image/jpeg', data: base64(f.jpeg) } });
-    }
-    return { systemInstruction: { parts: [{ text: describePrompt() }] }, contents: [{ role: 'user', parts }],
-      generationConfig: { responseMimeType: 'application/json' } };
+    return response.json();
   }
 
   async describeFrames(frames: FrameInput[], previous: string | null): Promise<{ descriptions: FrameDescription[]; usage: TokenUsage | null }> {
-    const { text, usage } = await this.generate(Gemini.describeRequest(frames, previous));
-    return { descriptions: validateDescriptions(Gemini.parse(text), frames), usage };
+    const { text, usage } = await this.generate(describePrompt(), describeParts(frames, previous));
+    return { descriptions: validateDescriptions(parseJson(text, this.label), frames), usage };
   }
 
-  /** One call: the paragraphs + transcript (+ up to SOUND_MAX_S of the soundtrack as M4A) -> summary, tags, labels, sounds. */
-  static summaryRequest(frames: (FrameDescription & { t: number })[], transcript: Segment[], duration: number, audio: Uint8Array | null = null) {
-    const speech = transcript.map((s) => `[${s.start.toFixed(0)}s] ${s.text.trim()}`).join('\n').slice(0, 20000);
-    const visual = frames.map((f) => `Frame ${f.frame_index} at ${f.t.toFixed(1)} s: ${f.description}`).join('\n\n');
-    const parts: any[] = [{ text: `Video duration: ${duration.toFixed(1)} s.\n\nFRAMES:\n${visual}\n\nTRANSCRIPT:\n${speech || '(no speech detected)'}` }];
-    if (audio?.length) parts.push({ text: 'SOUNDTRACK (audio from the start of the video):' }, { inlineData: { mimeType: 'audio/mp4', data: base64(audio) } });
-    return { systemInstruction: { parts: [{ text: summaryPrompt(Boolean(audio?.length)) }] }, contents: [{ role: 'user', parts }],
-      generationConfig: { responseMimeType: 'application/json' } };
-  }
-
+  /** One call: the paragraphs + transcript (+ up to SOUND_MAX_S of the soundtrack as M4A, Gemini only) -> summary, tags, labels, sounds. */
   async summarize(frames: (FrameDescription & { t: number })[], transcript: Segment[], duration: number, audio: Uint8Array | null = null): Promise<SummaryResult & { usage: TokenUsage | null }> {
-    const { text, usage } = await this.generate(Gemini.summaryRequest(frames, transcript, duration, audio));
-    return { ...validateSummary(Gemini.parse(text), frames.length), usage };
+    const sound = this.audio && audio?.length ? audio : null;
+    const { text, usage } = await this.generate(summaryPrompt(Boolean(sound)), summaryParts(frames, transcript, duration, sound));
+    const result = validateSummary(parseJson(text, this.label), frames.length);
+    return { ...result, sounds: this.audio ? result.sounds : [], usage }; // no audio, no sound tags
   }
 
   async answer(query: string, candidates: unknown[]): Promise<{ value: unknown; usage: TokenUsage | null }> {
-    const { text, usage } = await this.generate({
-      systemInstruction: { parts: [{ text: ANSWER_PROMPT }] },
-      contents: [{ role: 'user', parts: [{ text: JSON.stringify({ query, candidates }) }] }],
-      generationConfig: { responseMimeType: 'application/json' },
-    });
-    return { value: JSON.parse(text), usage };
+    const { text, usage } = await this.generate(ANSWER_PROMPT, [{ text: JSON.stringify({ query, candidates }) }]);
+    return { value: parseJson(text, this.label), usage };
+  }
+
+  /** Validate the key and model with one tiny request; throws TaggerError (auth, quota, 404...). */
+  async ping(): Promise<void> {
+    await this.generate('You check that an API key works.', [{ text: PING_PROMPT }]);
+  }
+}
+
+export class Gemini extends LlmClient {
+  readonly provider = 'gemini' as const;
+  readonly label = 'Gemini';
+  readonly audio = true;
+  // The default fetcher wraps the global fetch: calling it as `this.fetcher(...)` would bind `this`
+  // to the instance, which workerd rejects with "Illegal invocation".
+
+  static body(system: string, parts: Part[]) {
+    const gemini = parts.map((p) => ('text' in p ? { text: p.text } : 'image' in p ? { inlineData: { mimeType: 'image/jpeg', data: base64(p.image) } }
+      : { inlineData: { mimeType: 'audio/mp4', data: base64(p.audio) } }));
+    return { systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts: gemini }], generationConfig: { responseMimeType: 'application/json' } };
+  }
+
+  static describeRequest(frames: FrameInput[], previous: string | null) {
+    return Gemini.body(describePrompt(), describeParts(frames, previous));
+  }
+
+  static summaryRequest(frames: (FrameDescription & { t: number })[], transcript: Segment[], duration: number, audio: Uint8Array | null = null) {
+    return Gemini.body(summaryPrompt(Boolean(audio?.length)), summaryParts(frames, transcript, duration, audio));
+  }
+
+  protected async generate(system: string, parts: Part[]): Promise<{ text: string; usage: TokenUsage | null }> {
+    const json = await this.post(`${API}/v1beta/models/${encodeURIComponent(this.model)}:generateContent`, { 'x-goog-api-key': this.apiKey }, Gemini.body(system, parts));
+    const text = json?.candidates?.[0]?.content?.parts?.map((p: any) => p.text ?? '').join('') ?? '';
+    if (!text) throw new TaggerError('Gemini returned no response; it may have blocked the request', 502, false);
+    return { text, usage: json?.usageMetadata ?? null };
   }
 }
 

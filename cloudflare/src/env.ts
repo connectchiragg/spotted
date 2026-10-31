@@ -10,13 +10,14 @@ export interface Env {
   MEDIA?: any;
 
   // Secrets (wrangler secret put): never in wrangler.jsonc or git.
+  /** The owner's Gemini key: used for the owner's library only. Guests bring their own key. */
   GEMINI_API_KEY?: string;
   /** Bearer token for DELETE /admin/videos/:id; without it the admin route does not exist. */
   ADMIN_TOKEN?: string;
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
   GOOGLE_CLIENT_SECRET?: string;
-  /** 64 hex chars: AES-GCM key that seals the Google refresh token in D1. */
+  /** 64 hex chars: AES-GCM key that seals Google refresh tokens and people's own LLM keys in D1. */
   TOKEN_ENC_KEY?: string;
 
   // Plain vars (wrangler.jsonc "vars").
@@ -53,6 +54,8 @@ export interface Env {
   GUEST_MAX_VIDEOS?: string;
   GUEST_MAX_MB?: string;
   GUEST_DAILY_SEARCHES?: string;
+  GUEST_DAILY_VIDEOS?: string;
+  GUEST_MAX_VIDEO_SECONDS?: string;
   IMPORT_STAGGER_S?: string;
   DRIVE_POLL_MINUTES?: string;
   DRIVE_LOOKBACK_MONTHS?: string;
@@ -91,6 +94,10 @@ export interface Settings {
   guestMaxVideos: number;
   guestMaxBytes: number;
   guestDailySearches: number;
+  /** Per guest: new videos (uploads and Photos picks) per UTC day. */
+  guestDailyVideos: number;
+  /** Per guest: longest video analysed (Whisper neurons scale with audio minutes). */
+  guestMaxVideoSeconds: number;
   importStaggerSeconds: number;
   drivePollMinutes: number;
   driveLookbackMonths: number;
@@ -136,6 +143,8 @@ export function settings(env: Env): Settings {
     guestMaxVideos: num(env.GUEST_MAX_VIDEOS, 20),
     guestMaxBytes: num(env.GUEST_MAX_MB, 500) * 1000 * 1000,
     guestDailySearches: num(env.GUEST_DAILY_SEARCHES, 30),
+    guestDailyVideos: num(env.GUEST_DAILY_VIDEOS, 5),
+    guestMaxVideoSeconds: num(env.GUEST_MAX_VIDEO_SECONDS, 180),
     importStaggerSeconds: num(env.IMPORT_STAGGER_S, 20),
     drivePollMinutes: num(env.DRIVE_POLL_MINUTES, DEFAULT_DRIVE_POLL_MINUTES),
     driveLookbackMonths: num(env.DRIVE_LOOKBACK_MONTHS, 24),
